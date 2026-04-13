@@ -1089,9 +1089,9 @@ impl<T: TaskRepository> TaskService<T> {
         // Note: we allow Aggregating, PhaseRunning, FanningOut because the normal
         // workflow flow calls transition_to_validating() BEFORE updating WorkflowState
         // to Verifying (the workflow engine does: transition_to_validating → write_state(Verifying)).
-        if let Some(ws_value) = task.context.custom.get("workflow_state") {
-            if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone()) {
-                if matches!(ws, WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }) {
+        if let Some(ws_value) = task.context.custom.get("workflow_state")
+            && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone())
+                && matches!(ws, WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }) {
                     tracing::warn!(
                         %task_id,
                         workflow_state = ?ws,
@@ -1107,8 +1107,6 @@ impl<T: TaskRepository> TaskService<T> {
                         ),
                     });
                 }
-            }
-        }
 
         task.transition_to(TaskStatus::Validating).map_err(|e| DomainError::InvalidStateTransition {
             from: task.status.as_str().to_string(),
@@ -1220,8 +1218,8 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         // Update workflow_state in context.custom if present
-        if let Some(ws_value) = task.context.custom.get("workflow_state") {
-            if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone()) {
+        if let Some(ws_value) = task.context.custom.get("workflow_state")
+            && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone()) {
                 let workflow_name = ws.workflow_name().to_string();
                 let new_ws = match new_status {
                     TaskStatus::Complete => Some(WorkflowState::Completed { workflow_name }),
@@ -1243,7 +1241,6 @@ impl<T: TaskRepository> TaskService<T> {
                     );
                 }
             }
-        }
 
         self.task_repo.update(&task).await?;
 
@@ -1292,6 +1289,11 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.publish_events(&events).await;
         Ok((task, events))
+    }
+
+    /// Delete a single task by ID.
+    pub async fn delete_task(&self, task_id: Uuid) -> DomainResult<()> {
+        self.task_repo.delete(task_id).await
     }
 
     /// Get task status counts.
@@ -1524,10 +1526,10 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 // Verifying (same check as transition_to_validating). This path
                 // is used by goal_processing direct execution when
                 // verify_on_completion is set.
-                if new_status == TaskStatus::Validating {
-                    if let Some(ws_value) = task.context.custom.get("workflow_state") {
-                        if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone()) {
-                            if matches!(ws, WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }) {
+                if new_status == TaskStatus::Validating
+                    && let Some(ws_value) = task.context.custom.get("workflow_state")
+                        && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone())
+                            && matches!(ws, WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }) {
                                 tracing::warn!(
                                     %task_id,
                                     workflow_state = ?ws,
@@ -1543,9 +1545,6 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                                     ),
                                 }.into());
                             }
-                        }
-                    }
-                }
 
                 task.transition_to(new_status).map_err(|e| {
                     DomainError::InvalidStateTransition {

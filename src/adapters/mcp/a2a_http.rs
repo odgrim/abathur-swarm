@@ -1078,9 +1078,9 @@ async fn handle_tasks_send(
 
     // Phase 1.4: If metadata contains "abathur:federation", route to the
     // FederationService instead of creating a local task.
-    if let Some(ref metadata) = params.metadata {
-        if let Some(federation_val) = metadata.get("abathur:federation") {
-            if let Some(result) = handle_federation_routing(
+    if let Some(ref metadata) = params.metadata
+        && let Some(federation_val) = metadata.get("abathur:federation")
+            && let Some(result) = handle_federation_routing(
                 &state,
                 &request.id,
                 federation_val,
@@ -1092,8 +1092,6 @@ async fn handle_tasks_send(
             }
             // If handle_federation_routing returns None, fall through to
             // normal task handling (e.g. unknown intent or no federation service).
-        }
-    }
 
     // Check if task exists (continue existing task) or create new.
     // Note: session tracking is intentionally omitted here — the sessions map
@@ -1489,16 +1487,14 @@ fn extract_title_description(federation_val: &Value, message: &A2AProtocolMessag
     for part in &message.parts {
         match part {
             MessagePart::Data { data, .. } => {
-                if title.is_empty() {
-                    if let Some(t) = data.get("title").and_then(|v| v.as_str()) {
+                if title.is_empty()
+                    && let Some(t) = data.get("title").and_then(|v| v.as_str()) {
                         title = t.to_string();
                     }
-                }
-                if description.is_empty() {
-                    if let Some(d) = data.get("description").and_then(|v| v.as_str()) {
+                if description.is_empty()
+                    && let Some(d) = data.get("description").and_then(|v| v.as_str()) {
                         description = d.to_string();
                     }
-                }
             }
             MessagePart::Text { text } => {
                 if title.is_empty() {
@@ -1576,9 +1572,9 @@ async fn handle_tasks_send_subscribe(
     }
 
     // If federation, attempt to delegate and track progress
-    if is_federation {
-        if let Some(ref federation_service) = state.federation_service {
-            if let Some(federation_val) = params
+    if is_federation
+        && let Some(ref federation_service) = state.federation_service
+            && let Some(federation_val) = params
                 .metadata
                 .as_ref()
                 .and_then(|m| m.get("abathur:federation"))
@@ -1627,8 +1623,6 @@ async fn handle_tasks_send_subscribe(
                     }
                 });
             }
-        }
-    }
 
     let heartbeat_interval =
         Duration::from_millis(state.config.heartbeat_interval_ms);

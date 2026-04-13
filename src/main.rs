@@ -29,6 +29,10 @@ async fn main() {
         Commands::Workflow(args) => abathur::cli::commands::workflow::execute(args, cli.json).await,
         Commands::Adapter(args) => abathur::cli::commands::adapter::execute(args, cli.json).await,
         Commands::Cron(args) => abathur::cli::commands::cron::execute(args, cli.json).await,
+        Commands::Completions { shell } => {
+            abathur::cli::print_completions(shell);
+            Ok(())
+        }
     };
 
     if let Err(err) = result {

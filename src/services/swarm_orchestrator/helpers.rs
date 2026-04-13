@@ -298,8 +298,8 @@ async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> 
                     .current_dir(repo_path)
                     .output()
                     .await;
-                if let Ok(r) = &rebase {
-                    if !r.status.success() {
+                if let Ok(r) = &rebase
+                    && !r.status.success() {
                         tracing::error!(
                             base_ref,
                             stderr = %String::from_utf8_lossy(&r.stderr),
@@ -329,7 +329,6 @@ async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> 
                         }
                         return false;
                     }
-                }
             }
             Ok(output) => {
                 tracing::error!(
@@ -1737,8 +1736,8 @@ where
 
     // Push merged base ref to remote so subsequent auto-ships and worktree
     // creations see the latest state.
-    if fetch_on_sync {
-        if !push_with_retry(repo_path, default_base_ref, 2).await {
+    if fetch_on_sync
+        && !push_with_retry(repo_path, default_base_ref, 2).await {
             tracing::error!(
                 root_task_id = %root_id,
                 commit_sha = %commit_sha,
@@ -1748,7 +1747,6 @@ where
             // Don't return None — the local commit is valid and the push
             // will be retried when the next auto-ship syncs.
         }
-    }
 
     let _ = event_tx.send(SwarmEvent::TaskMerged {
         task_id: root_id,

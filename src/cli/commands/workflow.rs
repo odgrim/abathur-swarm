@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
 use crate::cli::display::{
-    list_table, output, render_list, truncate_ellipsis, CommandOutput,
+    list_table, output, render_list, truncate_ellipsis, CommandOutput, DetailView,
 };
 use crate::domain::models::workflow_template::WorkflowTemplate;
 use crate::services::config::Config;
@@ -108,28 +108,22 @@ struct WorkflowDetailOutput {
 
 impl CommandOutput for WorkflowDetailOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Workflow: {}", self.name),
-            format!("Description: {}", self.description),
-            format!("Phases ({}):", self.phases.len()),
-        ];
+        let mut view = DetailView::new(&self.name)
+            .field("Description", &self.description)
+            .field("Phases", &self.phases.len().to_string());
 
         for (i, phase) in self.phases.iter().enumerate() {
-            lines.push(format!(
-                "\n  {}. {} ({})",
-                i + 1,
-                phase.name,
-                phase.dependency
-            ));
-            lines.push(format!("     {}", phase.description));
-            lines.push(format!("     Role: {}", phase.role));
-            lines.push(format!("     Tools: {}", phase.tools.join(", ")));
-            if phase.read_only {
-                lines.push("     Read-only: yes".to_string());
+            let ro = if phase.read_only { " (read-only)" } else { "" };
+            view = view.section(&format!("{}. {} [{}]", i + 1, phase.name, phase.dependency))
+                .item(&phase.description)
+                .field("Role", &phase.role)
+                .field("Tools", &phase.tools.join(", "));
+            if !ro.is_empty() {
+                view = view.field("Read-only", "yes");
             }
         }
 
-        lines.join("\n")
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {

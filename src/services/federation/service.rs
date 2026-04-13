@@ -796,8 +796,8 @@ impl FederationService {
                 }
             }
 
-            if !sent_via_a2a {
-                if let Err(e) = self.http_client.delegate(url, envelope).await {
+            if !sent_via_a2a
+                && let Err(e) = self.http_client.delegate(url, envelope).await {
                     if self.a2a_client.is_some() {
                         // Both A2A and legacy HTTP failed — return error to the
                         // caller rather than silently continuing (Issue #8).
@@ -816,7 +816,6 @@ impl FederationService {
                         "HTTP delegate call failed, task tracked in-flight for monitoring"
                     );
                 }
-            }
         }
 
         // Track in-flight, activity timestamp, and increment active delegations

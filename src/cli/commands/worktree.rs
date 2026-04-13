@@ -7,8 +7,8 @@ use std::sync::Arc;
 use crate::adapters::sqlite::{SqliteWorktreeRepository, initialize_default_database};
 use crate::cli::id_resolver::{resolve_task_id, resolve_worktree_id};
 use crate::cli::display::{
-    colorize_status, list_table, output, render_list, short_id, truncate_ellipsis,
-    CommandOutput, DetailView, relative_time_str,
+    action_failure, action_success, colorize_status, list_table, output, render_list, short_id,
+    truncate_ellipsis, CommandOutput, DetailView, relative_time_str,
 };
 use crate::domain::models::WorktreeStatus;
 use crate::services::{WorktreeConfig, WorktreeService, WorktreeStats};
@@ -168,7 +168,11 @@ pub struct WorktreeActionOutput {
 
 impl CommandOutput for WorktreeActionOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        if self.success {
+            action_success(&self.message)
+        } else {
+            action_failure(&self.message)
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -234,10 +238,10 @@ pub struct SyncOutput {
 
 impl CommandOutput for SyncOutput {
     fn to_human(&self) -> String {
-        format!(
+        action_success(&format!(
             "Sync complete: {} activated, {} marked as removed",
             self.activated, self.marked_removed
-        )
+        ))
     }
 
     fn to_json(&self) -> serde_json::Value {

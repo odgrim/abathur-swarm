@@ -1045,12 +1045,11 @@ where
                         g.record_tokens(tokens_used);
                         tracing::warn!(tokens_used, "token guardrail exceeded post-hoc; recorded for accounting");
                     }
-                    if let Some(cost_cents) = estimated_cost_cents {
-                        if g.check_and_record_cost(cost_cents).is_blocked() {
+                    if let Some(cost_cents) = estimated_cost_cents
+                        && g.check_and_record_cost(cost_cents).is_blocked() {
                             g.record_cost(cost_cents);
                             tracing::warn!(cost_cents, "budget guardrail exceeded post-hoc; recorded for accounting");
                         }
-                    }
                 }
 
                 if session.status == SessionStatus::Completed {

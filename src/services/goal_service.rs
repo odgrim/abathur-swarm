@@ -138,6 +138,56 @@ impl<R: GoalRepository> GoalService<R> {
         Ok(constraints)
     }
 
+    /// Update a goal's properties. Returns the goal and events to be journaled.
+    pub async fn update_goal(
+        &self,
+        id: Uuid,
+        name: Option<String>,
+        description: Option<String>,
+        priority: Option<GoalPriority>,
+        constraints: Vec<GoalConstraint>,
+        domains: Option<Vec<String>>,
+    ) -> DomainResult<(Goal, Vec<UnifiedEvent>)> {
+        let mut goal = self.repository.get(id).await?
+            .ok_or(DomainError::GoalNotFound(id))?;
+
+        if let Some(n) = name {
+            goal.name = n;
+        }
+        if let Some(d) = description {
+            goal.description = d;
+        }
+        if let Some(p) = priority {
+            goal.priority = p;
+        }
+        if !constraints.is_empty() {
+            for c in constraints {
+                goal.constraints.push(c);
+            }
+        }
+        if let Some(d) = domains {
+            goal.applicability_domains = d;
+        }
+
+        goal.updated_at = chrono::Utc::now();
+        goal.version += 1;
+        goal.validate().map_err(DomainError::ValidationFailed)?;
+        self.repository.update(&goal).await?;
+
+        let events = vec![Self::make_event(
+            EventSeverity::Info,
+            EventCategory::Goal,
+            Some(goal.id),
+            EventPayload::GoalStatusChanged {
+                goal_id: goal.id,
+                from_status: goal.status.as_str().to_string(),
+                to_status: goal.status.as_str().to_string(),
+            },
+        )];
+
+        Ok((goal, events))
+    }
+
     /// Update the applicability domains of a goal. Returns the goal and events to be journaled.
     pub async fn update_domains(&self, id: Uuid, domains: Vec<String>) -> DomainResult<(Goal, Vec<UnifiedEvent>)> {
         let mut goal = self.repository.get(id).await?
@@ -213,6 +263,19 @@ impl<R: GoalRepository + 'static> GoalCommandHandler for GoalService<R> {
             } => {
                 let (goal, events) = self
                     .create_goal(name, description, priority, parent_id, constraints, domains)
+                    .await?;
+                Ok(CommandOutcome { result: CommandResult::Goal(goal), events })
+            }
+            GoalCommand::Update {
+                goal_id,
+                name,
+                description,
+                priority,
+                constraints,
+                domains,
+            } => {
+                let (goal, events) = self
+                    .update_goal(goal_id, name, description, priority, constraints, domains)
                     .await?;
                 Ok(CommandOutcome { result: CommandResult::Goal(goal), events })
             }

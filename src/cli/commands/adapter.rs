@@ -44,7 +44,8 @@ pub enum AdapterCommands {
         force: bool,
     },
     /// Show detailed info about a specific adapter
-    Info {
+    #[command(visible_alias = "info")]
+    Show {
         /// Adapter name
         name: String,
     },
@@ -291,7 +292,7 @@ pub async fn execute(args: AdapterArgs, json_mode: bool) -> Result<()> {
         AdapterCommands::Disable { name, force } => {
             cmd_disable(&adapters_dir, &name, force, json_mode).await
         }
-        AdapterCommands::Info { name } => cmd_info(&adapters_dir, &name, json_mode).await,
+        AdapterCommands::Show { name } => cmd_info(&adapters_dir, &name, json_mode).await,
         AdapterCommands::Doctor { name } => {
             cmd_doctor(&adapters_dir, name.as_deref(), json_mode).await
         }

@@ -25,7 +25,8 @@ pub struct GoalArgs {
 #[derive(Subcommand, Debug)]
 pub enum GoalCommands {
     /// Create a new goal
-    Set {
+    #[command(visible_alias = "set")]
+    Create {
         /// Goal name
         name: String,
         /// Goal description
@@ -55,6 +56,31 @@ pub enum GoalCommands {
     },
     /// Show goal details
     Show {
+        /// Goal ID
+        id: String,
+    },
+    /// Update a goal's properties
+    Update {
+        /// Goal ID
+        id: String,
+        /// New name
+        #[arg(short, long)]
+        name: Option<String>,
+        /// New description
+        #[arg(short, long)]
+        description: Option<String>,
+        /// New priority (low, normal, high, critical)
+        #[arg(short, long)]
+        priority: Option<String>,
+        /// Update applicability domains (replaces existing)
+        #[arg(long)]
+        domain: Vec<String>,
+        /// Add a constraint (format: "name:description")
+        #[arg(short, long)]
+        constraint: Vec<String>,
+    },
+    /// Delete a goal
+    Delete {
         /// Goal ID
         id: String,
     },
@@ -219,7 +245,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
     let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {
-        GoalCommands::Set { name, description, priority, parent, constraint } => {
+        GoalCommands::Create { name, description, priority, parent, constraint } => {
             let priority = GoalPriority::from_str(&priority)
                 .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
 
@@ -296,6 +322,68 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
             let out = GoalDetailOutput {
                 goal: GoalOutput::from(&goal),
                 constraints,
+            };
+            output(&out, json_mode);
+        }
+
+        GoalCommands::Update { id, name, description, priority, domain, constraint } => {
+            let uuid = resolve_goal_id(&pool, &id).await?;
+            let priority = priority
+                .map(|p| GoalPriority::from_str(&p)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", p)))
+                .transpose()?;
+
+            let constraints: Vec<GoalConstraint> = constraint
+                .iter()
+                .filter_map(|c| {
+                    let parts: Vec<&str> = c.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        Some(GoalConstraint::preference(parts[0], parts[1]))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let domains = if domain.is_empty() { None } else { Some(domain) };
+
+            let cmd = DomainCommand::Goal(GoalCommand::Update {
+                goal_id: uuid,
+                name,
+                description,
+                priority,
+                constraints,
+                domains,
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let goal = match result {
+                CommandResult::Goal(g) => g,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
+
+            let out = GoalActionOutput {
+                success: true,
+                message: format!("Goal updated: {}", goal.id),
+                goal: Some(GoalOutput::from(&goal)),
+            };
+            output(&out, json_mode);
+        }
+
+        GoalCommands::Delete { id } => {
+            let uuid = resolve_goal_id(&pool, &id).await?;
+
+            let cmd = DomainCommand::Goal(GoalCommand::Delete { goal_id: uuid });
+
+            dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let out = GoalActionOutput {
+                success: true,
+                message: format!("Goal deleted: {}", id),
+                goal: None,
             };
             output(&out, json_mode);
         }

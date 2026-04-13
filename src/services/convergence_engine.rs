@@ -347,8 +347,8 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             //
             // If a global BudgetTracker is wired in, verify that we are not at
             // Critical pressure before proceeding with the next iteration.
-            if let Some(ref tracker) = self.budget_tracker {
-                if tracker.should_pause_new_work().await {
+            if let Some(ref tracker) = self.budget_tracker
+                && tracker.should_pause_new_work().await {
                     tracing::warn!(
                         trajectory_id = %trajectory.id,
                         "Global budget critical — terminating convergence early",
@@ -357,7 +357,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                         trajectory_id: trajectory.id.to_string(),
                     });
                 }
-            }
 
             // a. Check context degradation (spec 6.4 pre-check)
             if context_is_degraded(
@@ -4871,16 +4870,8 @@ mod tests {
         // Budget should be consumed.
         assert!(trajectory.budget.tokens_used > 0);
         // Attractor should be classified.
-        assert!(
-            !matches!(
-                trajectory.attractor_state.classification,
-                AttractorType::FixedPoint {
-                    estimated_remaining_iterations: 0,
-                    estimated_remaining_tokens: 0,
-                }
-            ) || true, // Just verify it doesn't panic
-            "Attractor should be classified after first observation"
-        );
+        // Verify attractor classification doesn't panic and produces a result.
+        let _classification = &trajectory.attractor_state.classification;
         // Control should be some valid value (exact value depends on attractor classification).
         let _ = control; // Confirm no error
     }

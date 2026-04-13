@@ -478,9 +478,9 @@ mod tests {
 
         let json = snapshot.to_json();
         assert_eq!(json["convergence_level"].as_f64().unwrap(), 0.85);
-        assert_eq!(json["build_passing"].as_bool().unwrap(), true);
+        assert!(json["build_passing"].as_bool().unwrap());
         assert_eq!(json["test_pass_rate"].as_f64().unwrap(), 0.99);
-        assert_eq!(json["type_check_clean"].as_bool().unwrap(), true);
+        assert!(json["type_check_clean"].as_bool().unwrap());
         assert_eq!(json["security_issues"].as_u64().unwrap(), 2);
     }
 

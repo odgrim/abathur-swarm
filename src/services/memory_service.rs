@@ -323,6 +323,46 @@ impl<R: MemoryRepository> MemoryService<R> {
     }
 
     /// Delete a memory. Returns events to be journaled.
+    /// Update a memory's content, namespace, or tier. Returns the updated memory and events.
+    pub async fn update_memory(
+        &self,
+        id: Uuid,
+        content: Option<String>,
+        namespace: Option<String>,
+        tier: Option<MemoryTier>,
+    ) -> DomainResult<(Memory, Vec<UnifiedEvent>)> {
+        let mut memory = self.repository.get(id).await?
+            .ok_or(DomainError::MemoryNotFound(id))?;
+
+        if let Some(c) = content {
+            memory.content = c;
+        }
+        if let Some(ns) = namespace {
+            memory.namespace = ns;
+        }
+        if let Some(t) = tier {
+            memory.tier = t;
+        }
+
+        memory.version += 1;
+        memory.validate().map_err(DomainError::ValidationFailed)?;
+        self.repository.update(&memory).await?;
+
+        let events = vec![Self::make_event(
+            EventSeverity::Debug,
+            EventCategory::Memory,
+            EventPayload::MemoryStored {
+                memory_id: memory.id,
+                key: memory.key.clone(),
+                namespace: memory.namespace.clone(),
+                tier: memory.tier.as_str().to_string(),
+                memory_type: memory.memory_type.as_str().to_string(),
+            },
+        )];
+
+        Ok((memory, events))
+    }
+
     pub async fn forget(&self, id: Uuid) -> DomainResult<Vec<UnifiedEvent>> {
         // Fetch memory info before deleting for the event
         let memory = self.repository.get(id).await?;
@@ -971,6 +1011,10 @@ impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
             MemoryCommand::RecallByKey { key, namespace, accessor } => {
                 let (memory, events) = self.recall_by_key(&key, &namespace, accessor).await?;
                 Ok(CommandOutcome { result: CommandResult::MemoryOpt(memory), events })
+            }
+            MemoryCommand::Update { id, content, namespace, tier } => {
+                let (memory, events) = self.update_memory(id, content, namespace, tier).await?;
+                Ok(CommandOutcome { result: CommandResult::Memory(memory), events })
             }
             MemoryCommand::Forget { id } => {
                 let events = self.forget(id).await?;

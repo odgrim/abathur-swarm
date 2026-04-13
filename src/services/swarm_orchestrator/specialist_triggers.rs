@@ -698,25 +698,23 @@ where
         for conflict in conflicts {
             // Skip stale conflicts: if the associated task is already terminal,
             // mark the merge request as Failed and move on.
-            if let Ok(Some(conflict_task)) = self.task_repo.get(conflict.task_id).await {
-                if conflict_task.status.is_terminal() && conflict_task.status != TaskStatus::Complete {
+            if let Ok(Some(conflict_task)) = self.task_repo.get(conflict.task_id).await
+                && conflict_task.status.is_terminal() && conflict_task.status != TaskStatus::Complete {
                     tracing::debug!(
                         task_id = %conflict.task_id,
                         merge_request_id = %conflict.merge_request_id,
                         "skipping stale conflict — associated task is terminal"
                     );
                     // Mark the merge request as failed so it's not picked up again
-                    if let Some(ref mr_repo) = self.merge_request_repo {
-                        if let Ok(Some(mut mr)) = mr_repo.get(conflict.merge_request_id).await {
+                    if let Some(ref mr_repo) = self.merge_request_repo
+                        && let Ok(Some(mut mr)) = mr_repo.get(conflict.merge_request_id).await {
                             mr.status = crate::services::merge_queue::MergeStatus::Failed;
                             mr.error = Some("Associated task is terminal".to_string());
                             mr.updated_at = chrono::Utc::now();
                             let _ = mr_repo.update(&mr).await;
                         }
-                    }
                     continue;
                 }
-            }
 
             // Check if a resolution task already exists for this conflict.
             // Match on merge_request_id in task context (more reliable than branch name matching).
@@ -734,17 +732,17 @@ where
             let resolution_exists = self.task_repo
                 .list_by_status(TaskStatus::Ready)
                 .await
-                .map(&has_existing_task)
+                .map(has_existing_task)
                 .unwrap_or(false)
                 || self.task_repo
                     .list_by_status(TaskStatus::Running)
                     .await
-                    .map(&has_existing_task)
+                    .map(has_existing_task)
                     .unwrap_or(false)
                 || self.task_repo
                     .list_by_status(TaskStatus::Pending)
                     .await
-                    .map(&has_existing_task)
+                    .map(has_existing_task)
                     .unwrap_or(false);
 
             if !resolution_exists {

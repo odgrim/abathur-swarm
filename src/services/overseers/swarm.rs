@@ -207,7 +207,6 @@ impl Overseer for SwarmOverseer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::pin::Pin;
 
     use async_trait::async_trait;

@@ -114,7 +114,7 @@ pub enum FederationReaction {
     },
     /// Delegate follow-up work to a cerebrate.
     DelegateFollowUp {
-        envelope: FederationTaskEnvelope,
+        envelope: Box<FederationTaskEnvelope>,
         preferred_cerebrate: Option<String>,
     },
     /// Emit an event through the EventBus.

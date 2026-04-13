@@ -32,7 +32,7 @@ impl SqliteMergeRequestRepository {
         let updated_at = parse_datetime(&row.updated_at)?;
 
         let verification = row.verification_json.as_deref()
-            .map(|s| serde_json::from_str(s))
+            .map(serde_json::from_str)
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
 
@@ -84,7 +84,7 @@ impl MergeRequestRepository for SqliteMergeRequestRepository {
         let task_id = request.task_id.to_string();
         let status = request.status.as_str();
         let verification_json = request.verification.as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
         let conflict_files_json = serde_json::to_string(&request.conflict_files)
@@ -135,7 +135,7 @@ impl MergeRequestRepository for SqliteMergeRequestRepository {
         let id = request.id.to_string();
         let status = request.status.as_str();
         let verification_json = request.verification.as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
         let conflict_files_json = serde_json::to_string(&request.conflict_files)

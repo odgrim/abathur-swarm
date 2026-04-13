@@ -184,7 +184,7 @@ impl HttpA2AClient {
                 data: None,
             }),
             Some(result) => {
-                serde_json::from_value(result).map_err(|e| A2AWireError::Json(e))
+                serde_json::from_value(result).map_err(A2AWireError::Json)
             }
             None => Err(A2AWireError::Protocol {
                 code: -32603,

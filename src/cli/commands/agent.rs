@@ -25,8 +25,9 @@ pub struct AgentArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentCommands {
-    /// Register a new agent template
-    Register {
+    /// Create a new agent template
+    #[command(visible_alias = "register")]
+    Create {
         /// Agent name/type
         name: String,
         /// Agent description
@@ -61,6 +62,28 @@ pub enum AgentCommands {
         /// Specific version
         #[arg(long)]
         version: Option<u32>,
+    },
+    /// Update an agent template
+    Update {
+        /// Agent name
+        name: String,
+        /// New description
+        #[arg(short, long)]
+        description: Option<String>,
+        /// New tier (architect, specialist, worker)
+        #[arg(short, long)]
+        tier: Option<String>,
+        /// New system prompt
+        #[arg(short, long)]
+        prompt: Option<String>,
+        /// New max turns per task
+        #[arg(long)]
+        max_turns: Option<u32>,
+    },
+    /// Delete an agent template
+    Delete {
+        /// Agent name
+        name: String,
     },
     /// Disable an agent template
     Disable {
@@ -520,7 +543,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
     let service = AgentService::new(repo.clone(), event_bus);
 
     match args.command {
-        AgentCommands::Register { name, description, tier, prompt, tool, max_turns } => {
+        AgentCommands::Create { name, description, tier, prompt, tool, max_turns } => {
             let tier = AgentTier::parse_str(&tier)
                 .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", tier))?;
 
@@ -549,7 +572,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
 
             let out = AgentActionOutput {
                 success: true,
-                message: format!("Agent registered: {} (version {})", agent.name, agent.version),
+                message: format!("Agent created: {} (version {})", agent.name, agent.version),
                 agent: Some(AgentOutput::from(&agent)),
             };
             output(&out, json_mode);
@@ -693,6 +716,33 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
 
         AgentCommands::GatewayStatus { gateway } => {
             check_gateway_status(gateway, json_mode).await?;
+        }
+
+        AgentCommands::Update { name, description, tier, prompt, max_turns } => {
+            let tier = tier
+                .map(|t| AgentTier::parse_str(&t)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", t)))
+                .transpose()?;
+
+            let agent = service.update_template(&name, description, prompt, tier, max_turns).await?;
+
+            let out = AgentActionOutput {
+                success: true,
+                message: format!("Agent updated: {} (version {})", agent.name, agent.version),
+                agent: Some(AgentOutput::from(&agent)),
+            };
+            output(&out, json_mode);
+        }
+
+        AgentCommands::Delete { name } => {
+            service.delete_template(&name).await?;
+
+            let out = AgentActionOutput {
+                success: true,
+                message: format!("Agent deleted: {}", name),
+                agent: None,
+            };
+            output(&out, json_mode);
         }
 
         AgentCommands::Cards { command } => {

@@ -58,3 +58,123 @@ pub fn count_label(n: usize, singular: &str, plural: &str) -> String {
         format!("{} {}", n, plural)
     }
 }
+
+/// Parse a human-friendly duration string like "7d", "24h", "1w", "30m" into a
+/// `chrono::Duration`.
+pub fn parse_duration(s: &str) -> anyhow::Result<chrono::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("duration string cannot be empty");
+    }
+
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let value: i64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration '{}': expected a number followed by a unit (d/h/w/m)", s))?;
+
+    match unit {
+        "m" => Ok(chrono::Duration::minutes(value)),
+        "h" => Ok(chrono::Duration::hours(value)),
+        "d" => Ok(chrono::Duration::days(value)),
+        "w" => Ok(chrono::Duration::weeks(value)),
+        _ => anyhow::bail!(
+            "unknown duration unit '{}' in '{}': expected one of m (minutes), h (hours), d (days), w (weeks)",
+            unit,
+            s
+        ),
+    }
+}
+
+/// Parse a human-friendly duration string like "7d", "24h", "30m" into a
+/// `std::time::Duration`.
+pub fn parse_std_duration(s: &str) -> anyhow::Result<std::time::Duration> {
+    use anyhow::Context;
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("Empty duration string");
+    }
+    let (num_str, suffix) = if let Some(prefix) = s.strip_suffix('d') {
+        (prefix, "d")
+    } else if let Some(prefix) = s.strip_suffix('h') {
+        (prefix, "h")
+    } else if let Some(prefix) = s.strip_suffix('m') {
+        (prefix, "m")
+    } else {
+        anyhow::bail!("Duration must end with 'd', 'h', or 'm' (e.g., '7d', '24h', '30m')");
+    };
+    let num: u64 = num_str.parse().context("Invalid number in duration")?;
+    match suffix {
+        "d" => Ok(std::time::Duration::from_secs(num * 86400)),
+        "h" => Ok(std::time::Duration::from_secs(num * 3600)),
+        "m" => Ok(std::time::Duration::from_secs(num * 60)),
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_days() {
+        let d = parse_duration("7d").unwrap();
+        assert_eq!(d, chrono::Duration::days(7));
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        let d = parse_duration("24h").unwrap();
+        assert_eq!(d, chrono::Duration::hours(24));
+    }
+
+    #[test]
+    fn test_parse_duration_weeks() {
+        let d = parse_duration("2w").unwrap();
+        assert_eq!(d, chrono::Duration::weeks(2));
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        let d = parse_duration("30m").unwrap();
+        assert_eq!(d, chrono::Duration::minutes(30));
+    }
+
+    #[test]
+    fn test_parse_duration_invalid_unit() {
+        assert!(parse_duration("7x").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_empty() {
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_no_number() {
+        assert!(parse_duration("d").is_err());
+    }
+
+    #[test]
+    fn test_parse_std_duration_days() {
+        let d = parse_std_duration("7d").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(7 * 86400));
+    }
+
+    #[test]
+    fn test_parse_std_duration_hours() {
+        let d = parse_std_duration("24h").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(24 * 3600));
+    }
+
+    #[test]
+    fn test_parse_std_duration_minutes() {
+        let d = parse_std_duration("30m").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn test_parse_std_duration_invalid() {
+        assert!(parse_std_duration("").is_err());
+        assert!(parse_std_duration("7x").is_err());
+    }
+}

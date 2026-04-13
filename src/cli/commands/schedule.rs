@@ -9,8 +9,8 @@ use std::sync::Arc;
 use crate::adapters::sqlite::{initialize_default_database, SqliteTaskScheduleRepository};
 use crate::cli::id_resolver::resolve_schedule_id;
 use crate::cli::display::{
-    colorize_status, list_table, output, render_list, short_id, truncate_ellipsis,
-    CommandOutput, DetailView, relative_time_str,
+    action_failure, action_success, colorize_status, list_table, output, render_list, short_id,
+    truncate_ellipsis, CommandOutput, DetailView, relative_time_str,
 };
 use crate::domain::models::task_schedule::*;
 use crate::domain::models::TaskPriority;
@@ -93,6 +93,30 @@ pub enum ScheduleCommands {
     Disable {
         /// Schedule ID or name
         id_or_name: String,
+    },
+
+    /// Update a task schedule's properties
+    Update {
+        /// Schedule ID or name
+        id_or_name: String,
+        /// New description
+        #[arg(long)]
+        description: Option<String>,
+        /// New cron expression (replaces the schedule type with cron)
+        #[arg(long)]
+        cron: Option<String>,
+        /// New task title
+        #[arg(long)]
+        task_title: Option<String>,
+        /// New task description/prompt
+        #[arg(long)]
+        task_description: Option<String>,
+        /// New priority (low, normal, high, critical)
+        #[arg(long)]
+        priority: Option<String>,
+        /// New agent type
+        #[arg(long)]
+        agent_type: Option<String>,
     },
 
     /// Delete a task schedule
@@ -253,7 +277,11 @@ pub struct ScheduleActionOutput {
 
 impl CommandOutput for ScheduleActionOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        if self.success {
+            action_success(&self.message)
+        } else {
+            action_failure(&self.message)
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -364,6 +392,42 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
             let out = ScheduleActionOutput {
                 success: true,
                 message: format!("Task schedule disabled: {}", schedule.name),
+            };
+            output(&out, json_mode);
+        }
+
+        ScheduleCommands::Update {
+            id_or_name, description, cron, task_title,
+            task_description, priority, agent_type,
+        } => {
+            let mut schedule = find_schedule(&repo, &pool, &id_or_name).await?;
+
+            if let Some(desc) = description {
+                schedule.description = desc;
+            }
+            if let Some(expr) = cron {
+                schedule.schedule = TaskScheduleType::Cron { expression: expr };
+            }
+            if let Some(title) = task_title {
+                schedule.task_title = title;
+            }
+            if let Some(desc) = task_description {
+                schedule.task_description = desc;
+            }
+            if let Some(p) = priority {
+                schedule.task_priority = TaskPriority::from_str(&p)
+                    .unwrap_or(TaskPriority::Normal);
+            }
+            if let Some(agent) = agent_type {
+                schedule.task_agent_type = Some(agent);
+            }
+
+            schedule.updated_at = chrono::Utc::now();
+            repo.update(&schedule).await?;
+
+            let out = ScheduleActionOutput {
+                success: true,
+                message: format!("Task schedule updated: {}", schedule.name),
             };
             output(&out, json_mode);
         }

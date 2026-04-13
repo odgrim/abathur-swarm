@@ -146,6 +146,90 @@ impl<R: AgentRepository> AgentService<R> {
         self.repository.list_by_tier(tier).await
     }
 
+    /// Update a template's properties. Only non-None fields are updated.
+    pub async fn update_template(
+        &self,
+        name: &str,
+        description: Option<String>,
+        system_prompt: Option<String>,
+        tier: Option<AgentTier>,
+        max_turns: Option<u32>,
+    ) -> DomainResult<AgentTemplate> {
+        let mut template = self.repository.get_template_by_name(name).await?
+            .ok_or_else(|| DomainError::AgentNotFound(name.to_string()))?;
+
+        if let Some(d) = description {
+            template.description = d;
+        }
+        if let Some(p) = system_prompt {
+            template.system_prompt = p;
+        }
+        if let Some(t) = tier {
+            template.tier = t;
+        }
+        if let Some(m) = max_turns {
+            template.max_turns = m;
+        }
+
+        template.updated_at = chrono::Utc::now();
+        template.validate().map_err(DomainError::ValidationFailed)?;
+        self.repository.update_template(&template).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::AgentTemplateRegistered {
+                template_name: template.name.clone(),
+                tier: format!("{:?}", template.tier),
+                version: template.version,
+            },
+        }).await;
+
+        Ok(template)
+    }
+
+    /// Delete a template by name.
+    pub async fn delete_template(&self, name: &str) -> DomainResult<()> {
+        let template = self.repository.get_template_by_name(name).await?
+            .ok_or_else(|| DomainError::AgentNotFound(name.to_string()))?;
+
+        // Check for running instances
+        let running = self.repository.get_running_instances(name).await?;
+        if !running.is_empty() {
+            return Err(DomainError::ValidationFailed(
+                format!("Cannot delete template '{}' with {} running instances", name, running.len())
+            ));
+        }
+
+        self.repository.delete_template(template.id).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::AgentTemplateStatusChanged {
+                template_name: name.to_string(),
+                from_status: format!("{:?}", template.status),
+                to_status: "Deleted".to_string(),
+            },
+        }).await;
+
+        Ok(())
+    }
+
     /// Set a template's status (active, disabled, deprecated).
     pub async fn set_template_status(&self, name: &str, status: AgentStatus) -> DomainResult<AgentTemplate> {
         let mut template = self.repository.get_template_by_name(name).await?

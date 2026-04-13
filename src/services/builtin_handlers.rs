@@ -1385,9 +1385,9 @@ impl<T: TaskRepository + 'static> EventHandler for FastReconciliationHandler<T> 
             .map_err(|e| format!("Failed to list running tasks (workflow check): {}", e))?;
 
         for task in running_tasks.iter().take(FAST_RECONCILIATION_BATCH_LIMIT) {
-            if let Some(ws_val) = task.context.custom.get("workflow_state") {
-                if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_val.clone()) {
-                    if matches!(ws, WorkflowState::Completed { .. }) {
+            if let Some(ws_val) = task.context.custom.get("workflow_state")
+                && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_val.clone())
+                    && matches!(ws, WorkflowState::Completed { .. }) {
                         // Workflow says done but task is still Running — force complete
                         match self.task_service.complete_task(task.id).await {
                             Ok((_, events)) => {
@@ -1398,8 +1398,6 @@ impl<T: TaskRepository + 'static> EventHandler for FastReconciliationHandler<T> 
                             Err(e) => tracing::warn!("Failed to complete workflow-done task {}: {}", task.id, e),
                         }
                     }
-                }
-            }
         }
 
         if corrections > 0 {
@@ -9781,13 +9779,12 @@ impl<T: TaskRepository + 'static> EventHandler for AdapterLifecycleSyncHandler<T
                 // If this failure was caused by a gate rejection, skip —
                 // the WorkflowGateRejected handler owns the egress for
                 // rejections and uses the separate status_rejected config.
-                if let Ok(Some(task)) = self.task_repo.get(*task_id).await {
-                    if let Some(crate::domain::models::workflow_state::WorkflowState::Rejected { .. }) =
+                if let Ok(Some(task)) = self.task_repo.get(*task_id).await
+                    && let Some(crate::domain::models::workflow_state::WorkflowState::Rejected { .. }) =
                         crate::services::workflow_engine::WorkflowEngine::<T>::read_state_from_task(&task)
                     {
                         return Ok(Reaction::None);
                     }
-                }
                 self.handle_lifecycle(*task_id, "status_failed", "skip").await
             }
             EventPayload::AdapterTaskIngested { task_id, .. } => {
@@ -11292,7 +11289,7 @@ mod fast_reconciliation_handler_tests {
             |t| {
                 t.transition_to(TaskStatus::Ready)
                     .map(|_| true)
-                    .map_err(|e| format!("{}", e))
+                    .map_err(|e| e.to_string())
             },
             3,
             "test",
@@ -11325,7 +11322,7 @@ mod fast_reconciliation_handler_tests {
                 } else {
                     t.transition_to(TaskStatus::Ready)
                         .map(|_| true)
-                        .map_err(|e| format!("{}", e))
+                        .map_err(|e| e.to_string())
                 }
             },
             3,
@@ -11346,7 +11343,7 @@ mod fast_reconciliation_handler_tests {
             |t| {
                 t.transition_to(TaskStatus::Ready)
                     .map(|_| true)
-                    .map_err(|e| format!("{}", e))
+                    .map_err(|e| e.to_string())
             },
             3,
             "test",
@@ -11607,7 +11604,7 @@ mod goal_convergence_check_handler_tests {
 
         // Create 3 failed convergence check tasks
         for i in 0..3 {
-            let mut task = Task::new(&format!(
+            let mut task = Task::new(format!(
                 "Goal Convergence Check — {} active goal(s)",
                 i + 1
             ));
@@ -11649,7 +11646,7 @@ mod goal_convergence_check_handler_tests {
 
         // Create 2 failed convergence check tasks
         for i in 0..2 {
-            let mut task = Task::new(&format!(
+            let mut task = Task::new(format!(
                 "Goal Convergence Check — {} active goal(s)",
                 i + 1
             ));
@@ -11705,7 +11702,7 @@ mod goal_convergence_check_handler_tests {
 
         // Create only 2 failed convergence check tasks (below the threshold of 3)
         for i in 0..2 {
-            let mut task = Task::new(&format!(
+            let mut task = Task::new(format!(
                 "Goal Convergence Check — {} active goal(s)",
                 i + 1
             ));

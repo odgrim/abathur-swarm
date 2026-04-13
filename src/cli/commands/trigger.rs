@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::adapters::sqlite::{initialize_default_database, SqliteTriggerRuleRepository};
 use crate::cli::id_resolver::resolve_trigger_rule_id;
 use crate::cli::display::{
-    list_table, output, render_list, short_id, truncate_ellipsis,
+    action_failure, action_success, list_table, output, render_list, short_id, truncate_ellipsis,
     CommandOutput, DetailView, relative_time_str,
 };
 use crate::domain::ports::TriggerRuleRepository;
@@ -90,6 +90,20 @@ pub enum TriggerCommands {
     Disable {
         /// Rule ID or name
         id_or_name: String,
+    },
+    /// Update a trigger rule's properties
+    Update {
+        /// Rule ID or name
+        id_or_name: String,
+        /// New description
+        #[arg(long)]
+        description: Option<String>,
+        /// New cron expression (5-field: min hour dom month dow)
+        #[arg(long)]
+        cron: Option<String>,
+        /// New cooldown in seconds
+        #[arg(long)]
+        cooldown: Option<u64>,
     },
     /// Delete a trigger rule
     Delete {
@@ -237,7 +251,11 @@ pub struct TriggerActionOutput {
 
 impl CommandOutput for TriggerActionOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        if self.success {
+            action_success(&self.message)
+        } else {
+            action_failure(&self.message)
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -389,6 +407,32 @@ pub async fn execute(args: TriggerArgs, json_mode: bool) -> Result<()> {
             let out = TriggerActionOutput {
                 success: true,
                 message: format!("Trigger rule disabled: {}", rule.name),
+            };
+            output(&out, json_mode);
+        }
+
+        TriggerCommands::Update { id_or_name, description, cron, cooldown } => {
+            let mut rule = find_rule(&repo, &pool, &id_or_name).await?;
+
+            if let Some(desc) = description {
+                rule.description = desc;
+            }
+            if let Some(expr) = cron {
+                validate_cron_expression(&expr)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let normalized = normalize_cron_expression(&expr);
+                rule.condition = TriggerCondition::Cron { expression: normalized };
+                rule.filter = TriggerRule::cron_event_filter();
+            }
+            if let Some(cd) = cooldown {
+                rule.cooldown = Some(std::time::Duration::from_secs(cd));
+            }
+
+            repo.update(&rule).await?;
+
+            let out = TriggerActionOutput {
+                success: true,
+                message: format!("Trigger rule updated: {}", rule.name),
             };
             output(&out, json_mode);
         }

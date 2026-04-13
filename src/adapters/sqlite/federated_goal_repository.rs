@@ -185,7 +185,6 @@ impl TryFrom<FederatedGoalRow> for FederatedGoal {
 mod tests {
     use super::*;
     use crate::adapters::sqlite::create_migrated_test_pool;
-    use crate::domain::models::goal_federation::*;
     use std::collections::HashMap;
 
     async fn setup_test_repo() -> SqliteFederatedGoalRepository {

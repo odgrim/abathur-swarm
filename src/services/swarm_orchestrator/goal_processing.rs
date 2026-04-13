@@ -2105,13 +2105,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 /// because auto-completing a workflow parent mid-workflow (e.g. while PhaseReady)
 /// can create an illegal Validating+PhaseReady combination that causes a deadlock.
 pub(crate) fn can_safely_auto_complete(task: &Task) -> bool {
-    if let Some(ws_val) = task.context.custom.get("workflow_state") {
-        if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_val.clone()) {
-            if !ws.is_terminal() {
+    if let Some(ws_val) = task.context.custom.get("workflow_state")
+        && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_val.clone())
+            && !ws.is_terminal() {
                 return false;
             }
-        }
-    }
     true
 }
 

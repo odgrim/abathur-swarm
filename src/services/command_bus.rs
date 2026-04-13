@@ -185,6 +185,14 @@ pub enum GoalCommand {
         constraints: Vec<GoalConstraint>,
         domains: Vec<String>,
     },
+    Update {
+        goal_id: Uuid,
+        name: Option<String>,
+        description: Option<String>,
+        priority: Option<GoalPriority>,
+        constraints: Vec<GoalConstraint>,
+        domains: Option<Vec<String>>,
+    },
     TransitionStatus {
         goal_id: Uuid,
         new_status: GoalStatus,
@@ -217,6 +225,12 @@ pub enum MemoryCommand {
         key: String,
         namespace: String,
         accessor: AccessorId,
+    },
+    Update {
+        id: Uuid,
+        content: Option<String>,
+        namespace: Option<String>,
+        tier: Option<MemoryTier>,
     },
     Forget {
         id: Uuid,

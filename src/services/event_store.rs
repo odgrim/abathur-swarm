@@ -465,11 +465,10 @@ impl EventStore for InMemoryEventStore {
                 return true;
             }
             // Never prune events at or above the minimum handler watermark
-            if let Some(wm) = min_watermark {
-                if e.sequence >= wm {
+            if let Some(wm) = min_watermark
+                && e.sequence >= wm {
                     return true;
                 }
-            }
             false
         });
         Ok((original_len - events.len()) as u64)

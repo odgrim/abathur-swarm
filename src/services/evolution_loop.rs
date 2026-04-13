@@ -485,8 +485,7 @@ impl EvolutionLoop {
             }
             if let Some((ref name, from_v, to_v, ref prev_stats, changed_at)) =
                 version_change_info
-            {
-                if let Err(e) = repo
+                && let Err(e) = repo
                     .save_version_change(name, from_v, to_v, prev_stats, changed_at)
                     .await
                 {
@@ -496,7 +495,6 @@ impl EvolutionLoop {
                         e
                     );
                 }
-            }
         }
     }
 
@@ -2574,9 +2572,10 @@ mod tests {
         evolution.recover_in_progress_refinements().await;
 
         // The request should have been reset to Pending in the repo
-        let repo_reqs = repo.requests.lock().unwrap();
-        assert_eq!(repo_reqs[0].status, RefinementStatus::Pending);
-        drop(repo_reqs);
+        {
+            let repo_reqs = repo.requests.lock().unwrap();
+            assert_eq!(repo_reqs[0].status, RefinementStatus::Pending);
+        }
 
         // And loaded into the in-memory queue
         let pending = evolution.get_pending_refinements().await;

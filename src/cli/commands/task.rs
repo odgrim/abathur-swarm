@@ -44,16 +44,16 @@ pub struct TaskArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum TaskCommands {
-    /// Submit a new task
-    #[command(after_help = "\
+    /// Create a new task
+    #[command(visible_alias = "submit", after_help = "\
 Examples:
-  abathur task submit \"Fix the login bug\"
-  abathur task submit \"Review PR #42\" --priority high
-  abathur task submit \"Implement feature X\" --goal abc123 --agent rust-impl
-  abathur task submit \"Subtask\" --parent def456 --depends-on ghi789
-  abathur task submit -f prompt.md --priority high
+  abathur task create \"Fix the login bug\"
+  abathur task create \"Review PR #42\" --priority high
+  abathur task create \"Implement feature X\" --goal abc123 --agent rust-impl
+  abathur task create \"Subtask\" --parent def456 --depends-on ghi789
+  abathur task create -f prompt.md --priority high
 ")]
-    Submit {
+    Create {
         /// The prompt to send to the agent (provide this or --file, not both)
         prompt: Option<String>,
         /// Read prompt from a file instead of inline
@@ -131,13 +131,12 @@ Examples:
     /// Force-transition a task to a new status (bypasses state machine checks)
     #[command(after_help = "\
 Examples:
-  abathur task force-transition --id abc123 --status failed --reason \"stuck in validating\"
-  abathur task force-transition --id abc123 --status complete --reason \"manually verified\"
-  abathur task force-transition --id abc123 --status running --reason \"resume after deadlock\"
+  abathur task force-transition abc123 --status failed --reason \"stuck in validating\"
+  abathur task force-transition abc123 --status complete --reason \"manually verified\"
+  abathur task force-transition abc123 --status running --reason \"resume after deadlock\"
 ")]
     ForceTransition {
         /// Task ID (UUID or prefix)
-        #[arg(long)]
         id: String,
         /// Target status: pending, ready, blocked, running, validating, complete, failed, canceled
         #[arg(long)]
@@ -149,17 +148,24 @@ Examples:
     /// Unstick a task that is stuck in an intermediate state (e.g. Validating deadlock)
     #[command(after_help = "\
 Examples:
-  abathur task unstick --id abc123
-  abathur task unstick --id abc123 --strategy complete
-  abathur task unstick --id abc123 --strategy retry
+  abathur task unstick abc123
+  abathur task unstick abc123 --strategy complete
+  abathur task unstick abc123 --strategy retry
 ")]
     Unstick {
         /// Task ID (UUID or prefix)
-        #[arg(long)]
         id: String,
         /// Strategy: fail (default), complete, or retry
         #[arg(long, default_value = "fail")]
         strategy: String,
+    },
+    /// Delete a single task
+    Delete {
+        /// Task ID
+        id: String,
+        /// Force delete even if task is not in a terminal state
+        #[arg(long)]
+        force: bool,
     },
     /// Prune (delete) old or terminal tasks
     #[command(after_help = "\
@@ -486,31 +492,7 @@ impl CommandOutput for TaskPruneOutput {
     }
 }
 
-/// Parse a human-friendly duration string like "7d", "24h", "1w", "30m" into a
-/// `chrono::Duration`.
-fn parse_duration(s: &str) -> Result<chrono::Duration> {
-    let s = s.trim();
-    if s.is_empty() {
-        anyhow::bail!("duration string cannot be empty");
-    }
-
-    let (num_str, unit) = s.split_at(s.len() - 1);
-    let value: i64 = num_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid duration '{}': expected a number followed by a unit (d/h/w/m)", s))?;
-
-    match unit {
-        "m" => Ok(chrono::Duration::minutes(value)),
-        "h" => Ok(chrono::Duration::hours(value)),
-        "d" => Ok(chrono::Duration::days(value)),
-        "w" => Ok(chrono::Duration::weeks(value)),
-        _ => anyhow::bail!(
-            "unknown duration unit '{}' in '{}': expected one of m (minutes), h (hours), d (days), w (weeks)",
-            unit,
-            s
-        ),
-    }
-}
+use crate::cli::display::parse_duration;
 
 pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
     let pool = initialize_default_database()
@@ -523,7 +505,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
     let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {
-        TaskCommands::Submit {
+        TaskCommands::Create {
             prompt,
             file,
             title,
@@ -615,7 +597,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
             let out = TaskActionOutput {
                 success: true,
-                message: format!("Task submitted: {} (status: {})", task.id, task.status.as_str()),
+                message: format!("Task created: {} (status: {})", task.id, task.status.as_str()),
                 task: Some(TaskOutput::from(&task)),
             };
             output(&out, json_mode);
@@ -708,6 +690,29 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 success: true,
                 message: format!("Task retried: {} (retry #{})", task.id, task.retry_count),
                 task: Some(TaskOutput::from(&task)),
+            };
+            output(&out, json_mode);
+        }
+
+        TaskCommands::Delete { id, force } => {
+            let uuid = resolve_task_id(&pool, &id).await?;
+
+            let task = service.get_task(uuid).await?
+                .ok_or_else(|| anyhow::anyhow!("Task not found: {}", id))?;
+
+            if !task.is_terminal() && !force {
+                anyhow::bail!(
+                    "Task {} is in state '{}' (not terminal). Use --force to delete anyway.",
+                    id, task.status.as_str()
+                );
+            }
+
+            service.delete_task(uuid).await?;
+
+            let out = TaskActionOutput {
+                success: true,
+                message: format!("Task deleted: {}", id),
+                task: None,
             };
             output(&out, json_mode);
         }
@@ -888,47 +893,4 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_duration_days() {
-        let d = parse_duration("7d").unwrap();
-        assert_eq!(d, chrono::Duration::days(7));
-    }
-
-    #[test]
-    fn test_parse_duration_hours() {
-        let d = parse_duration("24h").unwrap();
-        assert_eq!(d, chrono::Duration::hours(24));
-    }
-
-    #[test]
-    fn test_parse_duration_weeks() {
-        let d = parse_duration("2w").unwrap();
-        assert_eq!(d, chrono::Duration::weeks(2));
-    }
-
-    #[test]
-    fn test_parse_duration_minutes() {
-        let d = parse_duration("30m").unwrap();
-        assert_eq!(d, chrono::Duration::minutes(30));
-    }
-
-    #[test]
-    fn test_parse_duration_invalid_unit() {
-        assert!(parse_duration("7x").is_err());
-    }
-
-    #[test]
-    fn test_parse_duration_empty() {
-        assert!(parse_duration("").is_err());
-    }
-
-    #[test]
-    fn test_parse_duration_no_number() {
-        assert!(parse_duration("d").is_err());
-    }
-}
 

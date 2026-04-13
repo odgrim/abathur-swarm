@@ -23,8 +23,9 @@ pub struct MemoryArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum MemoryCommands {
-    /// Store a memory
-    Store {
+    /// Create a new memory
+    #[command(visible_alias = "store")]
+    Create {
         /// Memory key
         key: String,
         /// Memory content
@@ -39,8 +40,9 @@ pub enum MemoryCommands {
         #[arg(long, default_value = "fact")]
         memory_type: String,
     },
-    /// Recall a memory by ID or key
-    Recall {
+    /// Show a memory by ID or key
+    #[command(visible_alias = "recall")]
+    Show {
         /// Memory ID or key
         id_or_key: String,
         /// Namespace (required if using key)
@@ -73,8 +75,23 @@ pub enum MemoryCommands {
         #[arg(short, long, default_value = "20")]
         limit: usize,
     },
+    /// Update a memory's content or metadata
+    Update {
+        /// Memory ID
+        id: String,
+        /// New content
+        #[arg(short, long)]
+        content: Option<String>,
+        /// New namespace
+        #[arg(short, long)]
+        namespace: Option<String>,
+        /// New tier (working, episodic, semantic)
+        #[arg(short, long)]
+        tier: Option<String>,
+    },
     /// Delete a memory
-    Forget {
+    #[command(visible_alias = "forget")]
+    Delete {
         /// Memory ID
         id: String,
     },
@@ -264,7 +281,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
     let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {
-        MemoryCommands::Store { key, content, namespace, tier, memory_type } => {
+        MemoryCommands::Create { key, content, namespace, tier, memory_type } => {
             let tier = MemoryTier::from_str(&tier)
                 .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", tier))?;
             let mtype = MemoryType::from_str(&memory_type)
@@ -289,13 +306,13 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
 
             let out = MemoryActionOutput {
                 success: true,
-                message: format!("Memory stored: {} (tier: {})", memory.id, memory.tier.as_str()),
+                message: format!("Memory created: {} (tier: {})", memory.id, memory.tier.as_str()),
                 memory: Some(MemoryOutput::from(&memory)),
             };
             output(&out, json_mode);
         }
 
-        MemoryCommands::Recall { id_or_key, namespace } => {
+        MemoryCommands::Show { id_or_key, namespace } => {
             let cmd = if let Ok(uuid) = resolve_memory_id(&pool, &id_or_key).await {
                 DomainCommand::Memory(MemoryCommand::Recall { id: uuid, accessor: AccessorId::system("cli") })
             } else {
@@ -358,7 +375,37 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        MemoryCommands::Forget { id } => {
+        MemoryCommands::Update { id, content, namespace, tier } => {
+            let uuid = resolve_memory_id(&pool, &id).await?;
+            let tier = tier
+                .map(|t| MemoryTier::from_str(&t)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", t)))
+                .transpose()?;
+
+            let cmd = DomainCommand::Memory(MemoryCommand::Update {
+                id: uuid,
+                content,
+                namespace,
+                tier,
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let memory = match result {
+                CommandResult::Memory(m) => m,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
+
+            let out = MemoryActionOutput {
+                success: true,
+                message: format!("Memory updated: {}", memory.id),
+                memory: Some(MemoryOutput::from(&memory)),
+            };
+            output(&out, json_mode);
+        }
+
+        MemoryCommands::Delete { id } => {
             let uuid = resolve_memory_id(&pool, &id).await?;
 
             let cmd = DomainCommand::Memory(MemoryCommand::Forget { id: uuid });

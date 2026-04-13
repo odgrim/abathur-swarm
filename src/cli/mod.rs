@@ -7,7 +7,8 @@ pub mod event_helpers;
 pub mod id_resolver;
 mod output;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 /// Abathur - Self-evolving agentic swarm orchestrator
@@ -61,6 +62,17 @@ pub enum Commands {
     Adapter(commands::adapter::AdapterArgs),
     /// Quick cron schedule management
     Cron(commands::cron::CronArgs),
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
+}
+
+/// Generate shell completions and write to stdout.
+pub fn print_completions(shell: Shell) {
+    let mut cmd = Cli::command();
+    clap_complete::generate(shell, &mut cmd, "abathur", &mut std::io::stdout());
 }
 
 pub fn handle_error(err: anyhow::Error, json_mode: bool) -> ! {

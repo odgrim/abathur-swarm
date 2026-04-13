@@ -7,7 +7,8 @@ use std::sync::Arc;
 use crate::adapters::sqlite::{initialize_default_database, SqliteEventRepository};
 use crate::cli::id_resolver::resolve_dlq_id;
 use crate::cli::display::{
-    list_table, output, render_list, short_id, truncate_ellipsis, CommandOutput, DetailView,
+    action_success, list_table, output, render_list, short_id, truncate_ellipsis, CommandOutput,
+    DetailView,
 };
 use crate::services::event_store::{EventQuery, EventStore};
 
@@ -238,7 +239,7 @@ pub struct DlqActionOutput {
 
 impl CommandOutput for DlqActionOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        action_success(&self.message)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -246,28 +247,7 @@ impl CommandOutput for DlqActionOutput {
     }
 }
 
-fn parse_duration(s: &str) -> Result<std::time::Duration> {
-    let s = s.trim();
-    if s.is_empty() {
-        anyhow::bail!("Empty duration string");
-    }
-    let (num_str, suffix) = if let Some(prefix) = s.strip_suffix('d') {
-        (prefix, "d")
-    } else if let Some(prefix) = s.strip_suffix('h') {
-        (prefix, "h")
-    } else if let Some(prefix) = s.strip_suffix('m') {
-        (prefix, "m")
-    } else {
-        anyhow::bail!("Duration must end with 'd', 'h', or 'm' (e.g., '7d', '24h', '30m')");
-    };
-    let num: u64 = num_str.parse().context("Invalid number in duration")?;
-    match suffix {
-        "d" => Ok(std::time::Duration::from_secs(num * 86400)),
-        "h" => Ok(std::time::Duration::from_secs(num * 3600)),
-        "m" => Ok(std::time::Duration::from_secs(num * 60)),
-        _ => unreachable!(),
-    }
-}
+use crate::cli::display::parse_std_duration;
 
 pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
     let pool = initialize_default_database()
@@ -431,7 +411,7 @@ pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
                 output(&out, json_mode);
             }
             DlqCommands::Purge { older_than } => {
-                let duration = parse_duration(&older_than)?;
+                let duration = parse_std_duration(&older_than)?;
                 let purged = store
                     .purge_dead_letters(duration)
                     .await

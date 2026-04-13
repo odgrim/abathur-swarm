@@ -180,12 +180,11 @@ impl SwarmDagExecutor {
 
         let mut failed_ids = Vec::new();
         for dep_id in &transitive {
-            if let Some(dep_node) = dag.get_node_mut(*dep_id) {
-                if !dep_node.state.is_terminal() {
+            if let Some(dep_node) = dag.get_node_mut(*dep_id)
+                && !dep_node.state.is_terminal() {
                     dep_node.state = SwarmDagNodeState::Failed;
                     failed_ids.push(*dep_id);
                 }
-            }
         }
 
         // Emit failure events for cascaded nodes.
@@ -306,7 +305,6 @@ mod tests {
 
     /// Test DAG state machine transitions without requiring a real FederationService.
     /// These tests exercise the SwarmDag model directly.
-
     fn make_node(label: &str, cerebrate_id: &str, deps: Vec<Uuid>) -> SwarmDagNode {
         SwarmDagNode {
             id: Uuid::new_v4(),

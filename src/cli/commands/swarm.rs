@@ -864,11 +864,10 @@ async fn run_swarm_foreground(
             federation_service
                 .register_cerebrate(&cc.id, &cc.display_name, &cc.url)
                 .await;
-            if cc.auto_connect {
-                if let Err(e) = federation_service.connect(&cc.id).await {
+            if cc.auto_connect
+                && let Err(e) = federation_service.connect(&cc.id).await {
                     tracing::warn!(cerebrate_id = %cc.id, error = %e, "Federation auto-connect failed");
                 }
-            }
         }
 
         // Start federation background loops (heartbeat, stall/orphan detection).
@@ -955,11 +954,9 @@ async fn run_swarm_foreground(
         if let Err(e) = orchestrator
             .start_convergence_poller(a2a_client, federated_goal_repo)
             .await
-        {
-            if !json_mode {
+            && !json_mode {
                 println!("Warning: Failed to start convergence poller: {}", e);
             }
-        }
 
         // Cerebrate: start convergence publisher (no-op if role is Overmind).
         // The publisher needs the A2A gateway's in-memory task map. If an A2A
@@ -969,11 +966,10 @@ async fn run_swarm_foreground(
         let a2a_tasks = Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         ));
-        if let Err(e) = orchestrator.start_convergence_publisher(a2a_tasks).await {
-            if !json_mode {
+        if let Err(e) = orchestrator.start_convergence_publisher(a2a_tasks).await
+            && !json_mode {
                 println!("Warning: Failed to start convergence publisher: {}", e);
             }
-        }
     }
 
     // If a DAG file was provided, parse it, create the parent goal, register
@@ -1080,8 +1076,8 @@ async fn run_swarm_foreground(
                 SwarmEvent::TaskSubmitted { task_id, task_title, goal_id } => {
                     if !json_mode {
                         match goal_id {
-                            Some(gid) => println!("  Task submitted: {} ({}) for goal {}", task_title, task_id, gid),
-                            None => println!("  Task submitted: {} ({})", task_title, task_id),
+                            Some(gid) => println!("  Task created: {} ({}) for goal {}", task_title, task_id, gid),
+                            None => println!("  Task created: {} ({})", task_title, task_id),
                         }
                     }
                 }

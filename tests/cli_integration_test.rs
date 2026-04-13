@@ -428,7 +428,7 @@ fn task_submit_creates_task() {
         .args(["task", "submit", "Do something", "-t", "Test task"])
         .assert()
         .success_without_warnings()
-        .stdout(predicates::str::contains("Task submitted"));
+        .stdout(predicates::str::contains("Task created"));
 }
 
 #[test]
@@ -866,9 +866,8 @@ fn trigger_list_enabled_only() {
     // All built-in rules start enabled
     assert!(!rules.is_empty());
     for rule in rules {
-        assert_eq!(
+        assert!(
             rule["enabled"].as_bool().unwrap(),
-            true,
             "enabled-only filter should return only enabled rules"
         );
     }
@@ -940,7 +939,7 @@ fn trigger_disable_and_enable() {
 
     // Verify it shows as disabled
     let show = run_json(dir, &["trigger", "show", rule_name, "--json"]);
-    assert_eq!(show["rule"]["enabled"].as_bool().unwrap(), false);
+    assert!(!show["rule"]["enabled"].as_bool().unwrap());
 
     // Re-enable the rule
     abathur_cmd(dir)
@@ -951,7 +950,7 @@ fn trigger_disable_and_enable() {
 
     // Verify it shows as enabled again
     let show = run_json(dir, &["trigger", "show", rule_name, "--json"]);
-    assert_eq!(show["rule"]["enabled"].as_bool().unwrap(), true);
+    assert!(show["rule"]["enabled"].as_bool().unwrap());
 }
 
 #[test]
@@ -1011,7 +1010,7 @@ fn trigger_full_lifecycle() {
         .success_without_warnings();
 
     let show_disabled = run_json(dir, &["trigger", "show", &first_name, "--json"]);
-    assert_eq!(show_disabled["rule"]["enabled"].as_bool().unwrap(), false);
+    assert!(!show_disabled["rule"]["enabled"].as_bool().unwrap());
 
     // 5. Enable the rule
     abathur_cmd(dir)
@@ -1020,7 +1019,7 @@ fn trigger_full_lifecycle() {
         .success_without_warnings();
 
     let show_enabled = run_json(dir, &["trigger", "show", &first_name, "--json"]);
-    assert_eq!(show_enabled["rule"]["enabled"].as_bool().unwrap(), true);
+    assert!(show_enabled["rule"]["enabled"].as_bool().unwrap());
 
     // 6. Delete the rule
     abathur_cmd(dir)
@@ -1357,9 +1356,8 @@ fn mcp_status_json_output() {
         assert!(server["port"].as_u64().is_some());
         assert!(server["running"].as_bool().is_some());
         // All servers should be stopped in a fresh project
-        assert_eq!(
-            server["running"].as_bool().unwrap(),
-            false,
+        assert!(
+            !server["running"].as_bool().unwrap(),
             "Server {} should be stopped",
             server["name"]
         );
@@ -1523,7 +1521,7 @@ fn memory_store_creates_memory() {
         .args(["memory", "store", "test-key", "test content"])
         .assert()
         .success_without_warnings()
-        .stdout(predicates::str::contains("Memory stored"));
+        .stdout(predicates::str::contains("Memory created"));
 }
 
 #[test]
@@ -1865,7 +1863,7 @@ fn agent_register_creates_worker() {
         .args(["agent", "register", "test-worker", "-p", "You are a test agent"])
         .assert()
         .success_without_warnings()
-        .stdout(predicates::str::contains("Agent registered"));
+        .stdout(predicates::str::contains("Agent created"));
 }
 
 #[test]
@@ -2238,7 +2236,7 @@ fn agent_gateway_status_json_output() {
 
     let json = run_json(dir, &["agent", "gateway-status", "--json"]);
 
-    assert_eq!(json["running"].as_bool().unwrap(), false);
+    assert!(!json["running"].as_bool().unwrap());
     assert!(json["url"].as_str().is_some());
     assert!(json["message"].as_str().is_some());
     assert_eq!(json["agents"].as_u64().unwrap(), 0);
@@ -3463,7 +3461,7 @@ fn swarm_active_with_goals() {
         .as_array()
         .expect("active_goals should be an array");
     assert!(
-        active_goals.len() >= 1,
+        !active_goals.is_empty(),
         "Should have at least one active goal"
     );
     assert!(
@@ -4243,7 +4241,7 @@ fn task_list_ready_json_output() {
     let json = run_json(dir, &["task", "list", "--ready", "--json"]);
 
     let tasks = json["tasks"].as_array().expect("tasks should be an array");
-    assert!(tasks.len() >= 1, "Should have at least one ready task");
+    assert!(!tasks.is_empty(), "Should have at least one ready task");
     assert!(json["total"].as_u64().unwrap() >= 1);
 
     // The submitted task (with no deps) should appear in the ready list
@@ -4836,9 +4834,8 @@ fn agent_send_gateway_unavailable_succeeds_with_failure_message() {
         ],
     );
 
-    assert_eq!(
-        json["success"].as_bool().unwrap(),
-        false,
+    assert!(
+        !json["success"].as_bool().unwrap(),
         "send should report success: false when gateway is unreachable"
     );
     assert!(json["message_id"].as_str().is_some(), "should include a message_id");
@@ -4888,7 +4885,7 @@ fn agent_send_with_message_type_json() {
         ],
     );
 
-    assert_eq!(json["success"].as_bool().unwrap(), false);
+    assert!(!json["success"].as_bool().unwrap());
     assert!(json["message_id"].as_str().is_some());
 }
 
@@ -4913,7 +4910,7 @@ fn agent_send_with_from_and_task_id_json() {
         ],
     );
 
-    assert_eq!(json["success"].as_bool().unwrap(), false);
+    assert!(!json["success"].as_bool().unwrap());
     assert!(json["message_id"].as_str().is_some());
 }
 
@@ -4992,9 +4989,8 @@ fn agent_cards_list_gateway_unavailable_json() {
         &["agent", "cards", "list", "--gateway", "http://127.0.0.1:19999", "--json"],
     );
 
-    assert_eq!(
-        json["success"].as_bool().unwrap(),
-        false,
+    assert!(
+        !json["success"].as_bool().unwrap(),
         "cards list should report success: false when gateway is unreachable"
     );
     let msg = json["message"].as_str().unwrap();
@@ -5029,9 +5025,8 @@ fn agent_cards_export_gateway_unavailable_json() {
         &["agent", "cards", "export", "--gateway", "http://127.0.0.1:19999", "--json"],
     );
 
-    assert_eq!(
-        json["success"].as_bool().unwrap(),
-        false,
+    assert!(
+        !json["success"].as_bool().unwrap(),
         "cards export should report success: false when gateway is unreachable"
     );
     assert!(json["message"].as_str().is_some());
@@ -5052,9 +5047,8 @@ fn agent_cards_show_gateway_unavailable_json() {
         ],
     );
 
-    assert_eq!(
-        json["success"].as_bool().unwrap(),
-        false,
+    assert!(
+        !json["success"].as_bool().unwrap(),
         "cards show should report success: false when gateway is unreachable"
     );
     let msg = json["message"].as_str().unwrap();
