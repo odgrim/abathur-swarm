@@ -763,15 +763,24 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Recommend the cheapest capable model for this phase class.
+        // Research/plan/review/triage work is well within Sonnet's range;
+        // implementation is too, but can be bumped to Opus on complex tasks.
+        let preferred_model = match phase.name.to_lowercase().as_str() {
+            "triage" => "haiku",
+            _ => "sonnet",
+        };
+
         example.push_str(&format!(
             "# Create agent for this phase's subtask\n\
              tool: agent_create\narguments:\n\
              \x20 name: \"{}-agent\"\n\
              \x20 description: \"{}\"\n\
              \x20 tier: \"{}\"\n\
+             \x20 preferred_model: \"{}\"\n\
              \x20 system_prompt: |\n{}\n\
              \x20 tools:\n",
-            phase.name, phase.role, tier_str, indented_skeleton,
+            phase.name, phase.role, tier_str, preferred_model, indented_skeleton,
         ));
 
         for tool in &phase.tools {
@@ -888,11 +897,12 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
 ### Agent Management
 - **agent_list**: Check what agent templates already exist before creating new ones. Always call this first.
 - **agent_get**: Get full details of an agent template by name, including its system prompt and tools.
-- **agent_create**: Create a new agent template. Required fields: `name`, `description`, `system_prompt`. Optional: `tier` (worker|specialist|architect, default: worker), `tools` (array of {name, description, required}), `constraints` (array of {name, description}), `max_turns` (default: 25), `read_only` (boolean, default: false — set to true for research/analysis/planning agents that produce findings via memory rather than code commits).
+- **agent_create**: Create a new agent template. Required fields: `name`, `description`, `system_prompt`. Optional: `tier` (worker|specialist|architect, default: worker), `tools` (array of {name, description, required}), `constraints` (array of {name, description}), `max_turns` (default: 25), `read_only` (boolean, default: false — set to true for research/analysis/planning agents that produce findings via memory rather than code commits), `preferred_model` (`haiku` | `sonnet` | `opus`).
   - **Tool categories for agents**: `read`, `write`, `edit`, `shell`, `glob`, `grep`, `memory`, `task_status`, `tasks`, `agents`.
   - Use `task_status` for worker/specialist agents — it grants only `task_update_status` and `task_get` so agents can mark themselves complete and read their task details, but CANNOT create subtasks or list other tasks.
   - Use `tasks` only for orchestrator-level agents that need to create and manage subtasks.
   - Use `agents` only for agents that need to create other agent templates (almost never — only the Overmind needs this).
+  - **Model selection (`preferred_model`)**: pick the cheapest tier that can do the job. Default to `sonnet` for researchers, planners, reviewers, and most implementers — it is substantially cheaper than Opus and handles the vast majority of work. Use `haiku` for trivial lookups, short summaries, or classification. Reserve `opus` for agents that must reason across large, tangled codebases or design non-trivial architecture. If you omit this field, the orchestrator picks automatically from task complexity, so setting it explicitly is only necessary when you want to override that default.
 
 ### Task Management
 - **task_list**: List tasks, optionally filtered by `status` (pending|ready|running|complete|failed|blocked). Use this to track subtask progress.
@@ -1013,6 +1023,7 @@ arguments:
   name: "codebase-researcher"
   description: "Read-only agent that explores codebases and reports findings via memory"
   tier: "worker"
+  preferred_model: "sonnet"
   system_prompt: |
     You are a codebase research specialist. Explore the codebase to answer specific questions and store findings in swarm memory.
 
@@ -1258,11 +1269,12 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
 ### Agent Management
 - **agent_list**: Check what agent templates already exist before creating new ones. Always call this first.
 - **agent_get**: Get full details of an agent template by name, including its system prompt and tools.
-- **agent_create**: Create a new agent template. Required fields: `name`, `description`, `system_prompt`. Optional: `tier` (worker|specialist|architect, default: worker), `tools` (array of {name, description, required}), `constraints` (array of {name, description}), `max_turns` (default: 25), `read_only` (boolean, default: false — set to true for research/analysis/planning agents that produce findings via memory rather than code commits).
+- **agent_create**: Create a new agent template. Required fields: `name`, `description`, `system_prompt`. Optional: `tier` (worker|specialist|architect, default: worker), `tools` (array of {name, description, required}), `constraints` (array of {name, description}), `max_turns` (default: 25), `read_only` (boolean, default: false — set to true for research/analysis/planning agents that produce findings via memory rather than code commits), `preferred_model` (`haiku` | `sonnet` | `opus`).
   - **Tool categories for agents**: `read`, `write`, `edit`, `shell`, `glob`, `grep`, `memory`, `task_status`, `tasks`, `agents`.
   - Use `task_status` for worker/specialist agents — it grants only `task_update_status` and `task_get` so agents can mark themselves complete and read their task details, but CANNOT create subtasks or list other tasks.
   - Use `tasks` only for orchestrator-level agents that need to create and manage subtasks.
   - Use `agents` only for agents that need to create other agent templates (almost never — only the Overmind needs this).
+  - **Model selection (`preferred_model`)**: pick the cheapest tier that can do the job. Default to `sonnet` for researchers, planners, reviewers, and most implementers — it is substantially cheaper than Opus and handles the vast majority of work. Use `haiku` for trivial lookups, short summaries, or classification. Reserve `opus` for agents that must reason across large, tangled codebases or design non-trivial architecture. If you omit this field, the orchestrator picks automatically from task complexity, so setting it explicitly is only necessary when you want to override that default.
 
 ### Task Management
 - **task_list**: List tasks, optionally filtered by `status` (pending|ready|running|complete|failed|blocked). Use this to track subtask progress.

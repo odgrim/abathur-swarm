@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{
+    AgentTier,
     RelevanceWeights, ScoredMemory,
     SessionStatus, SubstrateConfig, SubstrateRequest,
     Task, TaskStatus,
@@ -19,8 +20,8 @@ use crate::domain::models::{
 use crate::services::memory_service::MemoryService;
 use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
-    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    CircuitScope, GoalContextService,
+    AgentTierHint, AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
+    CircuitScope, GoalContextService, ModelRouter,
     TaskExecution, TaskOutcome,
     command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
 };
@@ -445,7 +446,7 @@ where
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
             // Get agent template for version tracking, capabilities, and tool restrictions
-            let (template_version, capabilities, cli_tools, agent_can_write, is_template_read_only, template_max_turns, template_preferred_model) = match self.agent_repo.get_template_by_name(&agent_type).await {
+            let (template_version, capabilities, cli_tools, agent_can_write, is_template_read_only, template_max_turns, template_preferred_model, template_tier) = match self.agent_repo.get_template_by_name(&agent_type).await {
                 Ok(Some(template)) => {
                     let caps: Vec<String> = template.tools.iter()
                         .map(|t| t.name.clone())
@@ -455,10 +456,10 @@ where
                         let lower = c.to_lowercase();
                         lower == "write" || lower == "edit" || lower == "shell"
                     });
-                    (template.version, caps, tools, can_write, template.read_only, template.max_turns, template.preferred_model.clone())
+                    (template.version, caps, tools, can_write, template.read_only, template.max_turns, template.preferred_model.clone(), template.tier)
                 }
                 // Default to true when template lookup fails (safer to require commits from unknown agents)
-                _ => (1, vec!["task-execution".to_string()], vec![], true, false, 0, None),
+                _ => (1, vec!["task-execution".to_string()], vec![], true, false, 0, None, AgentTier::Worker),
             };
 
             // Read-only agent roles never produce commits regardless of tool capabilities.
@@ -1526,9 +1527,33 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                     config = config.with_working_dir(wt_path);
                 }
 
-                // Apply preferred model from template (e.g. "haiku" for aggregator)
+                // Model selection priority:
+                //   1. Template's preferred_model (explicit override, e.g. "haiku" for aggregator)
+                //   2. ModelRouter (cost-aware routing by complexity + tier + retry count)
+                // Without this, config.model stays None and the substrate falls back to its
+                // default model (Opus for Claude Code) for every agent — the swarm never
+                // downgrades to cheaper models.
                 if let Some(ref model) = template_preferred_model {
                     config.model = Some(model.clone());
+                } else {
+                    let tier_hint = match template_tier {
+                        AgentTier::Architect => AgentTierHint::Architect,
+                        AgentTier::Specialist => AgentTierHint::Specialist,
+                        AgentTier::Worker => AgentTierHint::Worker,
+                    };
+                    let selection = ModelRouter::with_defaults().select_model(
+                        task_clone.routing_hints.complexity,
+                        Some(tier_hint),
+                        task_clone.retry_count,
+                    );
+                    tracing::debug!(
+                        task_id = %task_id,
+                        %agent_type,
+                        model = %selection.model,
+                        reason = %selection.reason,
+                        "ModelRouter selected model for direct execution"
+                    );
+                    config.model = Some(selection.model);
                 }
 
                 // Apply agent-specific tool restrictions from template

@@ -43,6 +43,7 @@ impl<R: AgentRepository> AgentService<R> {
         constraints: Vec<AgentConstraint>,
         max_turns: Option<u32>,
         read_only: bool,
+        preferred_model: Option<String>,
     ) -> DomainResult<AgentTemplate> {
         // Check if template with same name exists
         if let Some(existing) = self.repository.get_template_by_name(&name).await? {
@@ -56,6 +57,7 @@ impl<R: AgentRepository> AgentService<R> {
                 .with_read_only(read_only);
 
             template.version = existing.version + 1;
+            template.preferred_model = preferred_model.clone();
 
             for tool in tools {
                 template = template.with_tool(tool);
@@ -95,6 +97,7 @@ impl<R: AgentRepository> AgentService<R> {
             .with_prompt(system_prompt)
             .with_max_turns(effective_turns)
             .with_read_only(read_only);
+        template.preferred_model = preferred_model;
 
         for tool in tools {
             template = template.with_tool(tool);
@@ -632,6 +635,7 @@ mod tests {
             vec![],
             None,
             false,
+            None,
         ).await.unwrap();
 
         assert_eq!(template.name, "test-agent");
@@ -652,6 +656,7 @@ mod tests {
             vec![],
             None,
             false,
+            None,
         ).await.unwrap();
 
         // Create second version
@@ -664,6 +669,7 @@ mod tests {
             vec![],
             None,
             false,
+            None,
         ).await.unwrap();
 
         assert_eq!(v2.version, 2);
@@ -683,6 +689,7 @@ mod tests {
             vec![],
             None,
             false,
+            None,
         ).await.unwrap();
 
         let instance = service.spawn_instance("spawnable").await.unwrap();
@@ -703,6 +710,7 @@ mod tests {
             vec![],
             None,
             false,
+            None,
         ).await.unwrap();
 
         let instance = service.spawn_instance("lifecycle").await.unwrap();
@@ -782,6 +790,7 @@ mod tests {
             vec![],
             None,
             false,
+            None,
         ).await.unwrap();
 
         let disabled = service.set_template_status("toggleable", AgentStatus::Disabled).await.unwrap();

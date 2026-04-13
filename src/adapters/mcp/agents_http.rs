@@ -225,6 +225,7 @@ async fn create_agent<A: AgentRepository + Clone + Send + Sync + 'static>(
         constraints,
         req.max_turns,
         req.read_only,
+        None,
     ).await {
         Ok(template) => Ok((StatusCode::CREATED, Json(to_response(&template)))),
         Err(e) => Err((
