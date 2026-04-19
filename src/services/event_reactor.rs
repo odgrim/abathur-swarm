@@ -348,6 +348,38 @@ impl CircuitBreakerState {
             initial_secs.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
         Duration::from_secs(backoff_secs.min(max_secs))
     }
+
+    /// Atomic "may I allow this invocation?" — combines cooldown reset + tripped check
+    /// under a single locked section so the decision cannot race with concurrent mutations.
+    ///
+    /// Returns true if the handler should be invoked, false if the CB is still tripped.
+    fn try_allow(
+        &mut self,
+        cooldown: Duration,
+        critical_initial_secs: u64,
+        critical_max_secs: u64,
+    ) -> bool {
+        self.reset_if_cooled_with_config(cooldown, critical_initial_secs, critical_max_secs);
+        !self.is_tripped_with_config(cooldown, critical_initial_secs, critical_max_secs)
+    }
+
+    /// Atomic "record a failure and tell me if we're tripped now (+ backoff attempt)".
+    ///
+    /// Combines record_failure + is_tripped_with_config + backoff_attempt read in a
+    /// single locked section so callers observe a consistent post-failure state.
+    fn record_failure_and_report(
+        &mut self,
+        threshold: u32,
+        window: Duration,
+        cooldown: Duration,
+        critical_initial_secs: u64,
+        critical_max_secs: u64,
+    ) -> (bool, u32) {
+        self.record_failure(threshold, window);
+        let tripped =
+            self.is_tripped_with_config(cooldown, critical_initial_secs, critical_max_secs);
+        (tripped, self.backoff_attempt)
+    }
 }
 
 /// Configuration for the EventReactor.
@@ -616,22 +648,18 @@ impl EventReactor {
                 for handler in handlers_snapshot.iter() {
                     let meta = handler.metadata();
 
-                    // Check circuit breaker
+                    // Check circuit breaker — combined reset+tripped check under one lock
+                    // section to avoid torn reads between concurrent dispatches.
                     {
                         let mut cbs = circuit_breakers.write().await;
-                        if let Some(cb) = cbs.get_mut(&meta.id) {
-                            cb.reset_if_cooled_with_config(
+                        if let Some(cb) = cbs.get_mut(&meta.id)
+                            && !cb.try_allow(
                                 Duration::from_secs(config.circuit_breaker_cooldown_secs),
                                 config.critical_cooldown_initial_secs,
                                 config.critical_cooldown_max_secs,
-                            );
-                            if cb.is_tripped_with_config(
-                                Duration::from_secs(config.circuit_breaker_cooldown_secs),
-                                config.critical_cooldown_initial_secs,
-                                config.critical_cooldown_max_secs,
-                            ) {
-                                continue;
-                            }
+                            )
+                        {
+                            continue;
                         }
                     }
 
@@ -698,18 +726,19 @@ impl EventReactor {
                             let mut tripped = false;
                             let mut backoff_attempt = 0u32;
                             if meta.error_strategy == ErrorStrategy::CircuitBreak {
+                                // Atomic record-and-report under one lock section to avoid
+                                // torn reads / double-trip / mis-reported backoff.
                                 let mut cbs = circuit_breakers.write().await;
                                 if let Some(cb) = cbs.get_mut(&meta.id) {
-                                    cb.record_failure(
+                                    let (t, b) = cb.record_failure_and_report(
                                         config.circuit_breaker_threshold,
                                         Duration::from_secs(config.circuit_breaker_window_secs),
-                                    );
-                                    tripped = cb.is_tripped_with_config(
                                         Duration::from_secs(config.circuit_breaker_cooldown_secs),
                                         config.critical_cooldown_initial_secs,
                                         config.critical_cooldown_max_secs,
                                     );
-                                    backoff_attempt = cb.backoff_attempt;
+                                    tripped = t;
+                                    backoff_attempt = b;
                                 }
                             }
                             // Emit HandlerError event for monitoring
@@ -782,12 +811,50 @@ impl EventReactor {
                                     dlq_err
                                 );
                             }
-                            let mut cbs = circuit_breakers.write().await;
-                            if let Some(cb) = cbs.get_mut(&meta.id) {
-                                cb.record_failure(
-                                    config.circuit_breaker_threshold,
-                                    Duration::from_secs(config.circuit_breaker_window_secs),
+                            // Atomic record-and-report under one lock section; also pick up
+                            // whether the timeout just tripped the CB so we can emit
+                            // CriticalHandlerDegraded symmetrically with the error branch.
+                            let mut tripped = false;
+                            let mut backoff_attempt = 0u32;
+                            {
+                                let mut cbs = circuit_breakers.write().await;
+                                if let Some(cb) = cbs.get_mut(&meta.id) {
+                                    let (t, b) = cb.record_failure_and_report(
+                                        config.circuit_breaker_threshold,
+                                        Duration::from_secs(config.circuit_breaker_window_secs),
+                                        Duration::from_secs(config.circuit_breaker_cooldown_secs),
+                                        config.critical_cooldown_initial_secs,
+                                        config.critical_cooldown_max_secs,
+                                    );
+                                    tripped = t;
+                                    backoff_attempt = b;
+                                }
+                            }
+                            // Emit CriticalHandlerDegraded when a critical handler's CB trips
+                            // on timeout — matches the error-path behavior.
+                            if tripped && meta.critical {
+                                tracing::error!(
+                                    "EventReactor: CRITICAL handler '{}' circuit breaker tripped on timeout (backoff attempt {})",
+                                    meta.name,
+                                    backoff_attempt
                                 );
+                                reactions.push(UnifiedEvent {
+                                    id: EventId::new(),
+                                    sequence: SequenceNumber(0),
+                                    timestamp: chrono::Utc::now(),
+                                    severity: EventSeverity::Critical,
+                                    category: EventCategory::Orchestrator,
+                                    goal_id: None,
+                                    task_id: None,
+                                    correlation_id: event.correlation_id,
+                                    source_process_id: None,
+                                    payload: EventPayload::CriticalHandlerDegraded {
+                                        handler_name: meta.name.clone(),
+                                        error: timeout_msg.clone(),
+                                        failure_count: config.circuit_breaker_threshold,
+                                        backoff_attempt,
+                                    },
+                                });
                             }
                             // Do NOT advance watermark for timed-out handlers
                         }
