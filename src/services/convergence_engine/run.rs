@@ -111,17 +111,40 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
         })?;
         let effects = self.effects.clone();
         let prompt_builder: Option<Arc<dyn PromptBuilder>> = self.prompt_builder.clone();
-        self.run_inner(
-            submission,
-            task_id,
-            resume,
-            executor,
-            effects,
-            advisor,
-            prompt_builder,
-            None,
-        )
-        .await
+        let result = self
+            .run_inner(
+                submission,
+                task_id,
+                resume,
+                executor,
+                effects,
+                advisor,
+                prompt_builder,
+                None,
+            )
+            .await;
+
+        // Metrics: convergence outcome (bounded outcome labels; no trajectory
+        // ids, no free-form error strings).
+        if let Ok(ref outcome) = result {
+            let outcome_lbl = match outcome {
+                ConvergenceRunOutcome::Converged => "converged",
+                ConvergenceRunOutcome::Exhausted(_) => "exhausted",
+                ConvergenceRunOutcome::IntentGapsFound(_) => "intent_gaps",
+                ConvergenceRunOutcome::PartialAccepted => "partial_accepted",
+                ConvergenceRunOutcome::IndeterminateAccepted => "indeterminate_accepted",
+                ConvergenceRunOutcome::Cancelled => "cancelled",
+                ConvergenceRunOutcome::Decomposed(_) => "decomposed",
+                ConvergenceRunOutcome::Failed(_) => "failed",
+            };
+            ::metrics::counter!(
+                "abathur_convergence_runs_total",
+                "outcome" => outcome_lbl
+            )
+            .increment(1);
+        }
+
+        result
     }
 
     /// Shared implementation used by [`Self::run`] and [`Self::run_with_ports`].

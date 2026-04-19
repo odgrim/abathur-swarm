@@ -34,6 +34,7 @@ pub mod llm_planner;
 pub mod memory_decay_daemon;
 pub mod memory_service;
 pub mod merge_queue;
+pub mod metrics_exporter;
 pub mod meta_planner; // Rust service module for decomposition planning
 pub mod model_router;
 pub mod outbox_poller;

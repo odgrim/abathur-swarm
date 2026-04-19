@@ -220,6 +220,13 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
         trajectory.updated_at = Utc::now();
         self.trajectory_store.save(trajectory).await?;
 
+        // Metrics: observe the iteration count at terminal finalize. This is
+        // the single chokepoint for every terminal convergence outcome.
+        // Use `::metrics` because a local `metrics` module symbol is in scope
+        // via the convergence glob import.
+        ::metrics::histogram!("abathur_convergence_iterations")
+            .record(trajectory.budget.iterations_used as f64);
+
         Ok(())
     }
 

@@ -632,6 +632,10 @@ where
             .list_by_status(MergeStatus::Queued)
             .await
             .context("process_next: merge_repo.list_by_status(Queued)")?;
+
+        // Metrics: sample queue depth each time we look.
+        metrics::gauge!("abathur_merge_queue_depth").set(queued.len() as f64);
+
         let mut request = match queued.into_iter().next() {
             Some(req) => req,
             None => {
@@ -658,6 +662,12 @@ where
         }
 
         tracing::info!(merge_request_id = %request.id, stage = ?request.stage, task_id = %request.task_id, "processing merge request");
+
+        // Metrics: queue-wait duration observed on dequeue (created → picked up).
+        let wait_secs =
+            (Utc::now() - request.created_at).num_milliseconds().max(0) as f64 / 1000.0;
+        metrics::histogram!("abathur_merge_wait_seconds").record(wait_secs);
+
         request.status = MergeStatus::InProgress;
         request.updated_at = Utc::now();
         self.merge_repo.update(&request).await.with_context(|| {
@@ -681,6 +691,20 @@ where
                 request.status.as_str()
             )
         })?;
+
+        // Metrics: terminal outcome (cardinality-bounded).
+        let outcome = match request.status {
+            MergeStatus::Completed => "succeeded",
+            MergeStatus::Failed => "failed",
+            MergeStatus::VerificationFailed => "rolled_back",
+            MergeStatus::Conflict => "conflict",
+            _ => "other",
+        };
+        metrics::counter!(
+            "abathur_merge_outcomes_total",
+            "outcome" => outcome
+        )
+        .increment(1);
 
         result.map(Some)
     }

@@ -674,12 +674,34 @@ impl EventReactor {
                         correlation_id: event.correlation_id,
                     };
 
+                    // Metrics: handler dispatch. Handler names are
+                    // static strings registered at startup — bounded cardinality.
+                    metrics::counter!(
+                        "abathur_handler_invocations_total",
+                        "handler" => meta.name.clone()
+                    )
+                    .increment(1);
+                    let handler_start = std::time::Instant::now();
+
                     // Execute with timeout
                     let result = tokio::time::timeout(
                         Duration::from_millis(config.handler_timeout_ms),
                         handler.handle(&event, &ctx),
                     )
                     .await;
+
+                    metrics::histogram!(
+                        "abathur_handler_duration_seconds",
+                        "handler" => meta.name.clone()
+                    )
+                    .record(handler_start.elapsed().as_secs_f64());
+                    if !matches!(result, Ok(Ok(_))) {
+                        metrics::counter!(
+                            "abathur_handler_failures_total",
+                            "handler" => meta.name.clone()
+                        )
+                        .increment(1);
+                    }
 
                     match result {
                         Ok(Ok(Reaction::EmitEvents(events))) if !suppress_reactions => {

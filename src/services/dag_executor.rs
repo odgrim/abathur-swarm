@@ -382,6 +382,9 @@ where
                 }
             }
 
+            // Metrics: time each wave's completion.
+            let wave_start = std::time::Instant::now();
+
             // Execute wave tasks in parallel with concurrency limit
             let wave_results = self
                 .execute_wave(
@@ -393,6 +396,9 @@ where
                     &self.event_bus,
                 )
                 .await?;
+
+            metrics::histogram!("abathur_dag_wave_duration_seconds")
+                .record(wave_start.elapsed().as_secs_f64());
 
             // Process wave results
             let mut wave_succeeded = 0;
@@ -513,6 +519,20 @@ where
             let mut status = self.status.write().await;
             *status = final_status.clone();
         }
+
+        // Metrics: DAG-level outcome (bounded ExecutionStatus variants).
+        let outcome_lbl = match final_status {
+            ExecutionStatus::Completed => "completed",
+            ExecutionStatus::PartialSuccess => "partial_success",
+            ExecutionStatus::Failed => "failed",
+            ExecutionStatus::Canceled => "cancelled",
+            ExecutionStatus::Pending | ExecutionStatus::Running => "other",
+        };
+        metrics::counter!(
+            "abathur_dag_executions_total",
+            "outcome" => outcome_lbl
+        )
+        .increment(1);
 
         let _ = event_tx
             .send(ExecutionEvent::Completed {

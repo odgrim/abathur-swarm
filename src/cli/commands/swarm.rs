@@ -666,6 +666,12 @@ async fn run_swarm_foreground(
         let _ = remove_pid_file();
     });
 
+    // Install the Prometheus metrics exporter for the long-running swarm
+    // process. Controlled by ABATHUR_METRICS_PORT (default 9091; set to 0 or
+    // "disabled" to skip). Safe if already installed — returns None and
+    // continues without replacing the existing recorder.
+    let _metrics_addr = crate::services::metrics_exporter::install_from_env();
+
     // Initialize database
     let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
     let migrator = Migrator::new(pool.clone());

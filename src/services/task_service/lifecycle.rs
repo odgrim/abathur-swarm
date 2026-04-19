@@ -90,6 +90,25 @@ impl<T: TaskRepository> TaskService<T> {
         self.task_repo.update(&task).await?;
         tracing::info!(%task_id, execution_mode = ?task.execution_mode, "task completed successfully");
 
+        // Metrics: terminal completion. Labels are cardinality-bounded
+        // (template = task_type variant, outcome ∈ {succeeded}).
+        let template = task.task_type.as_str();
+        metrics::counter!(
+            "abathur_tasks_completed_total",
+            "template" => template,
+            "outcome" => "succeeded"
+        )
+        .increment(1);
+        if let Some(started) = task.started_at {
+            let secs = (chrono::Utc::now() - started).num_milliseconds().max(0) as f64 / 1000.0;
+            metrics::histogram!(
+                "abathur_task_duration_seconds",
+                "template" => template,
+                "outcome" => "succeeded"
+            )
+            .record(secs);
+        }
+
         let goal_id = Self::extract_goal_id(&task);
         let mut events = vec![Self::make_event(
             EventSeverity::Info,
@@ -162,6 +181,24 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
         tracing::warn!(%task_id, retry_count = task.retry_count, execution_mode = ?task.execution_mode, "task marked as failed");
+
+        // Metrics: terminal failure.
+        let template_lbl = task.task_type.as_str();
+        metrics::counter!(
+            "abathur_tasks_completed_total",
+            "template" => template_lbl,
+            "outcome" => "failed"
+        )
+        .increment(1);
+        if let Some(started) = task.started_at {
+            let secs = (chrono::Utc::now() - started).num_milliseconds().max(0) as f64 / 1000.0;
+            metrics::histogram!(
+                "abathur_task_duration_seconds",
+                "template" => template_lbl,
+                "outcome" => "failed"
+            )
+            .record(secs);
+        }
 
         let execution_mode_str = if task.execution_mode.is_convergent() {
             "convergent".to_string()
@@ -356,6 +393,13 @@ impl<T: TaskRepository> TaskService<T> {
         task.retry().map_err(DomainError::ValidationFailed)?;
         self.task_repo.update(&task).await?;
         tracing::info!(%task_id, attempt = task.retry_count, max_retries = task.max_retries, "task retry initiated");
+
+        // Metrics: retry attempts.
+        metrics::counter!(
+            "abathur_task_retries_total",
+            "template" => task.task_type.as_str()
+        )
+        .increment(1);
 
         let goal_id = Self::extract_goal_id(&task);
         let events = vec![Self::make_event(
@@ -577,6 +621,24 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
         tracing::info!(%task_id, reason, "task cancelled successfully");
+
+        // Metrics: terminal cancellation.
+        let template_lbl = task.task_type.as_str();
+        metrics::counter!(
+            "abathur_tasks_completed_total",
+            "template" => template_lbl,
+            "outcome" => "cancelled"
+        )
+        .increment(1);
+        if let Some(started) = task.started_at {
+            let secs = (chrono::Utc::now() - started).num_milliseconds().max(0) as f64 / 1000.0;
+            metrics::histogram!(
+                "abathur_task_duration_seconds",
+                "template" => template_lbl,
+                "outcome" => "cancelled"
+            )
+            .record(secs);
+        }
 
         let goal_id = Self::extract_goal_id(&task);
         let events = vec![Self::make_event(

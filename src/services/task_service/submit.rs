@@ -361,6 +361,14 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         self.publish_events(&events).await;
+
+        // Metrics: task submission — label bounded by TaskType enum variants.
+        metrics::counter!(
+            "abathur_tasks_submitted_total",
+            "template" => task.task_type.as_str()
+        )
+        .increment(1);
+
         Ok((task, events))
     }
 
