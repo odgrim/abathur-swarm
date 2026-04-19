@@ -1632,15 +1632,23 @@ Call `task_update_status` with "completed".
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::workflow_template::{DEFAULT_WORKFLOW_YAMLS, WorkflowPhase};
+    use crate::domain::models::workflow_template::WorkflowPhase;
 
     /// Parse the embedded `code` workflow YAML for use as a test fixture.
     fn code_workflow_fixture() -> WorkflowTemplate {
-        let (_, yaml) = DEFAULT_WORKFLOW_YAMLS
-            .iter()
-            .find(|(n, _)| *n == "code")
-            .expect("`code` workflow must be embedded");
-        serde_yaml::from_str(yaml).expect("embedded code.yaml parses")
+        WorkflowTemplate::parse_embedded_default("code")
+            .expect("embedded test fixture must parse")
+    }
+
+    #[test]
+    fn test_embedded_code_workflow_parses_cleanly() {
+        // Defense-in-depth: the `code` workflow fixture used throughout this
+        // test module must come back via the fallible API, not panic.
+        let wf = WorkflowTemplate::parse_embedded_default("code")
+            .expect("embedded `code` workflow must parse");
+        assert_eq!(wf.name, "code");
+        assert!(!wf.phases.is_empty());
+        assert!(wf.validate().is_ok());
     }
 
     #[test]

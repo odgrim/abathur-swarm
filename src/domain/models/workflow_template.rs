@@ -227,6 +227,37 @@ impl WorkflowTemplate {
             .map_err(|e| format!("Failed to serialize workflow to YAML: {}", e))
     }
 
+    /// Parse one of the embedded default workflow YAMLs by name.
+    ///
+    /// Returns `Err` if no embedded workflow has the given name or if its
+    /// YAML fails to parse. This is the fallible counterpart to the raw
+    /// `DEFAULT_WORKFLOW_YAMLS` lookup and should be preferred by callers
+    /// that would otherwise panic on parse failure.
+    pub fn parse_embedded_default(name: &str) -> Result<Self, String> {
+        let (_, yaml) = DEFAULT_WORKFLOW_YAMLS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .ok_or_else(|| format!("no embedded workflow named '{}'", name))?;
+        serde_yaml::from_str(yaml)
+            .map_err(|e| format!("Failed to parse embedded workflow '{}': {}", name, e))
+    }
+
+    /// Parse all embedded default workflow YAMLs into a name→template map.
+    ///
+    /// Returns `Err` on the first parse failure. Callers that want to keep
+    /// going after a failure should iterate `DEFAULT_WORKFLOW_YAMLS` directly
+    /// and call `parse_embedded_default` per entry.
+    pub fn parse_all_embedded_defaults() -> Result<std::collections::HashMap<String, Self>, String>
+    {
+        let mut templates = std::collections::HashMap::new();
+        for (name, yaml) in DEFAULT_WORKFLOW_YAMLS.iter() {
+            let tpl: Self = serde_yaml::from_str(yaml)
+                .map_err(|e| format!("Failed to parse embedded workflow '{}': {}", name, e))?;
+            templates.insert((*name).to_string(), tpl);
+        }
+        Ok(templates)
+    }
+
     /// Load workflow templates from YAML files in a directory.
     ///
     /// Reads all `*.yaml` and `*.yml` files from the given directory path.
@@ -275,22 +306,14 @@ mod tests {
 
     /// Parse one of the embedded default workflow YAMLs by name.
     fn embedded_workflow(name: &str) -> WorkflowTemplate {
-        let (_, yaml) = DEFAULT_WORKFLOW_YAMLS
-            .iter()
-            .find(|(n, _)| *n == name)
-            .unwrap_or_else(|| panic!("no embedded workflow named {}", name));
-        serde_yaml::from_str(yaml).expect("embedded YAML parses")
+        WorkflowTemplate::parse_embedded_default(name)
+            .expect("embedded test fixture must parse")
     }
 
     /// Load all embedded default workflow YAMLs into a name→template map.
     fn embedded_workflows() -> std::collections::HashMap<String, WorkflowTemplate> {
-        DEFAULT_WORKFLOW_YAMLS
-            .iter()
-            .map(|(name, yaml)| {
-                let tpl: WorkflowTemplate = serde_yaml::from_str(yaml).expect("YAML parses");
-                (name.to_string(), tpl)
-            })
-            .collect()
+        WorkflowTemplate::parse_all_embedded_defaults()
+            .expect("embedded test fixture must parse")
     }
 
     #[test]
@@ -621,6 +644,53 @@ tools:
 "#;
         let phase: WorkflowPhase = serde_yaml::from_str(yaml).unwrap();
         assert!(!phase.gate);
+    }
+
+    #[test]
+    fn test_parse_embedded_default_unknown_name_returns_err() {
+        let result = WorkflowTemplate::parse_embedded_default("does-not-exist");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("does-not-exist"),
+            "error should mention the unknown name, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_embedded_default_missing_name_is_err() {
+        // Empty-string name must also be rejected without panicking.
+        let result = WorkflowTemplate::parse_embedded_default("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_malformed_yaml_returns_err_without_panic() {
+        // Exercise the same code path on a malformed YAML string. We can't
+        // inject into DEFAULT_WORKFLOW_YAMLS, so we drive the underlying
+        // serde_yaml::from_str the way parse_embedded_default does.
+        let malformed = "name: [unterminated\nphases: : :";
+        let result: Result<WorkflowTemplate, _> = serde_yaml::from_str(malformed);
+        assert!(
+            result.is_err(),
+            "malformed YAML must return Err, not panic"
+        );
+    }
+
+    #[test]
+    fn test_parse_all_embedded_defaults_ok() {
+        let templates = WorkflowTemplate::parse_all_embedded_defaults()
+            .expect("all embedded defaults must parse");
+        assert!(!templates.is_empty());
+        // All entries from DEFAULT_WORKFLOW_YAMLS should be represented.
+        for (name, _) in DEFAULT_WORKFLOW_YAMLS.iter() {
+            assert!(
+                templates.contains_key(*name),
+                "parse_all_embedded_defaults missing '{}'",
+                name
+            );
+        }
     }
 
     #[test]

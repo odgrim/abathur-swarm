@@ -181,8 +181,10 @@ mod tests {
             cerebrates: Vec::new(),
         };
 
-        let json = serde_json::to_string(&config).unwrap();
-        let roundtrip: FederationConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config)
+            .expect("roundtrip should succeed: serialize FederationConfig to JSON");
+        let roundtrip: FederationConfig = serde_json::from_str(&json)
+            .expect("roundtrip should succeed: deserialize FederationConfig from JSON");
         assert_eq!(roundtrip, config);
     }
 
@@ -211,7 +213,8 @@ mod tests {
             auto_connect = true
         "#;
 
-        let config: FederationConfig = toml::from_str(toml_str).unwrap();
+        let config: FederationConfig = toml::from_str(toml_str)
+            .expect("roundtrip should succeed: parse FederationConfig from TOML");
         assert!(config.enabled);
         assert_eq!(config.role, FederationRole::Overmind);
         assert_eq!(config.cerebrates.len(), 1);
@@ -232,5 +235,53 @@ mod tests {
     fn test_federation_role_display() {
         assert_eq!(FederationRole::Overmind.to_string(), "overmind");
         assert_eq!(FederationRole::Cerebrate.to_string(), "cerebrate");
+    }
+
+    #[test]
+    fn test_malformed_toml_returns_err_without_panic() {
+        // Unclosed array / syntactically invalid TOML.
+        let malformed = r#"
+            enabled = true
+            role = "overmind
+            cerebrates = [
+        "#;
+        let result: Result<FederationConfig, _> = toml::from_str(malformed);
+        assert!(
+            result.is_err(),
+            "malformed TOML must return Err, not panic"
+        );
+    }
+
+    #[test]
+    fn test_malformed_json_returns_err_without_panic() {
+        // Truncated / syntactically invalid JSON.
+        let malformed = r#"{"enabled": true, "role": "overmind","#;
+        let result: Result<FederationConfig, _> = serde_json::from_str(malformed);
+        assert!(
+            result.is_err(),
+            "malformed JSON must return Err, not panic"
+        );
+    }
+
+    #[test]
+    fn test_unknown_role_variant_returns_err() {
+        // An unknown FederationRole variant must produce Err rather than
+        // silently defaulting or panicking.
+        let json = r#"{"role":"dictator"}"#;
+        let result: Result<FederationRole, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown role variant must return Err, not panic"
+        );
+
+        // Same check via the containing config's TOML path.
+        let toml_str = r#"
+            role = "dictator"
+        "#;
+        let toml_result: Result<FederationConfig, _> = toml::from_str(toml_str);
+        assert!(
+            toml_result.is_err(),
+            "unknown role variant in TOML must return Err, not panic"
+        );
     }
 }

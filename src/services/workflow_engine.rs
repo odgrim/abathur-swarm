@@ -1788,18 +1788,12 @@ mod tests {
     use crate::adapters::sqlite::{
         create_migrated_test_pool, task_repository::SqliteTaskRepository,
     };
-    use crate::domain::models::workflow_template::DEFAULT_WORKFLOW_YAMLS;
     use crate::services::event_bus::{EventBus, EventBusConfig};
 
     /// Load the embedded default workflow YAMLs into a name→template map.
     fn default_templates() -> std::collections::HashMap<String, WorkflowTemplate> {
-        DEFAULT_WORKFLOW_YAMLS
-            .iter()
-            .map(|(name, yaml)| {
-                let tpl: WorkflowTemplate = serde_yaml::from_str(yaml).expect("YAML parses");
-                (name.to_string(), tpl)
-            })
-            .collect()
+        WorkflowTemplate::parse_all_embedded_defaults()
+            .expect("embedded test fixture must parse")
     }
 
     /// Construct a `WorkflowEngine` preloaded with the default workflow templates.
