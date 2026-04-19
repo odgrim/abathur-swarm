@@ -1033,11 +1033,17 @@ async fn run_swarm_foreground(
         }
 
         // Cerebrate: start convergence publisher (no-op if role is Overmind).
-        // The publisher needs the A2A gateway's in-memory task map. If an A2A
-        // gateway is running in-process we would share its task map here.
-        // For now, create a standalone task map — the A2A gateway integration
-        // will unify these when running embedded.
-        let a2a_tasks = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        // A2A is a TRANSPORT, not a state owner: when the A2A gateway runs
+        // embedded we reuse its task map so the publisher's artifacts are
+        // visible to HTTP peers without a duplicated map to drift against.
+        // Without an embedded gateway there are no peer readers, so falling
+        // back to a standalone map here is effectively a no-op.
+        let a2a_tasks = mcp_server_handles
+            .as_ref()
+            .and_then(|h| h.a2a_tasks.clone())
+            .unwrap_or_else(|| {
+                Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))
+            });
         if let Err(e) = orchestrator.start_convergence_publisher(a2a_tasks).await
             && !json_mode
         {
@@ -1697,6 +1703,19 @@ struct McpServerHandles {
     tasks_handle: Option<tokio::task::JoinHandle<()>>,
     a2a_handle: Option<tokio::task::JoinHandle<()>>,
     events_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Shared handle to the A2A gateway's in-memory task map.
+    ///
+    /// The A2A gateway is a transport, not a state owner — when the convergence
+    /// publisher runs embedded, it shares this Arc so both components observe
+    /// the same tasks. Without this, the publisher would write artifacts to a
+    /// standalone map invisible to HTTP callers.
+    a2a_tasks: Option<
+        Arc<
+            tokio::sync::RwLock<
+                std::collections::HashMap<String, crate::adapters::mcp::a2a_http::InMemoryTask>,
+            >,
+        >,
+    >,
 }
 
 /// Start MCP servers in background tasks
@@ -1718,6 +1737,7 @@ async fn start_mcp_servers(
         tasks_handle: None,
         a2a_handle: None,
         events_handle: None,
+        a2a_tasks: None,
     };
 
     // Create shared CommandBus for MCP servers
@@ -1793,6 +1813,10 @@ async fn start_mcp_servers(
             ..Default::default()
         };
         let gateway = A2AHttpGateway::new(config);
+        // Capture a shared handle to the gateway's task map so the convergence
+        // publisher can write to the same map the gateway serves over HTTP.
+        // A2A is a transport; the tasks themselves are state owned elsewhere.
+        handles.a2a_tasks = Some(gateway.state().tasks.clone());
 
         if !json_mode {
             println!("   Starting A2A gateway on port {}", port);
