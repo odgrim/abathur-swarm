@@ -44,35 +44,54 @@ impl ClickUpClient {
 }
 
 /// Retry a future-producing closure with exponential backoff on 429/5xx.
-async fn retry_with_backoff<F, Fut, T>(description: &str, mut f: F) -> Result<T>
+async fn retry_with_backoff<F, Fut, T>(description: &str, f: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let max_attempts = 6;
-    let mut delay = Duration::from_secs(1);
-    let max_delay = Duration::from_secs(60);
+    retry_with_backoff_opts(description, 6, Duration::from_secs(1), Duration::from_secs(60), true, f).await
+}
+
+/// Internal implementation allowing test-time customisation of attempt count and sleeping.
+async fn retry_with_backoff_opts<F, Fut, T>(
+    description: &str,
+    max_attempts: u32,
+    initial_delay: Duration,
+    max_delay: Duration,
+    sleep_between: bool,
+    mut f: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut delay = initial_delay;
+    let mut last_error: Option<anyhow::Error> = None;
 
     for attempt in 1..=max_attempts {
         match f().await {
             Ok(val) => return Ok(val),
             Err(e) => {
-                if attempt == max_attempts {
-                    return Err(e).context(format!("{description}: all {max_attempts} attempts failed"));
-                }
-                let should_retry = e
-                    .downcast_ref::<RetryableError>()
-                    .is_some();
+                let should_retry = e.downcast_ref::<RetryableError>().is_some();
                 if !should_retry {
                     return Err(e);
                 }
+                if attempt == max_attempts {
+                    last_error = Some(e);
+                    break;
+                }
                 warn!("{description}: attempt {attempt} failed, retrying in {delay:?}: {e}");
-                tokio::time::sleep(delay).await;
+                if sleep_between {
+                    tokio::time::sleep(delay).await;
+                }
                 delay = (delay * 2).min(max_delay);
+                last_error = Some(e);
             }
         }
     }
-    unreachable!()
+
+    let err = last_error.unwrap_or_else(|| anyhow::anyhow!("{description}: no attempts made"));
+    Err(err).context(format!("{description}: all {max_attempts} attempts failed"))
 }
 
 /// Marker error type for retryable HTTP errors (429, 5xx).
@@ -154,5 +173,71 @@ impl ClickUpApi for ClickUpClient {
             Ok(body.comments)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn retry_exhaustion_returns_last_error_instead_of_panicking() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let result: Result<()> = retry_with_backoff_opts(
+            "test_op",
+            2,
+            Duration::from_millis(0),
+            Duration::from_millis(0),
+            false,
+            move || {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(anyhow::Error::new(RetryableError { status: 503 }))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "should attempt max_attempts times");
+        let err = result.expect_err("exhausted retries must return Err, not panic or Ok");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("all 2 attempts failed"),
+            "error should be wrapped with exhaustion context, got: {msg}"
+        );
+        assert!(
+            err.chain().any(|e| e.downcast_ref::<RetryableError>().is_some()),
+            "original RetryableError should be preserved in the error chain, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_retryable_error_short_circuits() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let result: Result<()> = retry_with_backoff_opts(
+            "test_op",
+            5,
+            Duration::from_millis(0),
+            Duration::from_millis(0),
+            false,
+            move || {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(anyhow::anyhow!("permanent failure"))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "non-retryable errors should not retry");
+        assert!(result.is_err());
     }
 }
