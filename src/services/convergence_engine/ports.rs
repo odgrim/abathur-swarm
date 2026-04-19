@@ -22,6 +22,8 @@ use crate::domain::errors::DomainResult;
 use crate::domain::models::convergence::{
     ArtifactReference, AttractorType, StrategyKind, Trajectory,
 };
+use crate::domain::models::intent_verification::IntentVerificationResult;
+use crate::services::event_bus::BudgetPressureLevel;
 
 use super::StrategyContext;
 
@@ -375,4 +377,135 @@ pub trait StrategyEffects: Send + Sync {
     /// typically roll the worktree back to the filesystem state associated
     /// with the target observation.
     async fn on_revert(&self, trajectory: &Trajectory, target: &Uuid) -> DomainResult<()>;
+}
+
+// ---------------------------------------------------------------------------
+// ConvergenceAdvisor
+// ---------------------------------------------------------------------------
+
+/// Runtime-adjustable policy overlay passed back from a
+/// [`ConvergenceAdvisor`]. The engine applies the fields of this overlay to
+/// the in-flight `ConvergencePolicy` before continuing. All fields are
+/// optional; `None` means "leave the current policy alone".
+#[derive(Debug, Clone, Default)]
+pub struct PolicyOverlay {
+    /// Delta applied to `max_iterations`. Positive values extend; negative
+    /// values contract. The engine saturates at 0.
+    pub max_iterations_delta: Option<i32>,
+    /// Forced budget pressure level. Today this is advisory only — the engine
+    /// uses the real [`BudgetTracker`](crate::services::budget_tracker::BudgetTracker)
+    /// for termination decisions, but an advisor can surface higher pressure
+    /// to trigger earlier termination via `on_iteration_start`.
+    pub budget_pressure: Option<BudgetPressureLevel>,
+}
+
+/// Gate returned from [`ConvergenceAdvisor::on_iteration_start`]. Controls
+/// whether the engine proceeds with the next iteration.
+#[derive(Debug, Clone)]
+pub enum IterationGate {
+    /// Proceed with the iteration unchanged.
+    Continue,
+    /// Cancel the run. The engine finalizes the trajectory as cancelled and
+    /// returns [`ConvergenceRunOutcome::Cancelled`].
+    Cancel,
+    /// Adjust the in-flight policy via the supplied overlay, then continue.
+    AdjustPolicy(PolicyOverlay),
+}
+
+/// Directive returned from the intent-check / overseer-converged /
+/// pre-exhaustion advisor hooks. Covers every outcome the orchestrator's
+/// `run_convergent_execution_inner` post-processing currently produces.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum AdvisorDirective {
+    /// Finalize the trajectory as converged. Engine maps this to
+    /// [`ConvergenceRunOutcome::Converged`].
+    FinalizeConverged,
+    /// Finalize the trajectory as exhausted with the given human-readable
+    /// reason. Engine maps to [`ConvergenceRunOutcome::Exhausted`].
+    FinalizeExhausted(String),
+    /// Finalize with overseer convergence but intent gaps found. Engine maps
+    /// to [`ConvergenceRunOutcome::IntentGapsFound`].
+    FinalizeIntentGaps(IntentVerificationResult),
+    /// Finalize on partial satisfaction at high confidence. Engine maps to
+    /// [`ConvergenceRunOutcome::PartialAccepted`].
+    FinalizePartialAccepted,
+    /// Finalize accepting the 3-strike indeterminate fallback. Engine maps to
+    /// [`ConvergenceRunOutcome::IndeterminateAccepted`].
+    FinalizeIndeterminateAccepted,
+    /// Finalize as cancelled. Engine maps to
+    /// [`ConvergenceRunOutcome::Cancelled`].
+    FinalizeCancelled,
+    /// Continue iterating, optionally adjusting the policy.
+    Continue { policy_overlay: Option<PolicyOverlay> },
+}
+
+/// Port used by the engine to delegate intent-verification and
+/// finality-gate decisions back to an implementor. The orchestrator's
+/// `OrchestratorConvergenceAdvisor` is the production impl; tests can
+/// install trivial `Continue`-only advisors.
+#[async_trait]
+pub trait ConvergenceAdvisor: Send + Sync {
+    /// Called at the top of each iteration, before strategy selection. The
+    /// advisor may inspect (and amend) the trajectory, check a cancellation
+    /// token, apply SLA-pressure hints, and return an [`IterationGate`].
+    async fn on_iteration_start(
+        &self,
+        trajectory: &mut Trajectory,
+    ) -> DomainResult<IterationGate>;
+
+    /// Called when the engine's [`LoopControl::IntentCheck`] fires. The
+    /// advisor runs its LLM intent verifier (or equivalent) and returns an
+    /// [`AdvisorDirective`].
+    async fn on_intent_check(
+        &self,
+        trajectory: &Trajectory,
+        iteration: u32,
+    ) -> DomainResult<AdvisorDirective>;
+
+    /// Called when the engine's [`LoopControl::OverseerConverged`] fires.
+    async fn on_overseer_converged(
+        &self,
+        trajectory: &Trajectory,
+    ) -> DomainResult<AdvisorDirective>;
+
+    /// Called when the engine's [`LoopControl::Exhausted`] fires. Implementors
+    /// typically run a pre-exhaustion intent check; returning
+    /// [`AdvisorDirective::Continue`] resumes iteration, otherwise the
+    /// directive's finalize semantics apply.
+    async fn on_pre_exhaustion(
+        &self,
+        trajectory: &Trajectory,
+    ) -> DomainResult<AdvisorDirective>;
+}
+
+// ---------------------------------------------------------------------------
+// ConvergenceRunOutcome -- engine.run() return type
+// ---------------------------------------------------------------------------
+
+/// Outcome of a full [`ConvergenceEngine::run`] invocation.
+///
+/// Mirrors the orchestrator's `ConvergentOutcome` variant-for-variant so the
+/// orchestrator's wrapper in PR 4b can translate directly.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum ConvergenceRunOutcome {
+    /// The trajectory converged normally.
+    Converged,
+    /// Convergence budget / iterations exhausted; see message for details.
+    Exhausted(String),
+    /// Overseers confirmed convergence but intent verification found gaps.
+    IntentGapsFound(IntentVerificationResult),
+    /// Partial satisfaction accepted at high confidence.
+    PartialAccepted,
+    /// Overseer-strength acceptance after the 3-strike indeterminate fallback.
+    IndeterminateAccepted,
+    /// Cancellation token fired mid-run.
+    Cancelled,
+    /// The engine decomposed the trajectory into subtasks; the caller must
+    /// coordinate the children.
+    Decomposed(Trajectory),
+    /// A terminal failure distinct from `Exhausted` -- trapped, budget denied,
+    /// etc. Message describes the condition.
+    Failed(String),
 }

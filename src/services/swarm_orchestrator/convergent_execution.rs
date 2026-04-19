@@ -26,9 +26,11 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -43,8 +45,8 @@ use crate::domain::models::{SubstrateConfig, SubstrateRequest};
 use crate::domain::ports::{MemoryRepository, Substrate, TaskRepository, TrajectoryRepository};
 use crate::services::convergence_bridge;
 use crate::services::convergence_engine::{
-    ConvergenceEngine, OverseerMeasurer, StrategyEffects, StrategyExecutionContext,
-    StrategyExecutionOutput, StrategyExecutor,
+    AdvisorDirective, ConvergenceAdvisor, ConvergenceEngine, IterationGate, OverseerMeasurer,
+    StrategyEffects, StrategyExecutionContext, StrategyExecutionOutput, StrategyExecutor,
 };
 use crate::services::event_bus::{
     ConvergenceIterationPayload, ConvergenceTerminatedPayload, EventBus, EventPayload,
@@ -254,6 +256,316 @@ impl StrategyEffects for OrchestratorStrategyEffects {
             "StrategyEffects::on_revert invoked (no-op until PR 4 owns the loop)"
         );
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OrchestratorConvergenceAdvisor
+// ---------------------------------------------------------------------------
+
+/// `ConvergenceAdvisor` implementation used by the orchestrator's convergent
+/// path. Owns the cross-iteration state that used to live as stack locals in
+/// `run_convergent_execution_inner`:
+///
+/// - the consecutive-indeterminate counter for the 3-strike fallback,
+/// - the total intent-check cap,
+/// - the last intent verification result (used by the prompt builder).
+///
+/// Part of the engine-as-core refactor chain (#13/#21): PR 4 Phase A adds the
+/// port + this impl. Phase B (PR 4b) will rewrite `run_convergent_execution_inner`
+/// to construct this advisor + the executor/effects impls and delegate the
+/// loop body to `engine.run()`. Today the advisor compiles, satisfies the
+/// trait, and is exercised only by unit tests / the engine's new `run()`
+/// entrypoint — the orchestrator's inline loop still reproduces the
+/// equivalent branching.
+#[allow(dead_code)]
+pub(super) struct OrchestratorConvergenceAdvisor {
+    intent_verifier: Arc<dyn ConvergentIntentVerifier>,
+    cancellation_token: CancellationToken,
+    task: Task,
+    goal_id: Option<Uuid>,
+    event_bus: Arc<EventBus>,
+    /// Consecutive Indeterminate verifications. Reset on a non-indeterminate
+    /// result, escalates at 2, finalizes at 3.
+    consecutive_indeterminate: Arc<AtomicU32>,
+    /// Hard cap across all intent checks in a single run, to prevent runaway
+    /// verification loops.
+    total_intent_checks: Arc<AtomicU32>,
+    /// Most recent verification result. Mirrors the stack local in the legacy
+    /// inner loop so the orchestrator's prompt builder can pick up the latest
+    /// gap feedback.
+    last_intent_verification: Arc<TokioMutex<Option<IntentVerificationResult>>>,
+}
+
+#[allow(dead_code)]
+impl OrchestratorConvergenceAdvisor {
+    pub(super) fn new(
+        task: Task,
+        goal_id: Option<Uuid>,
+        event_bus: Arc<EventBus>,
+        intent_verifier: Arc<dyn ConvergentIntentVerifier>,
+        cancellation_token: CancellationToken,
+    ) -> Self {
+        Self {
+            intent_verifier,
+            cancellation_token,
+            task,
+            goal_id,
+            event_bus,
+            consecutive_indeterminate: Arc::new(AtomicU32::new(0)),
+            total_intent_checks: Arc::new(AtomicU32::new(0)),
+            last_intent_verification: Arc::new(TokioMutex::new(None)),
+        }
+    }
+
+    /// Expose the last verification for the orchestrator's prompt builder
+    /// during Phase B migration.
+    pub(super) async fn last_verification(&self) -> Option<IntentVerificationResult> {
+        self.last_intent_verification.lock().await.clone()
+    }
+
+    /// Overseers-clean gate used by the 3-strike indeterminate fallback.
+    fn overseers_clean(trajectory: &Trajectory) -> bool {
+        trajectory
+            .observations
+            .last()
+            .map(|o| {
+                o.overseer_signals
+                    .all_passing_relative(trajectory.lint_baseline)
+                    && o.overseer_signals.has_any_signal()
+            })
+            .unwrap_or(false)
+    }
+
+    /// Handle the 3-strike indeterminate fallback.
+    fn indeterminate_fallback_directive(&self, trajectory: &Trajectory) -> AdvisorDirective {
+        if Self::overseers_clean(trajectory) {
+            AdvisorDirective::FinalizeIndeterminateAccepted
+        } else {
+            AdvisorDirective::FinalizeExhausted(
+                "intent verification indeterminate 3x with failing overseers".to_string(),
+            )
+        }
+    }
+}
+
+#[async_trait]
+impl ConvergenceAdvisor for OrchestratorConvergenceAdvisor {
+    async fn on_iteration_start(
+        &self,
+        trajectory: &mut Trajectory,
+    ) -> DomainResult<IterationGate> {
+        if self.cancellation_token.is_cancelled() {
+            emit_convergence_terminated(
+                &self.event_bus,
+                &self.task,
+                self.goal_id,
+                trajectory,
+                "cancelled",
+            )
+            .await;
+            return Ok(IterationGate::Cancel);
+        }
+
+        // Phase B will additionally apply SLA pressure hints here by reading
+        // the task's context via `task_repo.get(task.id)`; Phase A keeps the
+        // advisor free of the task repository dependency so the port stays
+        // narrow.
+
+        Ok(IterationGate::Continue)
+    }
+
+    async fn on_intent_check(
+        &self,
+        trajectory: &Trajectory,
+        iteration: u32,
+    ) -> DomainResult<AdvisorDirective> {
+        // Hard cap.
+        let total = self.total_intent_checks.fetch_add(1, Ordering::SeqCst) + 1;
+        if total > 10 {
+            return Ok(AdvisorDirective::FinalizeExhausted(
+                "total intent check cap (10) exceeded".to_string(),
+            ));
+        }
+
+        // Defense-in-depth: verification tasks converge without recursing.
+        if self.task.task_type.is_verification() {
+            return Ok(AdvisorDirective::FinalizeConverged);
+        }
+
+        let overseer_signals = trajectory.observations.last().map(|o| &o.overseer_signals);
+
+        match self
+            .intent_verifier
+            .verify_convergent_intent(&self.task, self.goal_id, iteration, overseer_signals)
+            .await
+        {
+            Ok(Some(ivr)) => {
+                emit_intent_verification_event(&self.event_bus, &self.task, self.goal_id, &ivr)
+                    .await;
+
+                match ivr.satisfaction {
+                    IntentSatisfaction::Satisfied => {
+                        self.consecutive_indeterminate.store(0, Ordering::SeqCst);
+                        *self.last_intent_verification.lock().await = Some(ivr);
+                        Ok(AdvisorDirective::FinalizeConverged)
+                    }
+                    IntentSatisfaction::Partial | IntentSatisfaction::Unsatisfied => {
+                        self.consecutive_indeterminate.store(0, Ordering::SeqCst);
+                        if let Some(ref escalation) = ivr.escalation {
+                            emit_escalation_from_verification(
+                                &self.event_bus,
+                                &self.task,
+                                self.goal_id,
+                                escalation,
+                            )
+                            .await;
+                        } else if let Some(auto_escalation) = ivr.should_escalate() {
+                            emit_escalation_from_verification(
+                                &self.event_bus,
+                                &self.task,
+                                self.goal_id,
+                                &auto_escalation,
+                            )
+                            .await;
+                        }
+                        *self.last_intent_verification.lock().await = Some(ivr);
+                        Ok(AdvisorDirective::Continue {
+                            policy_overlay: None,
+                        })
+                    }
+                    IntentSatisfaction::Indeterminate => {
+                        let count =
+                            self.consecutive_indeterminate.fetch_add(1, Ordering::SeqCst) + 1;
+                        if count == 2 {
+                            let escalation =
+                                crate::domain::models::HumanEscalation::ambiguous_requirements(
+                                    "Intent verifier returned Indeterminate 2+ times consecutively. \
+                                     Unable to determine whether the work satisfies the original intent. \
+                                     Human judgment required.",
+                                );
+                            emit_escalation_from_verification(
+                                &self.event_bus,
+                                &self.task,
+                                self.goal_id,
+                                &escalation,
+                            )
+                            .await;
+                        }
+                        if count >= 3 {
+                            Ok(self.indeterminate_fallback_directive(trajectory))
+                        } else {
+                            *self.last_intent_verification.lock().await = Some(ivr);
+                            Ok(AdvisorDirective::Continue {
+                                policy_overlay: None,
+                            })
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                let count = self.consecutive_indeterminate.fetch_add(1, Ordering::SeqCst) + 1;
+                let escalation = crate::domain::models::HumanEscalation::ambiguous_requirements(
+                    "Cannot extract intent from task or goal description. \
+                     Intent verification is required for finality but no intent \
+                     could be derived. Human input needed to clarify the task.",
+                );
+                emit_escalation_from_verification(
+                    &self.event_bus,
+                    &self.task,
+                    self.goal_id,
+                    &escalation,
+                )
+                .await;
+                if count >= 3 {
+                    Ok(self.indeterminate_fallback_directive(trajectory))
+                } else {
+                    Ok(AdvisorDirective::Continue {
+                        policy_overlay: None,
+                    })
+                }
+            }
+            Err(_e) => {
+                let count = self.consecutive_indeterminate.fetch_add(1, Ordering::SeqCst) + 1;
+                if count >= 3 {
+                    Ok(self.indeterminate_fallback_directive(trajectory))
+                } else {
+                    Ok(AdvisorDirective::Continue {
+                        policy_overlay: None,
+                    })
+                }
+            }
+        }
+    }
+
+    async fn on_overseer_converged(
+        &self,
+        trajectory: &Trajectory,
+    ) -> DomainResult<AdvisorDirective> {
+        // Defense-in-depth: verification tasks skip recursive verification.
+        if self.task.task_type.is_verification() {
+            return Ok(AdvisorDirective::FinalizeConverged);
+        }
+
+        let sequence = trajectory.observations.len() as u32;
+        let overseer_signals = trajectory.observations.last().map(|o| &o.overseer_signals);
+
+        match self
+            .intent_verifier
+            .verify_convergent_intent(&self.task, self.goal_id, sequence, overseer_signals)
+            .await
+        {
+            Ok(Some(ivr)) => {
+                emit_intent_verification_event(&self.event_bus, &self.task, self.goal_id, &ivr)
+                    .await;
+
+                match ivr.satisfaction {
+                    IntentSatisfaction::Satisfied => Ok(AdvisorDirective::FinalizeConverged),
+                    IntentSatisfaction::Partial | IntentSatisfaction::Unsatisfied => {
+                        Ok(AdvisorDirective::FinalizeIntentGaps(ivr))
+                    }
+                    IntentSatisfaction::Indeterminate => {
+                        Ok(AdvisorDirective::FinalizeIndeterminateAccepted)
+                    }
+                }
+            }
+            Ok(None) => Ok(AdvisorDirective::FinalizeConverged),
+            Err(_) => Ok(AdvisorDirective::FinalizeConverged),
+        }
+    }
+
+    async fn on_pre_exhaustion(&self, trajectory: &Trajectory) -> DomainResult<AdvisorDirective> {
+        if self.task.task_type.is_verification() {
+            return Ok(AdvisorDirective::FinalizeExhausted(
+                "budget exhausted".to_string(),
+            ));
+        }
+
+        let sequence = trajectory.observations.len() as u32;
+        let overseer_signals = trajectory.observations.last().map(|o| &o.overseer_signals);
+
+        match self
+            .intent_verifier
+            .verify_convergent_intent(&self.task, self.goal_id, sequence, overseer_signals)
+            .await
+        {
+            Ok(Some(ivr)) => {
+                emit_intent_verification_event(&self.event_bus, &self.task, self.goal_id, &ivr)
+                    .await;
+                match ivr.satisfaction {
+                    IntentSatisfaction::Satisfied => Ok(AdvisorDirective::FinalizeConverged),
+                    IntentSatisfaction::Partial if ivr.confidence >= 0.8 => {
+                        Ok(AdvisorDirective::FinalizePartialAccepted)
+                    }
+                    _ => Ok(AdvisorDirective::FinalizeExhausted(
+                        "convergence budget exhausted without intent satisfaction".to_string(),
+                    )),
+                }
+            }
+            Ok(None) | Err(_) => Ok(AdvisorDirective::FinalizeExhausted(
+                "convergence budget exhausted without intent satisfaction".to_string(),
+            )),
+        }
     }
 }
 

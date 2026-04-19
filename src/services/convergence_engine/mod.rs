@@ -24,9 +24,11 @@ mod iterate;
 pub mod ports;
 mod prepare;
 mod resolve;
+mod run;
 
 pub use ports::{
-    ConvergenceDomainEvent, ConvergenceEventSink, NullEventSink, StrategyEffects,
+    AdvisorDirective, ConvergenceAdvisor, ConvergenceDomainEvent, ConvergenceEventSink,
+    ConvergenceRunOutcome, IterationGate, NullEventSink, PolicyOverlay, StrategyEffects,
     StrategyExecutionContext, StrategyExecutionOutput, StrategyExecutor, TracingEventSink,
 };
 
@@ -141,6 +143,17 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     /// observation's artifact).
     #[allow(dead_code)]
     pub(super) effects: Option<Arc<dyn StrategyEffects>>,
+    /// Optional convergence-advisor port.
+    ///
+    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): PR 4
+    /// introduces the port and the new [`ConvergenceEngine::run`] entrypoint
+    /// which dispatches every finality-gate decision through it. The engine's
+    /// pre-existing [`ConvergenceEngine::converge`] does NOT consult this
+    /// field and continues to treat `IntentCheck` as a no-op continue; that
+    /// method is scheduled for deletion in PR 5 once every caller has moved
+    /// to `run()`.
+    #[allow(dead_code)]
+    pub(super) advisor: Option<Arc<dyn ConvergenceAdvisor>>,
 }
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
@@ -166,6 +179,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             event_sink: Arc::new(TracingEventSink),
             executor: None,
             effects: None,
+            advisor: None,
         }
     }
 
@@ -200,6 +214,17 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
     /// handling.
     pub fn with_effects<E: StrategyEffects + 'static>(mut self, e: Arc<E>) -> Self {
         self.effects = Some(e);
+        self
+    }
+
+    /// Attach a [`ConvergenceAdvisor`] implementation (builder-style).
+    ///
+    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): the new
+    /// [`ConvergenceEngine::run`] entrypoint requires an advisor and will
+    /// panic if one is not installed. The legacy
+    /// [`ConvergenceEngine::converge`] ignores this field.
+    pub fn with_advisor<A: ConvergenceAdvisor + 'static>(mut self, a: Arc<A>) -> Self {
+        self.advisor = Some(a);
         self
     }
 
