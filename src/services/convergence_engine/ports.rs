@@ -62,10 +62,6 @@ pub enum ConvergenceDomainEvent {
         from: &'static str,
         to: &'static str,
     },
-    /// Parallel convergence path dropped a trajectory that became divergent.
-    ParallelDivergentFiltered {
-        trajectory_id: String,
-    },
     /// A strategy is about to be executed for a trajectory.
     StrategyExecutionStarted {
         strategy: &'static str,
@@ -209,13 +205,6 @@ impl ConvergenceEventSink for TracingEventSink {
                     "AttractorTransition intervention point: attractor changed from {} to {}",
                     from,
                     to
-                );
-            }
-            ConvergenceDomainEvent::ParallelDivergentFiltered { trajectory_id } => {
-                tracing::info!(
-                    trajectory_id = %trajectory_id,
-                    "Parallel convergence: filtering out divergent \
-                     trajectory",
                 );
             }
             ConvergenceDomainEvent::StrategyExecutionStarted {

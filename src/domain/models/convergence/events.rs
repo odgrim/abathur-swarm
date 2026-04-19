@@ -257,17 +257,6 @@ pub enum ConvergenceEvent {
         child_count: usize,
     },
 
-    /// Parallel convergence sampling has started for a trajectory.
-    ///
-    /// Emitted when the convergence mode is `Parallel` and multiple
-    /// independent trajectory samples are being spawned (spec 6.6).
-    ParallelConvergenceStarted {
-        /// Unique identifier for the trajectory.
-        trajectory_id: String,
-        /// Number of parallel trajectory samples being spawned.
-        parallel_count: usize,
-    },
-
     // -------------------------------------------------------------------
     // Budget calibration events
     // -------------------------------------------------------------------
@@ -313,7 +302,6 @@ impl ConvergenceEvent {
             }
             ConvergenceEvent::DecompositionRecommended { .. } => "decomposition_recommended",
             ConvergenceEvent::DecompositionTriggered { .. } => "decomposition_triggered",
-            ConvergenceEvent::ParallelConvergenceStarted { .. } => "parallel_convergence_started",
             ConvergenceEvent::BudgetCalibrationExceeded { .. } => "budget_calibration_exceeded",
         }
     }
@@ -336,8 +324,7 @@ impl ConvergenceEvent {
             | ConvergenceEvent::BudgetExtensionRequested { trajectory_id, .. }
             | ConvergenceEvent::BudgetExtensionGranted { trajectory_id, .. }
             | ConvergenceEvent::BudgetExtensionDenied { trajectory_id, .. }
-            | ConvergenceEvent::SpecificationAmended { trajectory_id, .. }
-            | ConvergenceEvent::ParallelConvergenceStarted { trajectory_id, .. } => {
+            | ConvergenceEvent::SpecificationAmended { trajectory_id, .. } => {
                 Some(trajectory_id)
             }
             ConvergenceEvent::DecompositionTriggered {
@@ -496,10 +483,6 @@ mod tests {
             ConvergenceEvent::DecompositionTriggered {
                 parent_trajectory_id: String::new(),
                 child_count: 0,
-            },
-            ConvergenceEvent::ParallelConvergenceStarted {
-                trajectory_id: String::new(),
-                parallel_count: 0,
             },
             ConvergenceEvent::BudgetCalibrationExceeded {
                 tier: Complexity::Moderate,
