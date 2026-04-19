@@ -13,7 +13,7 @@ use crate::domain::models::{TaskStatus, WorktreeStatus};
 use crate::domain::models::workflow_template::OutputDelivery;
 use crate::domain::ports::{GoalRepository, MergeRequestRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
-    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogService,
+    AuditAction, AuditCategory, AuditLogService,
     IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
 };
 
@@ -485,7 +485,7 @@ pub async fn try_create_pull_request(
 ///
 /// Runs `git log --oneline` and `git diff --stat` to produce a concise overview
 /// suitable for PR descriptions.
-async fn summarize_branch_changes(
+pub(crate) async fn summarize_branch_changes(
     worktree_path: &str,
     branch: &str,
     base_ref: &str,
@@ -531,7 +531,7 @@ async fn summarize_branch_changes(
 /// For short descriptions (under `max_chars`), returns as-is.
 /// For long descriptions (like convergence check prompts), extracts the
 /// meaningful first portion and truncates with an ellipsis.
-fn truncate_description(description: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_description(description: &str, max_chars: usize) -> String {
     if description.len() <= max_chars {
         return description.to_string();
     }
@@ -581,7 +581,7 @@ fn truncate_description(description: &str, max_chars: usize) -> String {
 }
 
 /// Outcome of merging a subtask branch into the feature branch.
-enum MergeBackOutcome {
+pub(crate) enum MergeBackOutcome {
     /// Subtask branch successfully merged into feature branch.
     Merged,
     /// Subtask had no commits ahead of feature branch.
@@ -594,7 +594,7 @@ enum MergeBackOutcome {
 ///
 /// Standalone helper for use by both infrastructure.rs and helpers.rs.
 /// Falls back to returning `task_id` itself if the query fails.
-pub async fn find_root_ancestor_id<T: TaskRepository>(task_id: Uuid, task_repo: &T) -> Uuid {
+pub async fn find_root_ancestor_id<T: TaskRepository + ?Sized>(task_id: Uuid, task_repo: &T) -> Uuid {
     task_repo.find_root_task_id(task_id).await.unwrap_or(task_id)
 }
 
@@ -611,12 +611,19 @@ pub async fn find_root_ancestor_id<T: TaskRepository>(task_id: Uuid, task_repo: 
 ///   persisted findings to memory).
 /// - `OutputDelivery::PullRequest` → existing PR-first flow (default).
 /// - `OutputDelivery::DirectMerge` → merge without creating a PR.
+///
+/// Since the [middleware refactor](super::middleware), this function builds
+/// a [`PostCompletionContext`](super::middleware::PostCompletionContext) and
+/// runs the orchestrator's post-completion middleware chain. The built-in
+/// middleware preserve the previous semantics exactly; callers can register
+/// additional middleware via
+/// [`SwarmOrchestrator::with_post_completion_middleware`].
 #[allow(clippy::too_many_arguments)]
-pub async fn run_post_completion_workflow<G, T, W>(
+pub async fn run_post_completion_workflow(
     task_id: Uuid,
-    task_repo: Arc<T>,
-    goal_repo: Arc<G>,
-    worktree_repo: Arc<W>,
+    task_repo: Arc<dyn TaskRepository>,
+    goal_repo: Arc<dyn GoalRepository>,
+    worktree_repo: Arc<dyn WorktreeRepository>,
     event_tx: &mpsc::Sender<SwarmEvent>,
     event_bus: &Arc<EventBus>,
     audit_log: &Arc<AuditLogService>,
@@ -630,579 +637,51 @@ pub async fn run_post_completion_workflow<G, T, W>(
     output_delivery: OutputDelivery,
     merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
     fetch_on_sync: bool,
+    post_completion_chain: Arc<tokio::sync::RwLock<super::middleware::PostCompletionChain>>,
 ) -> DomainResult<()>
-where
-    G: GoalRepository + 'static,
-    T: TaskRepository + 'static,
-    W: WorktreeRepository + 'static,
 {
-    // Dispatch based on output delivery mode.
-    // MemoryOnly workflows have already persisted their findings to swarm memory;
-    // no git operations are needed or appropriate.
-    match &output_delivery {
-        OutputDelivery::MemoryOnly => {
-            tracing::debug!(
-                task_id = %task_id,
-                "OutputDelivery::MemoryOnly — skipping git post-completion workflow"
-            );
-            return Ok(());
-        }
-        OutputDelivery::PullRequest | OutputDelivery::DirectMerge => {
-            // Continue with normal PR/merge flow below.
-        }
-    }
+    use super::middleware::PostCompletionContext;
 
-    // When the convergence engine has verified intent satisfaction (e.g., "remove dead code"
-    // where the code is already clean), skip the commits gate so the task can complete
-    // successfully without producing any commits.
-    let require_commits_for_verification = require_commits && !intent_satisfied;
-    if intent_satisfied && require_commits {
-        tracing::info!(
-            task_id = %task_id,
-            "Intent verified as satisfied — overriding require_commits to false"
-        );
-    }
-
-    // Step 1: Run lightweight verification if enabled (no code checks - those happen at merge time)
-    let verification_passed = if verify_on_completion {
-        let verifier = IntegrationVerifierService::new(
-            task_repo.clone(),
-            goal_repo.clone(),
-            worktree_repo.clone(),
-            VerifierConfig {
-                run_tests: false,
-                run_lint: false,
-                check_format: false,
-                require_commits: require_commits_for_verification,
-                ..VerifierConfig::default()
-            },
-        );
-
-        match verifier.verify_task(task_id).await {
-            Ok(result) => {
-                let checks_total = result.checks.len();
-                let checks_passed = result.checks.iter().filter(|c| c.passed).count();
-
-                let _ = event_tx.send(SwarmEvent::TaskVerified {
-                    task_id,
-                    passed: result.passed,
-                    checks_passed,
-                    checks_total,
-                    failures_summary: result.failures_summary.clone(),
-                }).await;
-
-                if result.passed {
-                    // Transition Validating -> Complete
-                    if let Ok(Some(mut task)) = task_repo.get(task_id).await
-                        && task.status == TaskStatus::Validating {
-                            let _ = task.transition_to(TaskStatus::Complete);
-                            let _ = task_repo.update(&task).await;
-                            // Emit TaskCompleted to both channels so workflow
-                            // handlers (WorkflowSubtaskCompletionHandler) can
-                            // advance the parent workflow.
-                            let _ = event_tx.send(SwarmEvent::TaskCompleted {
-                                task_id,
-                                tokens_used: 0,
-                            }).await;
-                            event_bus.publish(crate::services::event_factory::task_event(
-                                crate::services::event_bus::EventSeverity::Info,
-                                None,
-                                task_id,
-                                crate::services::event_bus::EventPayload::TaskCompleted {
-                                    task_id,
-                                    tokens_used: 0,
-                                },
-                            )).await;
-                        }
-
-                    audit_log.info(
-                        AuditCategory::Task,
-                        AuditAction::TaskCompleted,
-                        format!(
-                            "Task {} passed verification: {}/{} checks",
-                            task_id, checks_passed, checks_total
-                        ),
-                    ).await;
-                } else if intent_satisfied {
-                    // Intent verifier has confirmed satisfaction — integration
-                    // verifier failures are advisory, not blocking.
-                    tracing::warn!(
-                        task_id = %task_id,
-                        failures = ?result.failures_summary,
-                        "Integration verifier failed but intent is satisfied — \
-                         proceeding to Complete (advisory mode)"
-                    );
-
-                    // Transition Validating -> Complete despite integration failure
-                    if let Ok(Some(mut task)) = task_repo.get(task_id).await
-                        && task.status == TaskStatus::Validating {
-                            let _ = task.transition_to(TaskStatus::Complete);
-                            let _ = task_repo.update(&task).await;
-                            let _ = event_tx.send(SwarmEvent::TaskCompleted {
-                                task_id,
-                                tokens_used: 0,
-                            }).await;
-                            event_bus.publish(crate::services::event_factory::task_event(
-                                crate::services::event_bus::EventSeverity::Info,
-                                None,
-                                task_id,
-                                crate::services::event_bus::EventPayload::TaskCompleted {
-                                    task_id,
-                                    tokens_used: 0,
-                                },
-                            )).await;
-                        }
-
-                    audit_log.log(
-                        AuditEntry::new(
-                            AuditLevel::Warning,
-                            AuditCategory::Task,
-                            AuditAction::TaskCompleted,
-                            AuditActor::System,
-                            format!(
-                                "Task {} completed (intent satisfied) despite integration \
-                                 verifier failures: {}",
-                                task_id,
-                                result.failures_summary.clone().unwrap_or_default()
-                            ),
-                        )
-                        .with_entity(task_id, "task"),
-                    ).await;
-                } else {
-                    // Transition Validating -> Failed and increment retry_count
-                    let retry_count = if let Ok(Some(mut task)) = task_repo.get(task_id).await {
-                        if task.status == TaskStatus::Validating {
-                            task.retry_count += 1;
-                            let _ = task.transition_to(TaskStatus::Failed);
-                            let _ = task_repo.update(&task).await;
-                        }
-                        task.retry_count
-                    } else {
-                        0
-                    };
-
-                    // Emit TaskFailed event so handlers (retry, evolution, review-failure-loop) can react
-                    let failure_msg = format!(
-                        "verification-failed: {}",
-                        result.failures_summary.clone().unwrap_or_default()
-                    );
-                    let _ = event_tx.send(SwarmEvent::TaskFailed {
-                        task_id,
-                        error: failure_msg,
-                        retry_count,
-                    }).await;
-
-                    // Also mark worktree as failed so retry can create a fresh one
-                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                        wt.fail("Verification failed".to_string());
-                        let _ = worktree_repo.update(&wt).await;
-                    }
-
-                    audit_log.log(
-                        AuditEntry::new(
-                            AuditLevel::Warning,
-                            AuditCategory::Task,
-                            AuditAction::TaskFailed,
-                            AuditActor::System,
-                            format!(
-                                "Task {} failed verification (retry_count={}): {}",
-                                task_id, retry_count, result.failures_summary.clone().unwrap_or_default()
-                            ),
-                        )
-                        .with_entity(task_id, "task"),
-                    ).await;
-                }
-
-                // When intent is satisfied, treat as passed even if
-                // integration checks failed (advisory mode)
-                result.passed || intent_satisfied
-            }
-            Err(e) => {
-                if intent_satisfied {
-                    // Infrastructure error with intent satisfied — advisory
-                    tracing::warn!(
-                        task_id = %task_id,
-                        error = %e,
-                        "Integration verification error but intent satisfied — \
-                         proceeding to Complete"
-                    );
-
-                    if let Ok(Some(mut task)) = task_repo.get(task_id).await
-                        && task.status == TaskStatus::Validating {
-                            let _ = task.transition_to(TaskStatus::Complete);
-                            let _ = task_repo.update(&task).await;
-                            let _ = event_tx.send(SwarmEvent::TaskCompleted {
-                                task_id,
-                                tokens_used: 0,
-                            }).await;
-                            event_bus.publish(crate::services::event_factory::task_event(
-                                crate::services::event_bus::EventSeverity::Info,
-                                None,
-                                task_id,
-                                crate::services::event_bus::EventPayload::TaskCompleted {
-                                    task_id,
-                                    tokens_used: 0,
-                                },
-                            )).await;
-                        }
-
-                    audit_log.log(
-                        AuditEntry::new(
-                            AuditLevel::Warning,
-                            AuditCategory::Task,
-                            AuditAction::TaskCompleted,
-                            AuditActor::System,
-                            format!(
-                                "Task {} completed (intent satisfied) despite verification error: {}",
-                                task_id, e
-                            ),
-                        )
-                        .with_entity(task_id, "task"),
-                    ).await;
-                    true
-                } else {
-                    // Transition Validating -> Failed on verification error and increment retry_count
-                    let retry_count = if let Ok(Some(mut task)) = task_repo.get(task_id).await {
-                        if task.status == TaskStatus::Validating {
-                            task.retry_count += 1;
-                            let _ = task.transition_to(TaskStatus::Failed);
-                            let _ = task_repo.update(&task).await;
-                        }
-                        task.retry_count
-                    } else {
-                        0
-                    };
-
-                    // Emit TaskFailed event so handlers can react
-                    let _ = event_tx.send(SwarmEvent::TaskFailed {
-                        task_id,
-                        error: format!("verification-error: {}", e),
-                        retry_count,
-                    }).await;
-
-                    // Also mark worktree as failed so retry can create a fresh one
-                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                        wt.fail(format!("Verification error: {}", e));
-                        let _ = worktree_repo.update(&wt).await;
-                    }
-
-                    audit_log.log(
-                        AuditEntry::new(
-                            AuditLevel::Warning,
-                            AuditCategory::Task,
-                            AuditAction::TaskFailed,
-                            AuditActor::System,
-                            format!("Task {} verification error (retry_count={}): {}", task_id, retry_count, e),
-                        )
-                        .with_entity(task_id, "task"),
-                    ).await;
-                    false
-                }
-            }
-        }
-    } else {
-        true // Skip verification, assume passed
+    let mut ctx = PostCompletionContext {
+        task_id,
+        task_repo,
+        goal_repo,
+        worktree_repo,
+        merge_request_repo,
+        audit_log: audit_log.clone(),
+        event_bus: event_bus.clone(),
+        event_tx: event_tx.clone(),
+        verify_on_completion,
+        use_merge_queue,
+        prefer_pull_requests,
+        require_commits,
+        intent_satisfied,
+        output_delivery,
+        repo_path: repo_path.to_path_buf(),
+        default_base_ref: default_base_ref.to_string(),
+        fetch_on_sync,
+        verification_passed: false,
+        tree_handled: false,
     };
 
-    // Step 1.5: Feature branch handling
-    if let Ok(Some(task)) = task_repo.get(task_id).await {
-        // Case A: This is a subtask (has parent_id)
-        if task.parent_id.is_some() {
-            // Check if this is a merge-conflict-specialist completing
-            let is_conflict_resolution = task.context.custom
-                .get("feature_branch_conflict")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            if is_conflict_resolution {
-                // The specialist resolved the conflict directly in the root worktree.
-                // Mark the original subtask's worktree as merged.
-                if let Some(original_subtask_id_str) = task.context.custom
-                    .get("original_subtask_id")
-                    .and_then(|v| v.as_str())
-                    && let Ok(original_id) = Uuid::parse_str(original_subtask_id_str)
-                        && let Ok(Some(mut original_wt)) = worktree_repo.get_by_task(original_id).await {
-                            original_wt.merged("conflict-resolved-by-specialist".to_string());
-                            let _ = worktree_repo.update(&original_wt).await;
-                        }
-
-                // Re-queue the merge request and process it now that conflicts are resolved
-                if let Some(ref mr_repo) = merge_request_repo
-                    && let Some(mr_id_str) = task.context.custom
-                        .get("merge_request_id")
-                        .and_then(|v| v.as_str())
-                    && let Ok(mr_id) = Uuid::parse_str(mr_id_str) {
-                        let verifier = IntegrationVerifierService::new(
-                            task_repo.clone(),
-                            goal_repo.clone(),
-                            worktree_repo.clone(),
-                            VerifierConfig::default(),
-                        );
-                        let merge_config = MergeQueueConfig {
-                            repo_path: repo_path.to_str().unwrap_or(".").to_string(),
-                            main_branch: default_base_ref.to_string(),
-                            ..Default::default()
-                        };
-                        let merge_queue = MergeQueue::new(
-                            task_repo.clone(),
-                            worktree_repo.clone(),
-                            Arc::new(verifier),
-                            merge_config,
-                            mr_repo.clone(),
-                        );
-                        if let Ok(true) = merge_queue.retry_after_conflict_resolution(mr_id).await {
-                            // Process the re-queued merge now
-                            match merge_queue.process_next().await {
-                                Ok(Some(result)) if result.success => {
-                                    tracing::info!(task_id = %task_id, "merge succeeded after conflict resolution");
-                                }
-                                Ok(Some(result)) if result.had_conflicts => {
-                                    tracing::warn!(task_id = %task_id, "merge still has conflicts after specialist resolution");
-                                    // Will be picked up again by specialist trigger on next tick
-                                }
-                                Ok(Some(result)) => {
-                                    tracing::warn!(task_id = %task_id, error = ?result.error, "merge failed after conflict resolution");
-                                }
-                                Ok(None) => {
-                                    tracing::debug!(task_id = %task_id, "no merge to process after conflict resolution retry");
-                                }
-                                Err(e) => {
-                                    tracing::warn!(task_id = %task_id, error = %e, "error processing merge after conflict resolution");
-                                }
-                            }
-                        }
-                    }
-
-                // Don't try to merge-back again (specialist already did the merge)
-                // Fall through to auto-ship check below
-            } else {
-                // Normal subtask: attempt merge-back
-                if verification_passed && require_commits {
-                    let merge_result = merge_subtask_into_feature_branch(
-                        task_id,
-                        task_repo.clone(),
-                        goal_repo.clone(),
-                        worktree_repo.clone(),
-                        event_tx,
-                        audit_log,
-                        repo_path,
-                        default_base_ref,
-                        merge_request_repo.clone(),
-                    ).await;
-
-                    match merge_result {
-                        Ok(MergeBackOutcome::Merged) => {
-                            // Worktree cleanup for subtask
-                            if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                                wt.merged("merged-to-feature-branch".to_string());
-                                let _ = worktree_repo.update(&wt).await;
-                            }
-                        }
-                        Ok(MergeBackOutcome::NoCommits) => { /* nothing to merge */ }
-                        Ok(MergeBackOutcome::ConflictQueued) => {
-                            // Conflict recorded in merge queue; specialist trigger will handle.
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            tracing::warn!("Subtask {} merge-back failed: {}", task_id, e);
-                        }
-                    }
-                }
-            }
-
-            // Check if the entire tree is ready to ship
-            try_auto_ship(
-                task_id, task_repo.clone(), worktree_repo.clone(),
-                event_tx, audit_log, repo_path, default_base_ref,
-                output_delivery.clone(), fetch_on_sync,
-            ).await;
-
-            return Ok(()); // Skip normal per-task PR/merge flow
-        }
-
-        // Case B: This is a root task with children (Overmind)
-        let subtasks = task_repo.get_subtasks(task_id).await.unwrap_or_default();
-        if !subtasks.is_empty() {
-            // Don't create per-task PR; check if all children are done
-            try_auto_ship(
-                task_id, task_repo.clone(), worktree_repo.clone(),
-                event_tx, audit_log, repo_path, default_base_ref,
-                output_delivery.clone(), fetch_on_sync,
-            ).await;
-            return Ok(());
-        }
-    }
-
-    // Step 2: Try PR creation if preferred and this is not a DirectMerge workflow.
-    // DirectMerge bypasses PR creation and falls directly through to the merge queue.
-    // (only for standalone tasks — no parent, no children)
-    if verification_passed
-        && prefer_pull_requests
-        && require_commits
-        && output_delivery != OutputDelivery::DirectMerge
-        && let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
-            // Look up task title/description for the PR
-            let (pr_title, pr_body) = if let Ok(Some(task)) = task_repo.get(task_id).await {
-                let intent = truncate_description(&task.description, 300);
-                let changes = summarize_branch_changes(
-                    &worktree.path,
-                    &worktree.branch,
-                    default_base_ref,
-                ).await;
-                let mut body = String::new();
-                if !intent.is_empty() {
-                    body.push_str("## Summary\n\n");
-                    body.push_str(&intent);
-                    body.push_str("\n\n");
-                }
-                if !changes.is_empty() {
-                    body.push_str("## Changes\n\n");
-                    body.push_str(&changes);
-                    body.push('\n');
-                }
-                body.push_str("\n---\n🤖 Generated by [Abathur Swarm](https://github.com/abathur-swarm)\n");
-                (task.title.clone(), body)
-            } else {
-                (format!("Task {}", task_id), String::new())
-            };
-
-            if let Some(pr_url) = try_create_pull_request(
-                &worktree.path,
-                &worktree.branch,
-                &pr_title,
-                &pr_body,
-                default_base_ref,
-            ).await {
-                let _ = event_tx.send(SwarmEvent::PullRequestCreated {
-                    task_id,
-                    pr_url: pr_url.clone(),
-                    branch: worktree.branch.clone(),
-                }).await;
-
-                audit_log.info(
-                    AuditCategory::Task,
-                    AuditAction::TaskCompleted,
-                    format!("Task {} PR created: {}", task_id, pr_url),
-                ).await;
-
-                return Ok(());
-            }
-
-            // PR creation failed — fall through to merge queue
-            audit_log.info(
-                AuditCategory::Task,
-                AuditAction::TaskCompleted,
-                format!("Task {} PR creation failed, falling back to merge queue", task_id),
-            ).await;
-        }
-
-    // Step 3: Queue for merge if verification passed and merge queue is enabled
-    if verification_passed && use_merge_queue && require_commits
-        && let Some(ref mr_repo) = merge_request_repo
-        && let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
-            let verifier = IntegrationVerifierService::new(
-                task_repo.clone(),
-                goal_repo.clone(),
-                worktree_repo.clone(),
-                VerifierConfig::default(),
-            );
-
-            let merge_config = MergeQueueConfig {
-                repo_path: repo_path.to_str().unwrap_or(".").to_string(),
-                main_branch: default_base_ref.to_string(),
-                require_verification: verify_on_completion,
-                ..Default::default()
-            };
-
-            let merge_queue = MergeQueue::new(
-                task_repo.clone(),
-                worktree_repo.clone(),
-                Arc::new(verifier),
-                merge_config,
-                mr_repo.clone(),
-            );
-
-            // Queue Stage 1: Agent worktree -> task branch
-            let _ = event_tx.send(SwarmEvent::TaskQueuedForMerge {
-                task_id,
-                stage: "AgentToTask".to_string(),
-            }).await;
-
-            match merge_queue.queue_stage1(
-                task_id,
-                &worktree.branch,
-                &format!("task/{}", task_id),
-            ).await {
-                Ok(_) => {
-                    audit_log.info(
-                        AuditCategory::Task,
-                        AuditAction::TaskCompleted,
-                        format!("Task {} queued for stage 1 merge", task_id),
-                    ).await;
-
-                    // Process the queued merge
-                    if let Ok(Some(result)) = merge_queue.process_next().await
-                        && result.success {
-                            // Queue stage 2
-                            let _ = event_tx.send(SwarmEvent::TaskQueuedForMerge {
-                                task_id,
-                                stage: "TaskToMain".to_string(),
-                            }).await;
-
-                            if let Ok(_) = merge_queue.queue_stage2(task_id).await
-                                && let Ok(Some(result2)) = merge_queue.process_next().await
-                                    && result2.success {
-                                        let _ = event_tx.send(SwarmEvent::TaskMerged {
-                                            task_id,
-                                            commit_sha: result2.commit_sha.clone().unwrap_or_default(),
-                                        }).await;
-
-                                        audit_log.info(
-                                            AuditCategory::Task,
-                                            AuditAction::TaskCompleted,
-                                            format!(
-                                                "Task {} merged to main: {}",
-                                                task_id, result2.commit_sha.unwrap_or_default()
-                                            ),
-                                        ).await;
-                                    }
-                        }
-                }
-                Err(e) => {
-                    audit_log.log(
-                        AuditEntry::new(
-                            AuditLevel::Warning,
-                            AuditCategory::Task,
-                            AuditAction::TaskFailed,
-                            AuditActor::System,
-                            format!("Task {} failed to queue for merge: {}", task_id, e),
-                        )
-                        .with_entity(task_id, "task"),
-                    ).await;
-                }
-            }
-        }
-
-    Ok(())
+    let chain = post_completion_chain.read().await;
+    chain.run(&mut ctx).await
 }
+
 
 /// Merge a subtask's branch into the root ancestor's feature branch.
 #[allow(clippy::too_many_arguments)]
-async fn merge_subtask_into_feature_branch<G, T, W>(
+pub(crate) async fn merge_subtask_into_feature_branch(
     task_id: Uuid,
-    task_repo: Arc<T>,
-    goal_repo: Arc<G>,
-    worktree_repo: Arc<W>,
+    task_repo: Arc<dyn TaskRepository>,
+    goal_repo: Arc<dyn GoalRepository>,
+    worktree_repo: Arc<dyn WorktreeRepository>,
     event_tx: &mpsc::Sender<SwarmEvent>,
     audit_log: &Arc<AuditLogService>,
     repo_path: &std::path::Path,
     default_base_ref: &str,
     merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
 ) -> DomainResult<MergeBackOutcome>
-where
-    G: GoalRepository + 'static,
-    T: TaskRepository + 'static,
-    W: WorktreeRepository + 'static,
 {
     use tokio::process::Command;
 
@@ -1318,10 +797,10 @@ where
 
 /// Check if all tasks in a tree are terminal and, if so, create a single PR.
 #[allow(clippy::too_many_arguments)]
-async fn try_auto_ship<T, W>(
+pub(crate) async fn try_auto_ship(
     triggering_task_id: Uuid,
-    task_repo: Arc<T>,
-    worktree_repo: Arc<W>,
+    task_repo: Arc<dyn TaskRepository>,
+    worktree_repo: Arc<dyn WorktreeRepository>,
     event_tx: &mpsc::Sender<SwarmEvent>,
     audit_log: &Arc<AuditLogService>,
     repo_path: &std::path::Path,
@@ -1329,9 +808,6 @@ async fn try_auto_ship<T, W>(
     output_delivery: OutputDelivery,
     fetch_on_sync: bool,
 ) -> Option<String>
-where
-    T: TaskRepository + 'static,
-    W: WorktreeRepository + 'static,
 {
     // Serialize all auto-ship operations. The git checkout → merge --squash → commit
     // sequence operates on the shared repo working directory and must not run concurrently.
@@ -1766,7 +1242,7 @@ where
 /// into the root's worktree. This is a safety net to collect child work that
 /// wasn't merged back during individual subtask completion (e.g., convergent
 /// tasks where intent_satisfied skipped merge-back, or race conditions).
-async fn collect_descendant_work<T: TaskRepository, W: WorktreeRepository>(
+async fn collect_descendant_work<T: TaskRepository + ?Sized, W: WorktreeRepository + ?Sized>(
     root_id: Uuid,
     root_wt: &crate::domain::models::Worktree,
     task_repo: &T,
@@ -1887,7 +1363,7 @@ async fn collect_descendant_work<T: TaskRepository, W: WorktreeRepository>(
 }
 
 /// BFS check: all descendants in terminal state.
-async fn all_descendants_terminal<T: TaskRepository>(root_id: Uuid, task_repo: &T) -> bool {
+async fn all_descendants_terminal<T: TaskRepository + ?Sized>(root_id: Uuid, task_repo: &T) -> bool {
     let mut queue = vec![root_id];
     while let Some(id) = queue.pop() {
         let subtasks = match task_repo.get_subtasks(id).await {
@@ -1903,7 +1379,7 @@ async fn all_descendants_terminal<T: TaskRepository>(root_id: Uuid, task_repo: &
 }
 
 /// BFS check: any descendant completed successfully.
-async fn has_any_successful_descendant<T: TaskRepository>(root_id: Uuid, task_repo: &T) -> bool {
+async fn has_any_successful_descendant<T: TaskRepository + ?Sized>(root_id: Uuid, task_repo: &T) -> bool {
     let mut queue = vec![root_id];
     while let Some(id) = queue.pop() {
         if let Ok(subtasks) = task_repo.get_subtasks(id).await {

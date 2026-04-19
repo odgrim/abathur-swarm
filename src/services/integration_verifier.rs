@@ -91,7 +91,7 @@ pub struct TestResult {
 }
 
 /// Integration Verifier Service.
-pub struct IntegrationVerifierService<T, G, W>
+pub struct IntegrationVerifierService<T: ?Sized, G: ?Sized, W: ?Sized>
 where
     T: TaskRepository + 'static,
     G: GoalRepository + 'static,
@@ -103,7 +103,7 @@ where
     config: VerifierConfig,
 }
 
-impl<T, G, W> IntegrationVerifierService<T, G, W>
+impl<T: ?Sized, G: ?Sized, W: ?Sized> IntegrationVerifierService<T, G, W>
 where
     T: TaskRepository + 'static,
     G: GoalRepository + 'static,

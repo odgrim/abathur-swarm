@@ -420,7 +420,7 @@ fn extract_conflict_files(merge_tree_stdout: &str) -> Vec<String> {
 ///
 /// Persists merge requests to a `MergeRequestRepository` so that conflict
 /// records survive across ephemeral instances and process restarts.
-pub struct MergeQueue<T, G, W>
+pub struct MergeQueue<T: ?Sized, G: ?Sized, W: ?Sized>
 where
     T: TaskRepository + 'static,
     G: GoalRepository + 'static,
@@ -433,7 +433,7 @@ where
     merge_repo: Arc<dyn MergeRequestRepository>,
 }
 
-impl<T, G, W> MergeQueue<T, G, W>
+impl<T: ?Sized, G: ?Sized, W: ?Sized> MergeQueue<T, G, W>
 where
     T: TaskRepository + 'static,
     G: GoalRepository + 'static,

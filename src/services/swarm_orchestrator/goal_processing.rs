@@ -18,7 +18,7 @@ use crate::domain::models::{
     Task, TaskStatus,
 };
 use crate::services::memory_service::MemoryService;
-use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AgentTierHint, AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
     CircuitScope, GoalContextService, ModelRouter,
@@ -220,190 +220,72 @@ where
         Ok(())
     }
 
-    /// Route a task to the appropriate agent type.
-    ///
-    /// Resolution priority:
-    /// 1. Explicit `agent_type` on the task (user passed `--agent`)
-    /// 2. `routing_hints.preferred_agent`
-    /// 3. Capability matching: find an agent whose tools cover the task's `required_tools`
-    /// 4. Default to `overmind` so the task gets analyzed, decomposed, and
-    ///    routed to dynamically-created agents.
-    async fn route_task(&self, task: &Task) -> String {
-        // 1. Explicit assignment takes priority
-        if let Some(ref agent) = task.agent_type {
-            return agent.clone();
-        }
-
-        // 2. Routing hints - preferred agent
-        if let Some(ref preferred) = task.routing_hints.preferred_agent {
-            // Validate the preferred agent actually exists
-            if let Ok(Some(_)) = self.agent_repo.get_template_by_name(preferred).await {
-                return preferred.clone();
-            }
-        }
-
-        // 3. Capability matching - try to find an agent whose tools satisfy required_tools
-        if !task.routing_hints.required_tools.is_empty()
-            && let Some(matched) = self.match_agent_by_tools(&task.routing_hints.required_tools).await {
-                return matched;
-            }
-
-        // 4. Default: route to overmind for analysis and decomposition.
-        //    Subtasks must have agent_type set by the Overmind via workflow_fan_out;
-        //    if they reach here it means the Overmind forgot to assign an agent.
-        if task.parent_id.is_some() {
-            tracing::warn!(
-                task_id = %task.id,
-                parent_id = ?task.parent_id,
-                "route_task: subtask has no agent — Overmind should set `agent` in workflow_fan_out slices"
-            );
-        }
-        "overmind".to_string()
-    }
-
-    /// Find an agent template whose tools cover the required tools.
-    ///
-    /// Returns the best match (agent covering the most required tools) or None.
-    async fn match_agent_by_tools(&self, required_tools: &[String]) -> Option<String> {
-        let templates = self.agent_repo.list_templates(AgentFilter::default()).await.ok()?;
-
-        let mut best_match: Option<(String, usize)> = None;
-
-        for template in &templates {
-            // Skip meta-level agents for direct tool matching
-            if template.name == "overmind" {
-                continue;
-            }
-
-            let tool_names: Vec<&str> = template.tools.iter().map(|t| t.name.as_str()).collect();
-            let matched_count = required_tools.iter()
-                .filter(|req| tool_names.iter().any(|t| t.eq_ignore_ascii_case(req)))
-                .count();
-
-            if matched_count > 0 {
-                if let Some((_, best_count)) = &best_match {
-                    if matched_count > *best_count {
-                        best_match = Some((template.name.clone(), matched_count));
-                    }
-                } else {
-                    best_match = Some((template.name.clone(), matched_count));
-                }
-            }
-        }
-
-        best_match.map(|(name, _)| name)
-    }
-
     /// Spawn an agent for a ready task.
     ///
-    /// Before execution, routes the task to the appropriate agent, loads
-    /// relevant goals via GoalContextService, and prepends goal guidance
-    /// to the task description.
+    /// Runs the registered pre-spawn middleware chain (routing, circuit
+    /// breaker, quiet-window, budget gates, guardrails, etc.); on `Continue`
+    /// acquires an agent permit and invokes the substrate. On `Skip` returns
+    /// without spawning — the task stays `Ready` for the next cycle.
     pub(super) async fn spawn_task_agent(
         &self,
         task: &Task,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        // Runtime safety net: don't spawn agents if MCP servers are down.
-        // The task stays Ready and will be retried on the next poll cycle.
-        if !self.check_mcp_readiness().await {
-            self.audit_log.log(
-                AuditEntry::new(
-                    AuditLevel::Warning,
-                    AuditCategory::Execution,
-                    AuditAction::TaskFailed,
-                    AuditActor::System,
-                    format!(
-                        "Skipping spawn for task {} - MCP servers not ready (will retry next cycle)",
-                        task.id
-                    ),
-                )
-                .with_entity(task.id, "task"),
-            ).await;
+        use super::middleware::{PreSpawnContext, PreSpawnDecision};
+
+        // Build the pre-spawn context. Repos are coerced to trait objects so
+        // middleware can operate without being generic over the orchestrator.
+        let task_repo: Arc<dyn crate::domain::ports::TaskRepository> = self.task_repo.clone();
+        let agent_repo: Arc<dyn crate::domain::ports::AgentRepository> = self.agent_repo.clone();
+        let goal_repo: Arc<dyn crate::domain::ports::GoalRepository> = self.goal_repo.clone();
+
+        let mut ctx = PreSpawnContext {
+            task: task.clone(),
+            agent_type: None,
+            task_repo,
+            agent_repo,
+            goal_repo,
+            audit_log: self.audit_log.clone(),
+            circuit_breaker: self.circuit_breaker.clone(),
+            guardrails: self.guardrails.clone(),
+            cost_window_service: self.cost_window_service.clone(),
+            budget_tracker: self.budget_tracker.clone(),
+            agent_semaphore: self.agent_semaphore.clone(),
+            max_agents: self.config.max_agents,
+            federation_priority_bumps: 0,
+        };
+
+        // Run the registered pre-spawn middleware. Each middleware may
+        // short-circuit with a Skip decision (logged below) or enrich the
+        // context (e.g. RouteTaskMiddleware sets ctx.agent_type).
+        let decision = {
+            let chain = self.pre_spawn_chain.read().await;
+            chain.run(&mut ctx).await?
+        };
+
+        if let PreSpawnDecision::Skip { reason } = decision {
+            tracing::debug!(
+                task_id = %task.id,
+                %reason,
+                "spawn_task_agent: pre-spawn chain requested skip"
+            );
             return Ok(());
         }
 
-        // Route the task to an appropriate agent
-        let agent_type = self.route_task(task).await;
+        // Routing middleware is required to have populated agent_type before
+        // we reach substrate invocation. If it didn't, the chain is broken.
+        let agent_type = ctx.agent_type.clone().ok_or_else(|| {
+            crate::domain::errors::DomainError::ExecutionFailed(
+                "pre-spawn chain completed without resolving an agent_type — \
+                 RouteTaskMiddleware must be registered".to_string(),
+            )
+        })?;
 
-        // Persist the routing decision so it's visible in logs and task queries
-        if task.agent_type.is_none()
-            && let Ok(Some(mut updated)) = self.task_repo.get(task.id).await {
-                updated.agent_type = Some(agent_type.clone());
-                let _ = self.task_repo.update(&updated).await;
-            }
-
-        // Check circuit breaker
+        // Circuit-breaker scope is needed later for recording success/failure
+        // outcomes on the spawned task. The gate check already ran in the
+        // pre-spawn chain; this just recreates the scope value.
         let scope = CircuitScope::agent(&agent_type);
-        let check_result = self.circuit_breaker.check(scope.clone()).await;
-
-        if check_result.is_blocked() {
-            self.audit_log.log(
-                AuditEntry::new(
-                    AuditLevel::Warning,
-                    AuditCategory::Execution,
-                    AuditAction::CircuitBreakerTriggered,
-                    AuditActor::System,
-                    format!("Task {} blocked by circuit breaker for agent '{}'", task.id, agent_type),
-                )
-                .with_entity(task.id, "task"),
-            ).await;
-            return Ok(());
-        }
-
-        // Quiet-window gate: suppress all dispatch during quiet hours
-        if let Some(ref cws) = self.cost_window_service {
-            let check = cws.is_in_quiet_window().await;
-            if check.is_quiet {
-                tracing::info!(
-                    task_id = %task.id,
-                    window_name = ?check.active_window_name,
-                    "spawn_task_agent: deferring task — inside quiet window"
-                );
-                return Ok(());
-            }
-        }
-
-        // Budget gate: defer low-priority tasks under elevated pressure
-        if let Some(ref bt) = self.budget_tracker
-            && !bt.should_dispatch_task(task.priority).await {
-                tracing::debug!(
-                    task_id = %task.id,
-                    priority = ?task.priority,
-                    "spawn_task_agent: deferring task — budget pressure"
-                );
-                return Ok(());
-            }
-
-        // Budget gate: respect budget-adjusted concurrency ceiling
-        if let Some(ref bt) = self.budget_tracker {
-            let running = self.config.max_agents
-                .saturating_sub(self.agent_semaphore.available_permits());
-            let budget_max = bt.effective_max_agents(self.config.max_agents as u32).await as usize;
-            if running >= budget_max {
-                tracing::debug!(
-                    task_id = %task.id,
-                    running,
-                    budget_max,
-                    "spawn_task_agent: skipping — at budget-adjusted agent limit"
-                );
-                return Ok(());
-            }
-        }
-
-        // Check guardrails before spawning (uses task_id as unique agent identifier)
         let agent_unique_id = task.id.to_string();
-        {
-            let spawn_check = self.guardrails.check_agent_spawn(&agent_unique_id).await;
-            if spawn_check.is_blocked() {
-                tracing::debug!(
-                    task_id = %task.id,
-                    "spawn_task_agent: blocked by guardrails — {:?}",
-                    spawn_check
-                );
-                return Ok(());
-            }
-        }
 
         // Try to acquire agent permit
         if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
@@ -678,8 +560,16 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let task_clone = task.clone();
             let substrate = self.substrate.clone();
             let task_repo = self.task_repo.clone();
-            let goal_repo = self.goal_repo.clone();
             let worktree_repo = self.worktree_repo.clone();
+            // Trait-object clones for post-completion chain / helpers that
+            // require Arc<dyn ...> so they aren't generic over the orchestrator.
+            let post_task_repo: Arc<dyn crate::domain::ports::TaskRepository> =
+                self.task_repo.clone();
+            let post_goal_repo: Arc<dyn crate::domain::ports::GoalRepository> =
+                self.goal_repo.clone();
+            let post_worktree_repo: Arc<dyn crate::domain::ports::WorktreeRepository> =
+                self.worktree_repo.clone();
+            let post_completion_chain = self.post_completion_chain.clone();
             let event_tx = event_tx.clone();
             let event_bus = self.event_bus.clone();
             let all_workflows = self.config.all_workflows.clone();
@@ -1066,9 +956,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 if verify_on_completion || use_merge_queue || prefer_pull_requests {
                                     let _ = run_post_completion_workflow(
                                         task_id,
-                                        task_repo.clone(),
-                                        goal_repo.clone(),
-                                        worktree_repo.clone(),
+                                        post_task_repo.clone(),
+                                        post_goal_repo.clone(),
+                                        post_worktree_repo.clone(),
                                         &event_tx,
                                         &event_bus,
                                         &audit_log,
@@ -1082,6 +972,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         output_delivery.clone(),
                                         merge_request_repo.clone(),
                                         fetch_on_sync,
+                                        post_completion_chain.clone(),
                                     ).await;
                                 }
 
@@ -1737,9 +1628,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             if verify_on_completion || use_merge_queue || prefer_pull_requests {
                                 let workflow_result = run_post_completion_workflow(
                                     task_id,
-                                    task_repo.clone(),
-                                    goal_repo.clone(),
-                                    worktree_repo.clone(),
+                                    post_task_repo.clone(),
+                                    post_goal_repo.clone(),
+                                    post_worktree_repo.clone(),
                                     &event_tx,
                                     &event_bus,
                                     &audit_log,
@@ -1753,6 +1644,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     output_delivery.clone(),
                                     merge_request_repo.clone(),
                                     fetch_on_sync,
+                                    post_completion_chain.clone(),
                                 ).await;
 
                                 if let Err(e) = workflow_result {

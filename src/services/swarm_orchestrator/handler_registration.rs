@@ -987,4 +987,54 @@ where
                 .await;
         }
     }
+
+    /// Register the default built-in pre-spawn and post-completion middleware.
+    ///
+    /// Called from `run()` alongside `register_builtin_handlers()`. Registration
+    /// order matters and mirrors the previous inline sequence in
+    /// `spawn_task_agent` and `run_post_completion_workflow`.
+    ///
+    /// External callers that want to extend the chains can either add
+    /// middleware before calling `run()` via
+    /// [`SwarmOrchestrator::with_pre_spawn_middleware`] /
+    /// [`SwarmOrchestrator::with_post_completion_middleware`], or skip this
+    /// method entirely and register a custom set.
+    pub(super) async fn register_builtin_middleware(&self) {
+        use super::middleware::{
+            AutoshipMiddleware, BudgetConcurrencyMiddleware, BudgetDispatchMiddleware,
+            CircuitBreakerMiddleware, FederationPriorityMiddleware,
+            GuardrailsMiddleware, McpReadinessMiddleware, MemoryOnlyShortCircuitMiddleware,
+            MergeQueueMiddleware, PullRequestMiddleware, QuietWindowMiddleware,
+            RouteTaskMiddleware, SubtaskMergeBackMiddleware, VerificationMiddleware,
+        };
+
+        // -- Pre-spawn chain (order matches the previous inline sequence) --
+        {
+            let mut chain = self.pre_spawn_chain.write().await;
+            chain.register(Arc::new(McpReadinessMiddleware::new(
+                self.config.repo_path.clone(),
+                self.config.mcp_servers.a2a_gateway.clone(),
+            )));
+            chain.register(Arc::new(RouteTaskMiddleware::new()));
+            chain.register(Arc::new(CircuitBreakerMiddleware::new()));
+            chain.register(Arc::new(QuietWindowMiddleware::new()));
+            chain.register(Arc::new(BudgetDispatchMiddleware::new()));
+            chain.register(Arc::new(BudgetConcurrencyMiddleware::new()));
+            chain.register(Arc::new(GuardrailsMiddleware::new()));
+            // Federation priority is a no-op today; registered as an extension
+            // point for future federation-signal handlers.
+            chain.register(Arc::new(FederationPriorityMiddleware::new()));
+        }
+
+        // -- Post-completion chain --
+        {
+            let mut chain = self.post_completion_chain.write().await;
+            chain.register(Arc::new(MemoryOnlyShortCircuitMiddleware::new()));
+            chain.register(Arc::new(VerificationMiddleware::new()));
+            chain.register(Arc::new(SubtaskMergeBackMiddleware::new()));
+            chain.register(Arc::new(AutoshipMiddleware::new()));
+            chain.register(Arc::new(PullRequestMiddleware::new()));
+            chain.register(Arc::new(MergeQueueMiddleware::new()));
+        }
+    }
 }

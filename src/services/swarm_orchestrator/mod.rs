@@ -19,6 +19,7 @@ mod specialist_triggers;
 mod infrastructure;
 pub(crate) mod helpers;
 pub(crate) mod convergent_execution;
+pub mod middleware;
 
 // Re-export public types
 pub use types::{
@@ -130,6 +131,19 @@ where
 
     /// Optional cost-window service for quiet-hours scheduling.
     pub(super) cost_window_service: Option<Arc<crate::services::cost_window_service::CostWindowService>>,
+
+    /// Pre-spawn middleware chain. Runs before substrate invocation for each
+    /// ready task; can short-circuit or enrich the spawn context. Populated
+    /// with the built-in middleware at construction; external callers may
+    /// register additional middleware via
+    /// [`SwarmOrchestrator::with_pre_spawn_middleware`].
+    pub(super) pre_spawn_chain: Arc<RwLock<middleware::PreSpawnChain>>,
+
+    /// Post-completion middleware chain. Runs the side-effects (verification,
+    /// feature-branch handling, PR creation, merge-queue) that previously
+    /// lived inline in `run_post_completion_workflow`. Registrable via
+    /// [`SwarmOrchestrator::with_post_completion_middleware`].
+    pub(super) post_completion_chain: Arc<RwLock<middleware::PostCompletionChain>>,
 }
 
 // ============================================================================
@@ -206,7 +220,29 @@ where
             adapter_registry: None,
             budget_tracker: None,
             cost_window_service: None,
+            pre_spawn_chain: Arc::new(RwLock::new(middleware::PreSpawnChain::new())),
+            post_completion_chain: Arc::new(RwLock::new(middleware::PostCompletionChain::new())),
         }
+    }
+
+    /// Register an additional pre-spawn middleware. Registration order is
+    /// preserved; middleware runs in the order it was registered.
+    pub async fn with_pre_spawn_middleware(
+        self,
+        mw: Arc<dyn middleware::PreSpawnMiddleware>,
+    ) -> Self {
+        self.pre_spawn_chain.write().await.register(mw);
+        self
+    }
+
+    /// Register an additional post-completion middleware. Registration order
+    /// is preserved.
+    pub async fn with_post_completion_middleware(
+        self,
+        mw: Arc<dyn middleware::PostCompletionMiddleware>,
+    ) -> Self {
+        self.post_completion_chain.write().await.register(mw);
+        self
     }
 
     // -- Builder methods --
@@ -701,6 +737,18 @@ where
             "Registered built-in event handlers",
         ).await;
 
+        // Register default pre-spawn / post-completion middleware chains.
+        // These preserve the logic previously hardcoded inline in
+        // spawn_task_agent / run_post_completion_workflow. External callers
+        // that registered extra middleware via `with_*_middleware` keep those
+        // (they were registered earlier and retain their position).
+        self.register_builtin_middleware().await;
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Registered built-in lifecycle middleware",
+        ).await;
+
         // Load persisted circuit breaker states (after handler registration)
         self.event_reactor.load_circuit_breaker_states().await;
 
@@ -776,22 +824,34 @@ where
             }
         }
 
-        // The main loop runs at reconciliation cadence as a safety net.
-        // Handlers do the fast-path work (task cascades, retries, stats).
-        // The loop handles draining the ready-task channel and spawning agents.
+        // The reconciliation interval is a safety net. Handlers do the
+        // fast-path work (task cascades, retries, stats). The main loop wakes
+        // on ready-task and specialist channel signals for low-latency
+        // dispatch, and falls back to the interval for periodic reconciliation
+        // (evolution refinements, idle auto-shutdown, table pruning) when the
+        // channels are quiet.
         let reconciliation_secs = self.config.reconciliation_interval_secs.unwrap_or(30);
         let loop_interval = tokio::time::Duration::from_secs(reconciliation_secs);
+        let mut reconciliation_interval = tokio::time::interval(loop_interval);
+        reconciliation_interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // Periodic cleanup for processed_commands table (Issue #59).
-        // Every ~24h worth of ticks, prune entries older than 7 days.
+        // Every ~24h worth of timer ticks, prune entries older than 7 days.
         let cleanup_every_n_ticks: u64 = if reconciliation_secs > 0 {
             (24 * 3600) / reconciliation_secs  // ~2880 ticks at 30s
         } else {
             2880
         };
         let mut tick_counter: u64 = 0;
-        let mut idle_terminal_ticks: u64 = 0; // consecutive ticks where all goals/tasks are terminal
+        let mut idle_terminal_ticks: u64 = 0; // consecutive timer ticks with all terminal
         let command_retention = std::time::Duration::from_secs(7 * 24 * 3600); // 7 days
+
+        enum Wake {
+            Timer,
+            ReadyTask(uuid::Uuid),
+            Specialist,
+        }
 
         // Main orchestration loop
         loop {
@@ -808,12 +868,65 @@ where
                 _ => {}
             }
 
-            // Event-driven mode: handlers manage task cascades, retries,
-            // stats, escalation checks, and reconciliation via scheduled
-            // events. The loop drains the ready-task channel and handles
-            // operations that require full orchestrator context.
+            // Race the reconciliation interval against the spawn channels.
+            // `biased` prefers event branches so a busy stream of task signals
+            // gets dispatched with minimum latency; the timer branch only
+            // wins during lulls, which is exactly when the safety-net
+            // maintenance is cheapest to run. Both `recv()` and `tick()` are
+            // cancel-safe, so losing a race doesn't drop a message.
+            let wake = {
+                let mut ready_rx = self.ready_task_rx.lock().await;
+                let mut specialist_rx = self.specialist_rx.lock().await;
+                tokio::select! {
+                    biased;
+                    Some(id) = ready_rx.recv() => Wake::ReadyTask(id),
+                    Some(_id) = specialist_rx.recv() => Wake::Specialist,
+                    _ = reconciliation_interval.tick() => Wake::Timer,
+                }
+            };
 
-            // Drain ready-task channel and spawn agents
+            // Primed spawn for a ready-task wake: handle this id before
+            // draining so the first newly-ready task hits an agent without
+            // waiting for the rest of the drain pass.
+            if let Wake::ReadyTask(task_id) = wake
+                && let Ok(Some(task)) = self.task_repo.get(task_id).await
+                && task.status == crate::domain::models::TaskStatus::Ready
+                && let Err(e) = self.spawn_task_agent(&task, &event_tx).await
+            {
+                tracing::error!(
+                    error = %e,
+                    task_id = %task_id,
+                    "spawn_task_agent (primed) subsystem error (isolated)"
+                );
+                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+                    crate::services::event_bus::EventSeverity::Error,
+                    crate::services::event_bus::EventPayload::SubsystemError {
+                        subsystem: "spawn_task_agent".into(),
+                        error: e.to_string(),
+                    },
+                )).await;
+            }
+
+            // Specialist wake consumed the signalling id from the channel
+            // but drain_specialist_tasks only fires when try_recv returns at
+            // least one id. Call the processor directly so the primed signal
+            // isn't lost; it scans the DB for all permanently-failed tasks,
+            // so we don't need the specific id.
+            if matches!(wake, Wake::Specialist)
+                && let Err(e) = self.process_specialist_triggers(&event_tx).await
+            {
+                tracing::error!(error = %e, "process_specialist_triggers (primed) subsystem error (isolated)");
+                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+                    crate::services::event_bus::EventSeverity::Error,
+                    crate::services::event_bus::EventPayload::SubsystemError {
+                        subsystem: "process_specialist_triggers".into(),
+                        error: e.to_string(),
+                    },
+                )).await;
+            }
+
+            // Drain any remaining queued tasks (and the DB safety-net scan
+            // inside drain_ready_tasks). Cheap when the channels are empty.
             if let Err(e) = self.drain_ready_tasks(&event_tx).await {
                 tracing::error!(error = %e, "drain_ready_tasks subsystem error (isolated)");
                 self.event_bus.publish(crate::services::event_factory::orchestrator_event(
@@ -825,7 +938,6 @@ where
                 )).await;
             }
 
-            // Drain specialist channel and process specialist triggers
             if let Err(e) = self.drain_specialist_tasks(&event_tx).await {
                 tracing::error!(error = %e, "drain_specialist_tasks subsystem error (isolated)");
                 self.event_bus.publish(crate::services::event_factory::orchestrator_event(
@@ -835,6 +947,14 @@ where
                         error: e.to_string(),
                     },
                 )).await;
+            }
+
+            // Timer-bound reconciliation. Gated to timer wakes so bursts of
+            // task-ready signals don't accelerate evolution evaluation,
+            // auto-shutdown detection, or the 24h cleanup cadence — all of
+            // which assume per-interval semantics.
+            if !matches!(wake, Wake::Timer) {
+                continue;
             }
 
             if self.config.track_evolution
@@ -851,7 +971,7 @@ where
             }
 
             // Auto-shutdown: if all goals and tasks have reached terminal state
-            // for 2 consecutive ticks, initiate graceful shutdown.
+            // for 2 consecutive timer ticks, initiate graceful shutdown.
             {
                 use crate::domain::ports::GoalFilter;
                 let all_goals = self.goal_repo.list(GoalFilter::default()).await.unwrap_or_default();
@@ -892,9 +1012,6 @@ where
                     );
                 }
             }
-
-            // Wait before next iteration
-            tokio::time::sleep(loop_interval).await;
         }
 
         // Flush pending watermarks before stopping the reactor
