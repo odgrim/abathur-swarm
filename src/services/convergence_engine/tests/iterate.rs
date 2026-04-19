@@ -9,10 +9,13 @@ use crate::domain::errors::DomainResult;
 use crate::domain::models::convergence::*;
 use crate::domain::models::intent_verification::{GapCategory, GapSeverity};
 use crate::domain::models::task::Complexity;
-use crate::services::budget_tracker::{BudgetTracker, BudgetTrackerConfig};
+use crate::domain::ports::TrajectoryRepository;
 
 use super::super::test_support::*;
 use super::super::{ConvergenceEngine, OverseerMeasurer};
+use super::super::ports::{
+    ConvergenceRunOutcome, NullConvergenceAdvisor, NullStrategyEffects, NullStrategyExecutor,
+};
 use super::{
     metrics_with, signals_with_tests, test_artifact, test_engine, test_observation, test_policy,
     test_trajectory,
@@ -1088,7 +1091,40 @@ fn test_engine_with_measurer(
 }
 
 // -----------------------------------------------------------------------
-// converge() and iterate_once() tests
+// run_with_ports helpers for engine-lifecycle tests
+// -----------------------------------------------------------------------
+
+/// Run the engine's new ports-driven entrypoint against a prepared trajectory,
+/// emulating the pre-port `engine.converge(trajectory, &infra)` call used in
+/// legacy tests. Installs the trivial [`NullStrategyExecutor`] /
+/// [`NullStrategyEffects`] / [`NullConvergenceAdvisor`] ports so the lifecycle
+/// is driven purely by the overseer measurer + in-engine logic, just like the
+/// deleted legacy path.
+async fn run_engine_ports(
+    engine: &ConvergenceEngine<MockTrajectoryRepo, MockMemoryRepo, ProgressiveMockOverseerMeasurer>,
+    trajectory: Trajectory,
+    submission: TaskSubmission,
+    task_id: Uuid,
+) -> ConvergenceRunOutcome {
+    let trajectory_id = trajectory.id;
+    engine.trajectory_store.save(&trajectory).await.unwrap();
+    engine
+        .run_with_ports(
+            submission,
+            task_id,
+            Some(trajectory_id),
+            Arc::new(NullStrategyExecutor),
+            Some(Arc::new(NullStrategyEffects)),
+            Arc::new(NullConvergenceAdvisor),
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+}
+
+// -----------------------------------------------------------------------
+// run_with_ports() and iterate_once() tests
 // -----------------------------------------------------------------------
 
 /// Happy path: progressive improvement leads to FixedPoint attractor,
@@ -1161,7 +1197,7 @@ async fn test_converge_happy_path_overseer_converged() {
     );
     submission.inferred_complexity = Complexity::Moderate; // More budget
 
-    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    let (mut trajectory, _infra) = engine.prepare(&submission, task_id).await.unwrap();
     // Force Sequential convergence mode (Cheap hint avoids parallel routing).
     trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
     // Disable interval and budget-fraction triggers so the
@@ -1169,10 +1205,10 @@ async fn test_converge_happy_path_overseer_converged() {
     trajectory.policy.intent_check_interval = u32::MAX;
     trajectory.policy.intent_check_at_budget_fraction = 1.0;
 
-    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+    let outcome = run_engine_ports(&engine, trajectory, submission, task_id).await;
 
     assert!(
-        matches!(outcome, ConvergenceOutcome::Converged { .. }),
+        matches!(outcome, ConvergenceRunOutcome::Converged),
         "Expected Converged outcome, got {:?}",
         outcome
     );
@@ -1191,7 +1227,7 @@ async fn test_converge_budget_exhaustion() {
     );
     submission.inferred_complexity = Complexity::Simple;
 
-    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    let (mut trajectory, _infra) = engine.prepare(&submission, task_id).await.unwrap();
     // Force Sequential convergence mode (the pre-PR-5 version of this test
     // was implicitly routed to converge_parallel by a Narrow basin; PR 5
     // removed parallel routing, so we pin Cheap to keep the sequential path
@@ -1204,17 +1240,18 @@ async fn test_converge_budget_exhaustion() {
     // Disable partial acceptance so we get Exhausted, not partial Converged.
     trajectory.policy.partial_acceptance = false;
 
-    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+    let outcome = run_engine_ports(&engine, trajectory, submission, task_id).await;
 
-    // Either Exhausted (budget) or Trapped (no eligible escape strategies)
-    // is acceptable: both are terminal failure outcomes for a tiny budget
-    // with always-failing signals.
+    // Either Exhausted (budget) or Failed/trapped (no eligible escape
+    // strategies) is acceptable: both are terminal failure outcomes for a
+    // tiny budget with always-failing signals. In the ports-driven path,
+    // trapped surfaces as `Failed("trapped in ...")`.
     assert!(
         matches!(
             outcome,
-            ConvergenceOutcome::Exhausted { .. } | ConvergenceOutcome::Trapped { .. }
+            ConvergenceRunOutcome::Exhausted(_) | ConvergenceRunOutcome::Failed(_)
         ),
-        "Expected Exhausted or Trapped outcome, got {:?}",
+        "Expected Exhausted or Failed/trapped outcome, got {:?}",
         outcome
     );
 }
@@ -1287,7 +1324,7 @@ async fn test_converge_budget_exhaustion_with_partial_acceptance() {
         );
     submission.inferred_complexity = Complexity::Simple;
 
-    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    let (mut trajectory, _infra) = engine.prepare(&submission, task_id).await.unwrap();
     // Force Sequential convergence mode (Cheap hint avoids parallel routing).
     trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
     // Budget: 3 iterations (enough for iterate_once to detect exhaustion
@@ -1301,74 +1338,14 @@ async fn test_converge_budget_exhaustion_with_partial_acceptance() {
     trajectory.policy.partial_acceptance = true;
     trajectory.policy.partial_threshold = 0.5;
 
-    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+    let outcome = run_engine_ports(&engine, trajectory, submission, task_id).await;
 
-    // Should be Converged via partial acceptance.
+    // Should be PartialAccepted via the null advisor's partial-acceptance
+    // handling at pre-exhaustion (the ports-driven equivalent of legacy
+    // `converge()`'s partial-acceptance branch).
     assert!(
-        matches!(outcome, ConvergenceOutcome::Converged { .. }),
-        "Expected Converged via partial acceptance, got {:?}",
-        outcome
-    );
-}
-
-/// Global budget tracker at Critical → BudgetDenied on first iteration.
-#[tokio::test]
-async fn test_converge_global_budget_denied() {
-    use crate::services::event_bus::{EventBus, EventBusConfig};
-
-    // All-passing signals (we won't even get to measure them).
-    let signals: Vec<OverseerSignals> = (0..5).map(|_| all_passing_signals()).collect();
-
-    let traj_repo = Arc::new(MockTrajectoryRepo::new());
-    let mem_repo = Arc::new(MockMemoryRepo::new());
-    let measurer = Arc::new(ProgressiveMockOverseerMeasurer::new(signals));
-    let mut config = test_config();
-    config.default_policy.generate_acceptance_tests = false;
-
-    let mut engine = ConvergenceEngine::new(traj_repo, mem_repo, measurer, config);
-
-    // Wire in a BudgetTracker at Critical pressure.
-    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-    let tracker = Arc::new(BudgetTracker::new(
-        BudgetTrackerConfig::default(),
-        event_bus,
-    ));
-    // Report a signal with 99% consumed → Critical.
-    tracker
-        .report_budget_signal(
-            "daily",
-            crate::services::budget_tracker::BudgetWindowType::Daily,
-            0.99,
-            100,
-            3600,
-        )
-        .await;
-    engine.set_budget_tracker(tracker);
-
-    let task_id = Uuid::new_v4();
-    let submission = TaskSubmission::new(
-            "Implement a basic utility function for string manipulation with unit tests and documentation".to_string(),
-        );
-
-    // Verify the tracker is actually at Critical before running converge.
-    assert!(
-        engine
-            .budget_tracker
-            .as_ref()
-            .unwrap()
-            .should_pause_new_work()
-            .await,
-        "Budget tracker should report Critical pressure"
-    );
-
-    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
-    // Force Sequential convergence mode so the budget tracker check fires.
-    trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
-    let outcome = engine.converge(trajectory, &infra).await.unwrap();
-
-    assert!(
-        matches!(outcome, ConvergenceOutcome::BudgetDenied { .. }),
-        "Expected BudgetDenied outcome, got {:?}",
+        matches!(outcome, ConvergenceRunOutcome::PartialAccepted),
+        "Expected PartialAccepted via partial acceptance, got {:?}",
         outcome
     );
 }
@@ -1442,7 +1419,7 @@ async fn test_converge_trapped_limit_cycle() {
     );
     submission.inferred_complexity = Complexity::Simple;
 
-    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    let (mut trajectory, _infra) = engine.prepare(&submission, task_id).await.unwrap();
     // Force Sequential convergence mode.
     trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
     // Give enough budget so the loop doesn't exhaust before Trapped.
@@ -1455,17 +1432,22 @@ async fn test_converge_trapped_limit_cycle() {
     // Disable partial acceptance.
     trajectory.policy.partial_acceptance = false;
 
-    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+    let outcome = run_engine_ports(&engine, trajectory, submission, task_id).await;
 
+    // In the ports-driven path, LoopControl::Trapped surfaces as
+    // `Failed("trapped in LimitCycle ...")`; we assert the message references
+    // LimitCycle to preserve the attractor-type check.
     match &outcome {
-        ConvergenceOutcome::Trapped { attractor_type, .. } => {
+        ConvergenceRunOutcome::Failed(msg) => {
             assert!(
-                matches!(attractor_type, AttractorType::LimitCycle { .. }),
-                "Expected LimitCycle attractor type, got {:?}",
-                attractor_type
+                msg.to_lowercase().contains("limitcycle")
+                    || msg.to_lowercase().contains("limit_cycle")
+                    || msg.to_lowercase().contains("limit cycle"),
+                "Expected trapped-in-LimitCycle message, got {:?}",
+                msg
             );
         }
-        other => panic!("Expected Trapped outcome, got {:?}", other),
+        other => panic!("Expected Failed (trapped) outcome, got {:?}", other),
     }
 }
 
@@ -1517,7 +1499,7 @@ async fn test_converge_trapped_no_eligible_strategies() {
     );
     submission.inferred_complexity = Complexity::Simple;
 
-    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    let (mut trajectory, _infra) = engine.prepare(&submission, task_id).await.unwrap();
     // Force Sequential convergence mode.
     trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
     // Give enough iterations but very tight token budget. After the
@@ -1535,17 +1517,16 @@ async fn test_converge_trapped_no_eligible_strategies() {
     // Disable partial acceptance.
     trajectory.policy.partial_acceptance = false;
 
-    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+    let outcome = run_engine_ports(&engine, trajectory, submission, task_id).await;
 
-    // Should be Trapped (LimitCycle with no affordable strategies)
-    // or Exhausted if budget runs out first. Both are valid terminal
-    // states; we accept either but prefer Trapped.
+    // Should be Failed/trapped (LimitCycle with no affordable strategies)
+    // or Exhausted if budget runs out first. Both are valid terminal states.
     assert!(
         matches!(
             outcome,
-            ConvergenceOutcome::Trapped { .. } | ConvergenceOutcome::Exhausted { .. }
+            ConvergenceRunOutcome::Failed(_) | ConvergenceRunOutcome::Exhausted(_)
         ),
-        "Expected Trapped or Exhausted outcome, got {:?}",
+        "Expected Failed/trapped or Exhausted outcome, got {:?}",
         outcome
     );
 }

@@ -380,10 +380,8 @@ pub struct StrategyExecutionOutput {
 /// The engine itself does not depend on any particular substrate --
 /// implementations (e.g. `OrchestratorStrategyExecutor` in the swarm
 /// orchestrator) wrap the concrete substrate call and artifact-collection
-/// logic. This trait is staged for PR 4 of the engine-as-core refactor
-/// chain (#13/#21): PR 2 introduces the port and wires an optional executor
-/// field onto `ConvergenceEngine`, but the engine's internal `execute_strategy`
-/// placeholder is not yet migrated to call it.
+/// logic. [`ConvergenceEngine::run`] dispatches every strategy execution
+/// through this port.
 #[async_trait]
 pub trait StrategyExecutor: Send + Sync {
     async fn execute(
@@ -403,15 +401,8 @@ pub trait StrategyExecutor: Send + Sync {
 /// notifications). The engine itself has no notion of worktrees or event
 /// payloads, so it delegates these effects to an implementation provided by
 /// the orchestrator (see `OrchestratorStrategyEffects`).
-///
-/// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): PR 3
-/// introduces the port and wires an optional effects field onto
-/// `ConvergenceEngine`. The engine's own `execute_strategy` does not yet
-/// dispatch through this port; today the orchestrator handles `FreshStart`
-/// inline in `run_convergent_execution_inner` and `RevertAndBranch` runs
-/// inside the engine with no worktree side effects. PR 4 will flip the inner
-/// loop to call `effects.on_fresh_start(...)` / `effects.on_revert(...)` and
-/// delete the orchestrator's inline handling.
+/// [`ConvergenceEngine::run`] calls `on_fresh_start` / `on_revert` at the
+/// top of each iteration whose selected strategy carries those variants.
 #[async_trait]
 pub trait StrategyEffects: Send + Sync {
     /// Invoked when a `FreshStart` strategy is selected. Implementations
@@ -584,4 +575,149 @@ pub trait PromptBuilder: Send + Sync {
         strategy: &StrategyKind,
         iteration: u32,
     ) -> DomainResult<String>;
+}
+
+// ---------------------------------------------------------------------------
+// Null port impls -- trivial defaults for engine-only tests
+// ---------------------------------------------------------------------------
+
+/// No-op [`StrategyExecutor`]. Produces an `ArtifactReference` derived from the
+/// trajectory's latest observation, or a placeholder artifact when the
+/// trajectory has no observations yet. Mirrors the pre-port
+/// `ConvergenceEngine::execute_strategy` placeholder so tests that previously
+/// called the legacy `converge()` entrypoint can migrate to `run_with_ports`
+/// without an LLM substrate wired up.
+///
+/// For `StrategyKind::RevertAndBranch { target }` the executor returns the
+/// target observation's artifact when found (matching the legacy revert
+/// semantics), otherwise falls through to the latest-artifact behaviour.
+///
+/// The reported `tokens_used` mirrors `StrategyKind::estimated_cost()` so
+/// budget consumption in tests tracks the legacy path closely enough for
+/// attractor classification and exhaustion checks to reproduce.
+pub struct NullStrategyExecutor;
+
+#[async_trait]
+impl StrategyExecutor for NullStrategyExecutor {
+    async fn execute(
+        &self,
+        ctx: &StrategyExecutionContext<'_>,
+    ) -> DomainResult<StrategyExecutionOutput> {
+        // RevertAndBranch routes to the target observation's artifact when
+        // present, preserving legacy revert semantics in tests.
+        if let StrategyKind::RevertAndBranch { target } = ctx.strategy
+            && let Some(obs) = ctx.trajectory.observations.iter().find(|o| o.id == *target)
+        {
+            return Ok(StrategyExecutionOutput {
+                artifact: obs.artifact.clone(),
+                tokens_used: ctx.strategy.estimated_cost(),
+                wall_time_ms: 0,
+            });
+        }
+
+        let artifact = ctx.trajectory.latest_artifact().cloned().unwrap_or_else(|| {
+            ArtifactReference::new(
+                format!("/worktree/{}/artifact", ctx.trajectory.task_id),
+                format!("pending-{}", ctx.trajectory.observations.len()),
+            )
+        });
+
+        Ok(StrategyExecutionOutput {
+            artifact,
+            tokens_used: ctx.strategy.estimated_cost(),
+            wall_time_ms: 0,
+        })
+    }
+}
+
+/// No-op [`StrategyEffects`]. Used by tests that exercise `run_with_ports`
+/// without needing filesystem worktree resets or orchestrator event emissions.
+pub struct NullStrategyEffects;
+
+#[async_trait]
+impl StrategyEffects for NullStrategyEffects {
+    async fn on_fresh_start(&self, _trajectory: &Trajectory) -> DomainResult<()> {
+        Ok(())
+    }
+    async fn on_revert(&self, _trajectory: &Trajectory, _target: &Uuid) -> DomainResult<()> {
+        Ok(())
+    }
+}
+
+/// Trivial [`ConvergenceAdvisor`] that mirrors the policy the legacy
+/// `converge()` method implemented inline:
+///
+/// - `on_iteration_start` -> always [`IterationGate::Continue`].
+/// - `on_intent_check` -> [`AdvisorDirective::Continue`] (legacy treated
+///   `LoopControl::IntentCheck` as a no-op continue).
+/// - `on_overseer_converged` -> [`AdvisorDirective::FinalizeConverged`] (legacy
+///   mapped `LoopControl::OverseerConverged` directly to Converged).
+/// - `on_pre_exhaustion` -> [`AdvisorDirective::FinalizePartialAccepted`] when
+///   the trajectory has partial acceptance enabled and its best observation
+///   crosses the policy threshold; otherwise [`AdvisorDirective::Continue`] so
+///   the engine's extension retry + Exhausted fall-through fires.
+///
+/// This makes `NullConvergenceAdvisor` a drop-in replacement for the legacy
+/// converge() finality rules in engine-only tests.
+pub struct NullConvergenceAdvisor;
+
+#[async_trait]
+impl ConvergenceAdvisor for NullConvergenceAdvisor {
+    async fn on_iteration_start(
+        &self,
+        _trajectory: &mut Trajectory,
+    ) -> DomainResult<IterationGate> {
+        Ok(IterationGate::Continue)
+    }
+
+    async fn on_intent_check(
+        &self,
+        _trajectory: &mut Trajectory,
+        _iteration: u32,
+    ) -> DomainResult<AdvisorDirective> {
+        Ok(AdvisorDirective::Continue { policy_overlay: None })
+    }
+
+    async fn on_overseer_converged(
+        &self,
+        _trajectory: &Trajectory,
+    ) -> DomainResult<AdvisorDirective> {
+        Ok(AdvisorDirective::FinalizeConverged)
+    }
+
+    async fn on_pre_exhaustion(
+        &self,
+        trajectory: &Trajectory,
+    ) -> DomainResult<AdvisorDirective> {
+        if trajectory.policy.partial_acceptance
+            && let Some(best) = trajectory.best_observation()
+        {
+            let level = best
+                .metrics
+                .as_ref()
+                .map(|m| m.intent_blended_level.unwrap_or(m.convergence_level))
+                .unwrap_or(0.0);
+            if level >= trajectory.policy.partial_threshold {
+                return Ok(AdvisorDirective::FinalizePartialAccepted);
+            }
+        }
+        Ok(AdvisorDirective::Continue { policy_overlay: None })
+    }
+}
+
+/// No-op [`PromptBuilder`] that returns an empty string. Tests that don't care
+/// about prompt content can install this so the engine's prompt step is a
+/// trivial no-op.
+pub struct NullPromptBuilder;
+
+#[async_trait]
+impl PromptBuilder for NullPromptBuilder {
+    async fn build(
+        &self,
+        _trajectory: &Trajectory,
+        _strategy: &StrategyKind,
+        _iteration: u32,
+    ) -> DomainResult<String> {
+        Ok(String::new())
+    }
 }

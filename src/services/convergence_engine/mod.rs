@@ -17,7 +17,6 @@ use async_trait::async_trait;
 use crate::domain::errors::DomainResult;
 use crate::domain::models::convergence::*;
 use crate::domain::ports::{MemoryRepository, TrajectoryRepository};
-use crate::services::budget_tracker::BudgetTracker;
 
 mod decide;
 mod iterate;
@@ -28,7 +27,8 @@ mod run;
 
 pub use ports::{
     AdvisorDirective, ConvergenceAdvisor, ConvergenceDomainEvent, ConvergenceEventSink,
-    ConvergenceRunOutcome, IterationGate, NullEventSink, PolicyOverlay, PromptBuilder,
+    ConvergenceRunOutcome, IterationGate, NullConvergenceAdvisor, NullEventSink,
+    NullPromptBuilder, NullStrategyEffects, NullStrategyExecutor, PolicyOverlay, PromptBuilder,
     StrategyEffects, StrategyExecutionContext, StrategyExecutionOutput, StrategyExecutor,
     TracingEventSink,
 };
@@ -101,12 +101,6 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     pub(super) memory_repository: Arc<M>,
     pub(super) overseer_measurer: Arc<O>,
     pub(super) config: ConvergenceEngineConfig,
-    /// Optional global budget tracker for pressure-aware convergence.
-    ///
-    /// When set, the convergence loop checks global budget pressure at the top
-    /// of each iteration and terminates early with `BudgetDenied` if the
-    /// pressure level is Critical (>95% consumed).
-    pub(super) budget_tracker: Option<Arc<BudgetTracker>>,
     /// Optional cost-window service for quiet-hours scheduling.
     ///
     /// When set, the convergence loop checks whether we are inside a quiet window
@@ -122,46 +116,24 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     /// `tracing::{info,warn}` output verbatim. Tests that want to silence
     /// events can swap in [`NullEventSink`] via [`Self::with_event_sink`].
     pub(super) event_sink: Arc<dyn ConvergenceEventSink>,
-    /// Optional substrate-invocation port.
-    ///
-    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): the
-    /// field and builder exist in PR 2 so callers can begin wiring a concrete
-    /// [`StrategyExecutor`] implementation, but the engine's own
-    /// `execute_strategy` placeholder does not yet dispatch through this
-    /// field. Today the orchestrator invokes the executor out-of-band.
-    #[allow(dead_code)]
+    /// Substrate-invocation port consumed by [`ConvergenceEngine::run`].
+    /// `None` is permitted at construction time so tests can build a bare
+    /// engine for non-`run()` methods; `run()` returns an error when it
+    /// isn't installed.
     pub(super) executor: Option<Arc<dyn StrategyExecutor>>,
-    /// Optional strategy side-effects port.
-    ///
-    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): the
-    /// field and builder exist in PR 3 so callers can wire a concrete
-    /// [`StrategyEffects`] implementation (e.g.
-    /// `OrchestratorStrategyEffects`), but the engine's internal strategy
-    /// handling does not yet dispatch through this field. Today the
-    /// orchestrator handles `FreshStart` inline in
-    /// `run_convergent_execution_inner`; `RevertAndBranch` has no
-    /// filesystem-visible side effect (the engine just routes to an earlier
-    /// observation's artifact).
-    #[allow(dead_code)]
+    /// Strategy side-effects port consumed by [`ConvergenceEngine::run`]
+    /// (`FreshStart` / `RevertAndBranch`). Optional; when absent, the engine
+    /// skips the side-effect hooks (matching the Phase A engine-owned test
+    /// behaviour).
     pub(super) effects: Option<Arc<dyn StrategyEffects>>,
-    /// Optional convergence-advisor port.
-    ///
-    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): PR 4
-    /// introduces the port and the new [`ConvergenceEngine::run`] entrypoint
-    /// which dispatches every finality-gate decision through it. The engine's
-    /// pre-existing [`ConvergenceEngine::converge`] does NOT consult this
-    /// field and continues to treat `IntentCheck` as a no-op continue; that
-    /// method is scheduled for deletion in PR 5 once every caller has moved
-    /// to `run()`.
-    #[allow(dead_code)]
+    /// Convergence-advisor port consumed by [`ConvergenceEngine::run`]. Owns
+    /// the finality decisions that the legacy converge() inlined. `None` is
+    /// permitted at construction time; `run()` returns an error when it
+    /// isn't installed.
     pub(super) advisor: Option<Arc<dyn ConvergenceAdvisor>>,
-    /// Optional prompt-builder port.
-    ///
-    /// Used by [`ConvergenceEngine::run`] (PR 4b onward) to build the
-    /// per-iteration substrate prompt. When unset, `run()` falls back to a
-    /// minimal default prompt derived from the trajectory specification,
-    /// matching the Phase A engine-owned test behaviour.
-    #[allow(dead_code)]
+    /// Optional prompt-builder port. When unset, [`ConvergenceEngine::run`]
+    /// falls back to a minimal default prompt derived from the trajectory
+    /// specification, matching the Phase A engine-owned test behaviour.
     pub(super) prompt_builder: Option<Arc<dyn PromptBuilder>>,
 }
 
@@ -182,7 +154,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             memory_repository,
             overseer_measurer,
             config,
-            budget_tracker: None,
             cost_window_service: None,
             calibration_tracker: Mutex::new(BudgetCalibrationTracker::default()),
             event_sink: Arc::new(TracingEventSink),
@@ -202,37 +173,23 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
         self
     }
 
-    /// Attach a [`StrategyExecutor`] (builder-style).
-    ///
-    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): today
-    /// the engine stores the executor but its internal loop does not yet
-    /// dispatch through it. PR 4 will migrate `execute_strategy` to call
-    /// `self.executor.as_ref().unwrap().execute(...)` once every caller has
-    /// been updated to install one.
+    /// Attach a [`StrategyExecutor`] (builder-style). Required for
+    /// [`ConvergenceEngine::run`] to drive substrate invocations.
     pub fn with_executor<E: StrategyExecutor + 'static>(mut self, e: Arc<E>) -> Self {
         self.executor = Some(e);
         self
     }
 
-    /// Attach a [`StrategyEffects`] implementation (builder-style).
-    ///
-    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): today
-    /// the engine stores the effects handle but its internal strategy
-    /// handling does not yet dispatch through it. PR 4 will migrate
-    /// `execute_strategy` to call `self.effects.as_ref().unwrap().on_fresh_start(...)`
-    /// / `on_revert(...)` and delete the orchestrator's inline `FreshStart`
-    /// handling.
+    /// Attach a [`StrategyEffects`] implementation (builder-style). Consumed
+    /// by [`ConvergenceEngine::run`] to route `FreshStart` / `RevertAndBranch`
+    /// side effects.
     pub fn with_effects<E: StrategyEffects + 'static>(mut self, e: Arc<E>) -> Self {
         self.effects = Some(e);
         self
     }
 
     /// Attach a [`ConvergenceAdvisor`] implementation (builder-style).
-    ///
-    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): the new
-    /// [`ConvergenceEngine::run`] entrypoint requires an advisor and will
-    /// panic if one is not installed. The legacy
-    /// [`ConvergenceEngine::converge`] ignores this field.
+    /// Required by [`ConvergenceEngine::run`].
     pub fn with_advisor<A: ConvergenceAdvisor + 'static>(mut self, a: Arc<A>) -> Self {
         self.advisor = Some(a);
         self
@@ -246,15 +203,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
     pub fn with_prompt_builder<P: PromptBuilder + 'static>(mut self, p: Arc<P>) -> Self {
         self.prompt_builder = Some(p);
         self
-    }
-
-    /// Set the global budget tracker for pressure-aware convergence.
-    ///
-    /// When configured, the convergence loop will check global budget pressure
-    /// at the start of each iteration and terminate early if the pressure level
-    /// is Critical.
-    pub fn set_budget_tracker(&mut self, tracker: Arc<BudgetTracker>) {
-        self.budget_tracker = Some(tracker);
     }
 
     /// Set the cost-window service for quiet-hours dispatch gating.
