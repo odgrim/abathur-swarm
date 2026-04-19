@@ -24,6 +24,7 @@
 //! 8. Record observation, classify attractor, update bandit via `iterate_once`
 //! 9. Act on `LoopControl` to continue, converge, decompose, etc.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,7 +42,10 @@ use crate::domain::models::task::Task;
 use crate::domain::models::{SubstrateConfig, SubstrateRequest};
 use crate::domain::ports::{MemoryRepository, Substrate, TaskRepository, TrajectoryRepository};
 use crate::services::convergence_bridge;
-use crate::services::convergence_engine::{ConvergenceEngine, OverseerMeasurer};
+use crate::services::convergence_engine::{
+    ConvergenceEngine, OverseerMeasurer, StrategyExecutionContext, StrategyExecutionOutput,
+    StrategyExecutor,
+};
 use crate::services::event_bus::{
     ConvergenceIterationPayload, ConvergenceTerminatedPayload, EventBus, EventPayload,
     EventSeverity, HumanEscalationPayload,
@@ -109,6 +113,76 @@ pub enum ConvergentOutcome {
     /// The trajectory has been persisted in its current state. The caller
     /// handles the task status transition (typically to Canceled).
     Cancelled,
+}
+
+// ---------------------------------------------------------------------------
+// OrchestratorStrategyExecutor
+// ---------------------------------------------------------------------------
+
+/// `StrategyExecutor` implementation used by the orchestrator's convergent
+/// path. Wraps the concrete `Substrate` invocation + worktree-based artifact
+/// collection that previously lived inline inside
+/// `run_convergent_execution_inner`.
+///
+/// Part of the engine-as-core refactor chain (#13/#21): PR 2 establishes the
+/// boundary so that PR 4 can migrate the convergence engine's own inner loop
+/// to drive the executor directly, at which point the orchestrator will stop
+/// hosting the substrate call altogether.
+pub(super) struct OrchestratorStrategyExecutor {
+    substrate: Arc<dyn Substrate>,
+    /// Worktree path the substrate should run in. When `None`, no working
+    /// directory is set on the `SubstrateConfig` and artifact collection
+    /// falls back to the process CWD (`"."`), matching pre-port behaviour.
+    worktree_path: Option<PathBuf>,
+    agent_type: String,
+    system_prompt: String,
+    task_id: Uuid,
+    /// Max turns to pass to the substrate. Stored on the executor because it
+    /// does not vary across iterations of a single convergent run.
+    max_turns: u32,
+}
+
+#[async_trait]
+impl StrategyExecutor for OrchestratorStrategyExecutor {
+    async fn execute(
+        &self,
+        ctx: &StrategyExecutionContext<'_>,
+    ) -> DomainResult<StrategyExecutionOutput> {
+        let _ = ctx.trajectory;
+        let _ = ctx.strategy;
+        let _ = ctx.strategy_context;
+        let _ = ctx.iteration_seq;
+
+        let mut config = SubstrateConfig::default().with_max_turns(self.max_turns);
+        if let Some(ref wt) = self.worktree_path {
+            config = config.with_working_dir(wt.to_string_lossy().as_ref());
+        }
+        let request = SubstrateRequest::new(
+            self.task_id,
+            &self.agent_type,
+            &self.system_prompt,
+            ctx.prompt,
+        )
+        .with_config(config);
+
+        let iteration_start = Instant::now();
+        let session = self.substrate.execute(request).await?;
+        let wall_time_ms = iteration_start.elapsed().as_millis() as u64;
+
+        let artifact_dir = self
+            .worktree_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string());
+        let artifact = convergence_bridge::collect_artifact(&artifact_dir, "");
+        let tokens_used = session.total_tokens();
+
+        Ok(StrategyExecutionOutput {
+            artifact,
+            tokens_used,
+            wall_time_ms,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +757,19 @@ where
         trajectory.lint_baseline = baseline;
     }
 
+    // Build the per-run substrate executor. Routing substrate calls through
+    // this port (rather than inlining them below) establishes the boundary
+    // PR 4 needs to migrate the engine's own inner loop. The executor holds
+    // no per-iteration state.
+    let executor = OrchestratorStrategyExecutor {
+        substrate: substrate.clone(),
+        worktree_path: worktree_path.map(PathBuf::from),
+        agent_type: agent_type.to_string(),
+        system_prompt: system_prompt.to_string(),
+        task_id: task.id,
+        max_turns,
+    };
+
     loop {
         // Check cancellation
         if cancellation_token.is_cancelled() {
@@ -783,18 +870,23 @@ where
             last_intent_verification.as_ref(),
         );
 
-        let mut config = SubstrateConfig::default().with_max_turns(max_turns);
-        if let Some(wt) = worktree_path {
-            config = config.with_working_dir(wt);
-        }
-        let request =
-            SubstrateRequest::new(task.id, agent_type, system_prompt, &prompt).with_config(config);
-
-        let iteration_start = Instant::now();
-        let session = substrate.execute(request).await?;
-        let wall_time_ms = iteration_start.elapsed().as_millis() as u64;
-
-        let artifact = convergence_bridge::collect_artifact(worktree_path.unwrap_or("."), "");
+        // Route substrate invocation through the StrategyExecutor port.
+        // The engine itself doesn't yet drive this call (see PR 4); today
+        // the orchestrator still owns the outer loop and invokes the
+        // executor directly, preserving pre-port behaviour byte-for-byte.
+        let strategy_context = engine.build_strategy_context(&strategy, &trajectory);
+        let exec_ctx = StrategyExecutionContext {
+            trajectory: &trajectory,
+            strategy: &strategy,
+            strategy_context: &strategy_context,
+            iteration_seq: trajectory.observations.len() as u32,
+            prompt: &prompt,
+        };
+        let StrategyExecutionOutput {
+            artifact,
+            tokens_used: executor_tokens_used,
+            wall_time_ms,
+        } = executor.execute(&exec_ctx).await?;
 
         // Measure with overseers (Part 5)
         let overseer_signals = engine
@@ -819,7 +911,7 @@ where
                 .unwrap_or(0);
         }
 
-        let tokens_used = session.total_tokens();
+        let tokens_used = executor_tokens_used;
         let sequence = trajectory.observations.len() as u32;
 
         let observation = Observation::new(

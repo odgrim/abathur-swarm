@@ -25,7 +25,10 @@ pub mod ports;
 mod prepare;
 mod resolve;
 
-pub use ports::{ConvergenceDomainEvent, ConvergenceEventSink, NullEventSink, TracingEventSink};
+pub use ports::{
+    ConvergenceDomainEvent, ConvergenceEventSink, NullEventSink, StrategyExecutionContext,
+    StrategyExecutionOutput, StrategyExecutor, TracingEventSink,
+};
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -116,6 +119,15 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     /// `tracing::{info,warn}` output verbatim. Tests that want to silence
     /// events can swap in [`NullEventSink`] via [`Self::with_event_sink`].
     pub(super) event_sink: Arc<dyn ConvergenceEventSink>,
+    /// Optional substrate-invocation port.
+    ///
+    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): the
+    /// field and builder exist in PR 2 so callers can begin wiring a concrete
+    /// [`StrategyExecutor`] implementation, but the engine's own
+    /// `execute_strategy` placeholder does not yet dispatch through this
+    /// field. Today the orchestrator invokes the executor out-of-band.
+    #[allow(dead_code)]
+    pub(super) executor: Option<Arc<dyn StrategyExecutor>>,
 }
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
@@ -139,6 +151,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             cost_window_service: None,
             calibration_tracker: Mutex::new(BudgetCalibrationTracker::default()),
             event_sink: Arc::new(TracingEventSink),
+            executor: None,
         }
     }
 
@@ -148,6 +161,18 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
     /// the pre-port `tracing::{info,warn}` output automatically.
     pub fn with_event_sink(mut self, sink: Arc<dyn ConvergenceEventSink>) -> Self {
         self.event_sink = sink;
+        self
+    }
+
+    /// Attach a [`StrategyExecutor`] (builder-style).
+    ///
+    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): today
+    /// the engine stores the executor but its internal loop does not yet
+    /// dispatch through it. PR 4 will migrate `execute_strategy` to call
+    /// `self.executor.as_ref().unwrap().execute(...)` once every caller has
+    /// been updated to install one.
+    pub fn with_executor<E: StrategyExecutor + 'static>(mut self, e: Arc<E>) -> Self {
+        self.executor = Some(e);
         self
     }
 

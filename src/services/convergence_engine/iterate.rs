@@ -1288,7 +1288,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
     ///
     /// Assembles the prompt fragments, carry-forward data, hints, and focus
     /// areas based on the strategy type and current trajectory state.
-    pub(super) fn build_strategy_context(
+    pub(crate) fn build_strategy_context(
         &self,
         strategy: &StrategyKind,
         trajectory: &Trajectory,

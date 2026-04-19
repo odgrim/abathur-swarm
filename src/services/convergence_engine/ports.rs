@@ -17,7 +17,12 @@
 
 use async_trait::async_trait;
 
-use crate::domain::models::convergence::AttractorType;
+use crate::domain::errors::DomainResult;
+use crate::domain::models::convergence::{
+    ArtifactReference, AttractorType, StrategyKind, Trajectory,
+};
+
+use super::StrategyContext;
 
 // ---------------------------------------------------------------------------
 // ConvergenceDomainEvent
@@ -283,4 +288,57 @@ pub struct NullEventSink;
 #[async_trait]
 impl ConvergenceEventSink for NullEventSink {
     async fn emit(&self, _event: ConvergenceDomainEvent) {}
+}
+
+// ---------------------------------------------------------------------------
+// StrategyExecutor
+// ---------------------------------------------------------------------------
+
+/// Context assembled by the engine for a single strategy execution.
+///
+/// A `StrategyExecutor` implementation receives this context and must return
+/// a [`StrategyExecutionOutput`] describing the produced artifact and the
+/// resources consumed. The context is borrowed for the duration of the call
+/// so the engine retains ownership of the trajectory and strategy state.
+pub struct StrategyExecutionContext<'a> {
+    pub trajectory: &'a Trajectory,
+    pub strategy: &'a StrategyKind,
+    pub strategy_context: &'a StrategyContext,
+    pub iteration_seq: u32,
+    /// Prompt to send to the substrate for this iteration.
+    ///
+    /// The orchestrator currently builds the convergent prompt itself (using
+    /// task context, latest intent-verification feedback, and other outer-loop
+    /// state that is not yet modeled inside the trajectory). Passing the
+    /// prompt through the context keeps the executor pure with respect to
+    /// that state until PR 4 can push prompt construction into the engine.
+    pub prompt: &'a str,
+}
+
+/// Output of a single [`StrategyExecutor::execute`] call.
+///
+/// Captures the produced artifact plus the cost information the engine needs
+/// to record an [`Observation`](crate::domain::models::convergence::Observation).
+#[derive(Debug, Clone)]
+pub struct StrategyExecutionOutput {
+    pub artifact: ArtifactReference,
+    pub tokens_used: u64,
+    pub wall_time_ms: u64,
+}
+
+/// Port the engine uses to invoke a substrate / agent runtime.
+///
+/// The engine itself does not depend on any particular substrate --
+/// implementations (e.g. `OrchestratorStrategyExecutor` in the swarm
+/// orchestrator) wrap the concrete substrate call and artifact-collection
+/// logic. This trait is staged for PR 4 of the engine-as-core refactor
+/// chain (#13/#21): PR 2 introduces the port and wires an optional executor
+/// field onto `ConvergenceEngine`, but the engine's internal `execute_strategy`
+/// placeholder is not yet migrated to call it.
+#[async_trait]
+pub trait StrategyExecutor: Send + Sync {
+    async fn execute(
+        &self,
+        ctx: &StrategyExecutionContext<'_>,
+    ) -> DomainResult<StrategyExecutionOutput>;
 }
