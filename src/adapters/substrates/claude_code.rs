@@ -16,6 +16,38 @@ use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{SessionStatus, SubstrateOutput, SubstrateRequest, SubstrateSession};
 use crate::domain::ports::Substrate;
 
+/// Log tee for a single agent task. Wraps the log file with a failed-flag so that
+/// the first I/O failure is surfaced loudly and subsequent writes for the same
+/// session are silently suppressed instead of hiding every error one at a time.
+struct TaskLog {
+    path: PathBuf,
+    file: tokio::fs::File,
+    failed: bool,
+}
+
+impl TaskLog {
+    async fn write_line(&mut self, prefix: &str, bytes: &[u8]) {
+        if self.failed {
+            return;
+        }
+        let res = async {
+            if !prefix.is_empty() {
+                self.file.write_all(prefix.as_bytes()).await?;
+            }
+            self.file.write_all(bytes).await?;
+            if !bytes.ends_with(b"\n") {
+                self.file.write_all(b"\n").await?;
+            }
+            self.file.flush().await
+        }
+        .await;
+        if let Err(e) = res {
+            tracing::error!(path = %self.path.display(), error = ?e, "task log write failed; suppressing further writes for this session");
+            self.failed = true;
+        }
+    }
+}
+
 /// Claude Code CLI substrate configuration.
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeConfig {
@@ -70,7 +102,7 @@ impl ClaudeCodeSubstrate {
 
     /// Open a log file for the given task, creating the log directory if needed.
     /// Returns None if logging is disabled or the file cannot be created.
-    async fn open_task_log(&self, task_id: Uuid) -> Option<tokio::fs::File> {
+    async fn open_task_log(&self, task_id: Uuid) -> Option<TaskLog> {
         let log_dir = self.config.log_dir.as_ref()?;
         if let Err(e) = tokio::fs::create_dir_all(log_dir).await {
             tracing::warn!("Failed to create task log dir {}: {}", log_dir.display(), e);
@@ -85,7 +117,11 @@ impl ClaudeCodeSubstrate {
         {
             Ok(f) => {
                 tracing::debug!("Task log: {}", log_path.display());
-                Some(f)
+                Some(TaskLog {
+                    path: log_path,
+                    file: f,
+                    failed: false,
+                })
             }
             Err(e) => {
                 tracing::warn!("Failed to open task log {}: {}", log_path.display(), e);
@@ -539,9 +575,7 @@ impl Substrate for ClaudeCodeSubstrate {
 
             // Tee to log file and flush immediately for real-time visibility
             if let Some(ref mut f) = log_file {
-                let _ = f.write_all(line.as_bytes()).await;
-                let _ = f.write_all(b"\n").await;
-                let _ = f.flush().await;
+                f.write_line("", line.as_bytes()).await;
             }
 
             // Capture the "result" event for final metadata extraction
@@ -578,10 +612,7 @@ impl Substrate for ClaudeCodeSubstrate {
                 error_text.push_str(&line);
                 error_text.push('\n');
                 if let Some(ref mut f) = log_file {
-                    let _ = f.write_all(b"[stderr] ").await;
-                    let _ = f.write_all(line.as_bytes()).await;
-                    let _ = f.write_all(b"\n").await;
-                    let _ = f.flush().await;
+                    f.write_line("[stderr] ", line.as_bytes()).await;
                 }
             }
         }
@@ -781,9 +812,7 @@ impl Substrate for ClaudeCodeSubstrate {
 
                 // Tee to log file and flush immediately for real-time visibility
                 if let Some(ref mut f) = log_file {
-                    let _ = f.write_all(line.as_bytes()).await;
-                    let _ = f.write_all(b"\n").await;
-                    let _ = f.flush().await;
+                    f.write_line("", line.as_bytes()).await;
                 }
 
                 if let Some(output) = Self::parse_output_line(&line) {
@@ -814,10 +843,7 @@ impl Substrate for ClaudeCodeSubstrate {
                     error_output.push_str(&line);
                     error_output.push('\n');
                     if let Some(ref mut f) = log_file {
-                        let _ = f.write_all(b"[stderr] ").await;
-                        let _ = f.write_all(line.as_bytes()).await;
-                        let _ = f.write_all(b"\n").await;
-                        let _ = f.flush().await;
+                        f.write_line("[stderr] ", line.as_bytes()).await;
                     }
                 }
             }
@@ -846,17 +872,23 @@ impl Substrate for ClaudeCodeSubstrate {
                                     all_output.trim().chars().take(500).collect::<String>()
                                 );
                                 session.fail(&error_msg);
-                                let _ =
-                                    tx.send(SubstrateOutput::Error { message: error_msg }).await;
+                                if let Err(e) =
+                                    tx.send(SubstrateOutput::Error { message: error_msg }).await
+                                {
+                                    tracing::warn!(error = ?e, "substrate channel closed before terminal event delivered");
+                                }
                             } else {
                                 if session.status == SessionStatus::Active {
                                     session.complete(all_output.trim());
                                 }
-                                let _ = tx
+                                if let Err(e) = tx
                                     .send(SubstrateOutput::SessionComplete {
                                         result: "Completed successfully".to_string(),
                                     })
-                                    .await;
+                                    .await
+                                {
+                                    tracing::warn!(error = ?e, "substrate channel closed before terminal event delivered");
+                                }
                             }
                         }
                         Ok(status) => {
@@ -866,15 +898,21 @@ impl Substrate for ClaudeCodeSubstrate {
                                 format!("Exit code: {:?}", status.code())
                             };
                             session.fail(&error);
-                            let _ = tx.send(SubstrateOutput::Error { message: error }).await;
+                            if let Err(e) = tx.send(SubstrateOutput::Error { message: error }).await
+                            {
+                                tracing::warn!(error = ?e, "substrate channel closed before terminal event delivered");
+                            }
                         }
                         Err(e) => {
                             session.fail(e.to_string());
-                            let _ = tx
+                            if let Err(se) = tx
                                 .send(SubstrateOutput::Error {
                                     message: e.to_string(),
                                 })
-                                .await;
+                                .await
+                            {
+                                tracing::warn!(error = ?se, "substrate channel closed before terminal event delivered");
+                            }
                         }
                     }
                 }

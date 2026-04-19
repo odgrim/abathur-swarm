@@ -483,11 +483,14 @@ impl Substrate for AnthropicApiSubstrate {
             let response = match response {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx
+                    if let Err(se) = tx
                         .send(SubstrateOutput::Error {
                             message: format!("Request failed: {}", e),
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(error = ?se, "substrate channel closed before fatal error delivered");
+                    }
                     return;
                 }
             };
@@ -495,11 +498,14 @@ impl Substrate for AnthropicApiSubstrate {
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                let _ = tx
+                if let Err(se) = tx
                     .send(SubstrateOutput::Error {
                         message: format!("API error {}: {}", status, body),
                     })
-                    .await;
+                    .await
+                {
+                    tracing::warn!(error = ?se, "substrate channel closed before fatal error delivered");
+                }
                 return;
             }
 
@@ -507,11 +513,14 @@ impl Substrate for AnthropicApiSubstrate {
             let body = match response.text().await {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = tx
+                    if let Err(se) = tx
                         .send(SubstrateOutput::Error {
                             message: format!("Failed to read response: {}", e),
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(error = ?se, "substrate channel closed before fatal error delivered");
+                    }
                     return;
                 }
             };
@@ -521,17 +530,21 @@ impl Substrate for AnthropicApiSubstrate {
             let mut total_output = 0u64;
 
             // Process SSE lines
-            for line in body.lines() {
+            'sse: for line in body.lines() {
                 if let Some(event) = Self::parse_sse_event(line) {
                     match event {
                         StreamEvent::ContentBlockDelta { delta, .. } => {
                             if !delta.text.is_empty() {
                                 all_text.push_str(&delta.text);
-                                let _ = tx
+                                if let Err(e) = tx
                                     .send(SubstrateOutput::AssistantText {
                                         content: delta.text,
                                     })
-                                    .await;
+                                    .await
+                                {
+                                    tracing::debug!(error = ?e, "substrate channel closed mid-stream; caller likely cancelled");
+                                    break 'sse;
+                                }
                             }
                         }
                         StreamEvent::MessageStart { message } => {
@@ -539,33 +552,48 @@ impl Substrate for AnthropicApiSubstrate {
                         }
                         StreamEvent::MessageDelta { usage, .. } => {
                             total_output = usage.output_tokens;
-                            let _ = tx
+                            if let Err(e) = tx
                                 .send(SubstrateOutput::TurnComplete {
                                     turn_number: 1,
                                     input_tokens: total_input,
                                     output_tokens: total_output,
                                 })
-                                .await;
+                                .await
+                            {
+                                tracing::warn!(error = ?e, "substrate channel closed before terminal event delivered");
+                                break 'sse;
+                            }
                         }
                         StreamEvent::MessageStop => {
-                            let _ = tx
+                            if let Err(e) = tx
                                 .send(SubstrateOutput::SessionComplete {
                                     result: all_text.clone(),
                                 })
-                                .await;
+                                .await
+                            {
+                                tracing::warn!(error = ?e, "substrate channel closed before terminal event delivered");
+                                break 'sse;
+                            }
                         }
                         StreamEvent::Error { error } => {
-                            let _ = tx
+                            if let Err(e) = tx
                                 .send(SubstrateOutput::Error {
                                     message: error.message,
                                 })
-                                .await;
+                                .await
+                            {
+                                tracing::warn!(error = ?e, "substrate channel closed before terminal event delivered");
+                                break 'sse;
+                            }
                         }
                         StreamEvent::ContentBlockStart {
                             content_block: ContentBlock::ToolUse { id, name, .. },
                             ..
                         } => {
-                            let _ = tx.send(SubstrateOutput::ToolStart { name, id }).await;
+                            if let Err(e) = tx.send(SubstrateOutput::ToolStart { name, id }).await {
+                                tracing::debug!(error = ?e, "substrate channel closed mid-stream; caller likely cancelled");
+                                break 'sse;
+                            }
                         }
                         _ => {}
                     }
@@ -576,32 +604,45 @@ impl Substrate for AnthropicApiSubstrate {
             if all_text.is_empty()
                 && let Ok(result) = serde_json::from_str::<MessagesResponse>(&body)
             {
-                for block in &result.content {
-                    if let ContentBlock::Text { text } = block {
-                        all_text.push_str(text);
-                        let _ = tx
-                            .send(SubstrateOutput::AssistantText {
-                                content: text.clone(),
-                            })
-                            .await;
+                'fallback: {
+                    for block in &result.content {
+                        if let ContentBlock::Text { text } = block {
+                            all_text.push_str(text);
+                            if let Err(e) = tx
+                                .send(SubstrateOutput::AssistantText {
+                                    content: text.clone(),
+                                })
+                                .await
+                            {
+                                tracing::debug!(error = ?e, "substrate channel closed mid-stream; caller likely cancelled");
+                                break 'fallback;
+                            }
+                        }
+                    }
+                    total_input = result.usage.input_tokens;
+                    total_output = result.usage.output_tokens;
+
+                    if let Err(e) = tx
+                        .send(SubstrateOutput::TurnComplete {
+                            turn_number: 1,
+                            input_tokens: total_input,
+                            output_tokens: total_output,
+                        })
+                        .await
+                    {
+                        tracing::warn!(error = ?e, "substrate channel closed before terminal event delivered");
+                        break 'fallback;
+                    }
+
+                    if let Err(e) = tx
+                        .send(SubstrateOutput::SessionComplete {
+                            result: all_text.clone(),
+                        })
+                        .await
+                    {
+                        tracing::warn!(error = ?e, "substrate channel closed before terminal event delivered");
                     }
                 }
-                total_input = result.usage.input_tokens;
-                total_output = result.usage.output_tokens;
-
-                let _ = tx
-                    .send(SubstrateOutput::TurnComplete {
-                        turn_number: 1,
-                        input_tokens: total_input,
-                        output_tokens: total_output,
-                    })
-                    .await;
-
-                let _ = tx
-                    .send(SubstrateOutput::SessionComplete {
-                        result: all_text.clone(),
-                    })
-                    .await;
             }
 
             // Update session
