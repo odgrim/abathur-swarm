@@ -1,20 +1,10 @@
 //! Shared test fixtures for built-in handler tests.
+//!
+//! This module is retained for backward compatibility and simply re-exports
+//! helpers from `crate::adapters::sqlite::test_support`, which is the canonical
+//! location for SQLite-backed test helpers.
 
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
-use std::sync::Arc;
-
-use crate::adapters::sqlite::{create_migrated_test_pool, task_repository::SqliteTaskRepository};
-use crate::services::task_service::TaskService;
-
-pub async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
-    let pool = create_migrated_test_pool().await.unwrap();
-    Arc::new(SqliteTaskRepository::new(pool))
-}
-
-pub fn make_task_service(
-    repo: &Arc<SqliteTaskRepository>,
-) -> Arc<TaskService<SqliteTaskRepository>> {
-    Arc::new(TaskService::new(repo.clone()))
-}
+pub use crate::adapters::sqlite::test_support::{make_task_service, setup_task_repo};

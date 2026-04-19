@@ -1327,19 +1327,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{
-        SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
-        create_migrated_test_pool,
-    };
+    use crate::adapters::sqlite::test_support;
     use crate::adapters::substrates::MockSubstrate;
 
-    async fn setup_executor()
-    -> DagExecutor<SqliteTaskRepository, SqliteAgentRepository, SqliteGoalRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+    async fn setup_executor() -> DagExecutor<
+        impl TaskRepository + 'static,
+        impl AgentRepository + 'static,
+        impl GoalRepository + 'static,
+    > {
+        let (task_repo, agent_repo, goal_repo) = test_support::setup_task_agent_goal_repos().await;
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
         let config = ExecutorConfig::default();
 
@@ -1399,10 +1395,7 @@ mod tests {
     async fn test_three_level_wave_construction_and_execution() {
         use crate::domain::models::Task;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+        let (task_repo, agent_repo, goal_repo) = test_support::setup_task_agent_goal_repos().await;
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
         let config = ExecutorConfig::default();
         let executor =
@@ -1452,10 +1445,7 @@ mod tests {
         use crate::domain::models::Goal;
         use crate::domain::ports::GoalRepository;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+        let (task_repo, agent_repo, goal_repo) = test_support::setup_task_agent_goal_repos().await;
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
         let config = ExecutorConfig::default();
         let executor = DagExecutor::new(task_repo, agent_repo, substrate, config)
@@ -1503,10 +1493,7 @@ mod tests {
         use crate::adapters::substrates::mock::MockResponse;
         use crate::domain::models::Task;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+        let (task_repo, agent_repo, goal_repo) = test_support::setup_task_agent_goal_repos().await;
 
         let mock = MockSubstrate::new();
         // Build tasks first so we can target the first one by id.

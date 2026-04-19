@@ -1124,17 +1124,11 @@ impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{SqliteMemoryRepository, create_migrated_test_pool};
-
-    async fn setup_service() -> MemoryService<SqliteMemoryRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let repo = Arc::new(SqliteMemoryRepository::new(pool));
-        MemoryService::new(repo)
-    }
+    use crate::adapters::sqlite::test_support;
 
     #[tokio::test]
     async fn test_remember_and_recall() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         let (memory, _) = service
             .remember("test_key".to_string(), "test content".to_string(), "test")
@@ -1153,7 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_learn_semantic() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         let (memory, _) = service
             .learn(
@@ -1170,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recall_by_key() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         service
             .remember("lookup".to_string(), "value to find".to_string(), "test")
@@ -1187,7 +1181,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         service
             .remember("w1".to_string(), "content".to_string(), "test")
@@ -1210,7 +1204,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_promotion_on_access() {
-        let service = setup_service().await.with_decay_config(DecayConfig {
+        let service = test_support::setup_memory_service().await.with_decay_config(DecayConfig {
             promote_to_episodic_threshold: 3,
             ..Default::default()
         });
@@ -1241,7 +1235,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ranked_search() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Store some memories with different content
         service
@@ -1307,7 +1301,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_context_with_budget() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Store memories with varying sizes
         service
@@ -1353,7 +1347,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_context_with_budget_prefers_high_relevance() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Store 3 memories with distinct relevance to query "architecture patterns"
         service.store(
@@ -1415,7 +1409,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_context_with_budget_zero_returns_empty() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         service
             .store(
@@ -1443,7 +1437,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_context_with_budget_large_returns_all() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         service
             .store(
@@ -1501,7 +1495,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_context_with_budget_greedy_skip_then_fit() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Store a large memory that will be highest relevance but too big
         service
@@ -1560,7 +1554,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_forget() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         let (memory, _) = service
             .remember("forget_me".to_string(), "content".to_string(), "test")
@@ -1578,7 +1572,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_accessor_does_not_promote() {
-        let service = setup_service().await.with_decay_config(DecayConfig {
+        let service = test_support::setup_memory_service().await.with_decay_config(DecayConfig {
             promote_to_episodic_threshold: 3,
             promote_to_episodic_distinct_accessors: 2,
             ..Default::default()
@@ -1616,7 +1610,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_distinct_accessors_enable_promotion() {
-        let service = setup_service().await.with_decay_config(DecayConfig {
+        let service = test_support::setup_memory_service().await.with_decay_config(DecayConfig {
             promote_to_episodic_threshold: 3,
             promote_to_episodic_distinct_accessors: 2,
             ..Default::default()
@@ -1655,7 +1649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_detect_conflicts_groups_by_namespace_and_key() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Store 2 memories with the same namespace+key but different content
         service
@@ -1714,7 +1708,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conflict_no_conflict_above_0_9_similarity() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Nearly identical content — Jaccard > 0.9
         // 10 unique words shared, 1 extra → Jaccard = 10/11 ≈ 0.91
@@ -1758,7 +1752,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conflict_flagged_for_review_below_0_3() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Completely different content — Jaccard < 0.3
         service
@@ -1805,7 +1799,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conflict_soft_merge_0_3_to_0_7_same_tier() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // ~50% word overlap to land in 0.3..0.7 Jaccard range
         // Shared: "rust error handling uses result" (5 words)
@@ -1862,7 +1856,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conflict_prefer_newer_0_7_to_0_9_same_tier() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // ~80% overlap to land in 0.7..0.9 Jaccard range
         // Shared: "the quick brown fox jumps over the lazy" (8 unique words)
@@ -1919,7 +1913,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conflict_prefer_higher_confidence_different_tiers() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Working tier memory
         service
@@ -1989,7 +1983,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_resolve_conflicts_end_to_end() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Create two Working-tier memories with same key and ~80% overlap (PreferNewer)
         let (older, _) = service
@@ -2036,7 +2030,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_episodic_to_semantic_promotion_blocked_by_insufficient_accessors() {
-        let service = setup_service().await.with_decay_config(DecayConfig {
+        let service = test_support::setup_memory_service().await.with_decay_config(DecayConfig {
             promote_to_episodic_threshold: 3,
             promote_to_episodic_distinct_accessors: 2,
             promote_to_semantic_threshold: 10,
@@ -2086,7 +2080,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_context_with_budget_empty_when_below_min_score() {
-        let service = setup_service().await;
+        let service = test_support::setup_memory_service().await;
 
         // Store memories about a specific topic
         service.store(

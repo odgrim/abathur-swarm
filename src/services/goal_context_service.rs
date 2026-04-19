@@ -412,6 +412,7 @@ impl<G: GoalRepository> GoalContextService<G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::sqlite::test_support::TestGoalRepo;
     use crate::domain::models::goal::{
         Goal, GoalConstraint, GoalMetadata, GoalPriority, GoalStatus,
     };
@@ -464,7 +465,7 @@ mod tests {
     fn test_infer_domains_empty_task() {
         let task = make_task("", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.is_empty(), "Empty task should produce no domains");
     }
@@ -473,7 +474,7 @@ mod tests {
     fn test_infer_domains_code_quality_from_text() {
         let task = make_task("implement feature", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"code-quality".to_string()));
     }
@@ -482,7 +483,7 @@ mod tests {
     fn test_infer_domains_code_quality_from_agent() {
         let task = make_task_with_agent("some task", "do stuff", "code-reviewer");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"code-quality".to_string()));
     }
@@ -491,7 +492,7 @@ mod tests {
     fn test_infer_domains_frontend() {
         let task = make_task("update component css", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"frontend".to_string()));
         assert!(domains.contains(&"ux".to_string()));
@@ -501,7 +502,7 @@ mod tests {
     fn test_infer_domains_testing() {
         let task = make_task("improve test coverage", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"testing".to_string()));
     }
@@ -510,7 +511,7 @@ mod tests {
     fn test_infer_domains_security() {
         let task = make_task("fix authentication flow", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"security".to_string()));
     }
@@ -519,7 +520,7 @@ mod tests {
     fn test_infer_domains_performance() {
         let task = make_task("optimize latency", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"performance".to_string()));
     }
@@ -528,7 +529,7 @@ mod tests {
     fn test_infer_domains_infrastructure() {
         let task = make_task("deploy docker image", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"infrastructure".to_string()));
     }
@@ -537,7 +538,7 @@ mod tests {
     fn test_infer_domains_backend() {
         let task = make_task("add api endpoint", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"backend".to_string()));
     }
@@ -546,7 +547,7 @@ mod tests {
     fn test_infer_domains_convergence() {
         let task = make_task("convergence engine attractor", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"convergence".to_string()));
     }
@@ -555,7 +556,7 @@ mod tests {
     fn test_infer_domains_evolution() {
         let task = make_task("agent template refinement", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"evolution".to_string()));
     }
@@ -564,7 +565,7 @@ mod tests {
     fn test_infer_domains_memory_lifecycle() {
         let task = make_task("memory tier promotion decay", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"memory-lifecycle".to_string()));
     }
@@ -573,7 +574,7 @@ mod tests {
     fn test_infer_domains_agent_lifecycle() {
         let task = make_task("agent lifecycle routing", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"agent-lifecycle".to_string()));
     }
@@ -582,7 +583,7 @@ mod tests {
     fn test_infer_domains_workflow() {
         let task = make_task("workflow phase advance", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"workflow".to_string()));
     }
@@ -591,7 +592,7 @@ mod tests {
     fn test_infer_domains_swarm_orchestration() {
         let task = make_task("swarm orchestrator event bus", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"swarm-orchestration".to_string()));
     }
@@ -600,7 +601,7 @@ mod tests {
     fn test_infer_domains_goal_management() {
         let task = make_task("goal convergence check constraint", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"goal-management".to_string()));
     }
@@ -609,7 +610,7 @@ mod tests {
     fn test_infer_domains_multiple() {
         let task = make_task("implement test for api auth", "");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"code-quality".to_string()));
         assert!(domains.contains(&"testing".to_string()));
@@ -624,7 +625,7 @@ mod tests {
             .custom
             .insert("domains".to_string(), serde_json::json!(["custom-domain"]));
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(domains.contains(&"custom-domain".to_string()));
     }
@@ -637,7 +638,7 @@ mod tests {
             .custom
             .insert("domains".to_string(), serde_json::json!(["testing"]));
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         let testing_count = domains.iter().filter(|d| d.as_str() == "testing").count();
         assert_eq!(testing_count, 1, "testing should appear exactly once");
@@ -648,7 +649,7 @@ mod tests {
         // Title is uppercased but should still match via to_lowercase()
         let task = make_task("CONVERGENCE ENGINE", "ATTRACTOR TRAJECTORY");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(
             domains.contains(&"convergence".to_string()),
@@ -664,7 +665,7 @@ mod tests {
             "Reduce token count for context loading",
         );
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(
             !domains.contains(&"security".to_string()),
@@ -680,7 +681,7 @@ mod tests {
             "Update language server protocol settings",
         );
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(
             !domains.contains(&"backend".to_string()),
@@ -693,7 +694,7 @@ mod tests {
         // "auth token" should still match security via both "auth" and "token"
         let task = make_task("Rotate auth token", "Refresh expired JWT credentials");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(
             domains.contains(&"security".to_string()),
@@ -706,7 +707,7 @@ mod tests {
         // "api server" should still match backend via both "api" and "server"
         let task = make_task("Deploy api server", "Scale the REST server instances");
         let domains = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::infer_task_domains(&task);
         assert!(
             domains.contains(&"backend".to_string()),
@@ -719,7 +720,7 @@ mod tests {
     #[test]
     fn test_format_goal_context_empty() {
         let result = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::format_goal_context(&[]);
         assert!(result.is_empty());
     }
@@ -728,7 +729,7 @@ mod tests {
     fn test_format_goal_context_single_goal_no_constraints() {
         let goal = make_goal("Test Goal", "A description", vec![], vec![]);
         let result = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::format_goal_context(&[goal]);
         assert!(result.contains("### Test Goal"));
         assert!(result.contains("A description"));
@@ -745,7 +746,7 @@ mod tests {
             vec![],
         );
         let result = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::format_goal_context(&[goal]);
         assert!(result.contains("Constraints:"));
         assert!(result.contains("[Preference]"));
@@ -758,7 +759,7 @@ mod tests {
         let goal1 = make_goal("Goal One", "First", vec![], vec![]);
         let goal2 = make_goal("Goal Two", "Second", vec![], vec![]);
         let result = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::format_goal_context(&[goal1, goal2]);
         assert!(result.contains("### Goal One"));
         assert!(result.contains("### Goal Two"));
@@ -769,7 +770,7 @@ mod tests {
     #[test]
     fn test_collect_constraints_empty() {
         let result = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::collect_constraints(&[]);
         assert!(result.is_empty());
     }
@@ -778,7 +779,7 @@ mod tests {
     fn test_collect_constraints_no_constraints() {
         let goal = make_goal("No Constraints", "None here", vec![], vec![]);
         let result = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::collect_constraints(&[goal]);
         assert!(result.is_empty());
     }
@@ -790,7 +791,7 @@ mod tests {
         let goal1 = make_goal("G1", "g1", vec![c1], vec![]);
         let goal2 = make_goal("G2", "g2", vec![c2], vec![]);
         let result = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::collect_constraints(&[goal1, goal2]);
         assert_eq!(
             result.len(),
@@ -810,7 +811,7 @@ mod tests {
         let goal1 = make_goal("G1", "g1", vec![c1], vec![]);
         let goal2 = make_goal("G2", "g2", vec![c2], vec![]);
         let result = GoalContextService::<
-            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+            TestGoalRepo,
         >::collect_constraints(&[goal1, goal2]);
         assert_eq!(result.len(), 2);
     }

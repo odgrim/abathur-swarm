@@ -742,13 +742,11 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{SqliteWorktreeRepository, create_migrated_test_pool};
+    use crate::adapters::sqlite::test_support;
 
-    async fn setup_service() -> WorktreeService<SqliteWorktreeRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let repo = Arc::new(SqliteWorktreeRepository::new(pool));
-        let config = WorktreeConfig::default();
-        WorktreeService::new(repo, config)
+    async fn setup_service() -> WorktreeService<impl crate::domain::ports::WorktreeRepository + 'static>
+    {
+        test_support::setup_worktree_service(WorktreeConfig::default()).await
     }
 
     #[tokio::test]
@@ -765,12 +763,9 @@ mod tests {
             repo_path: std::env::current_dir().unwrap(),
             ..Default::default()
         };
-        let repo = Arc::new(tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let pool = crate::adapters::sqlite::create_migrated_test_pool()
-                .await
-                .unwrap();
-            crate::adapters::sqlite::SqliteWorktreeRepository::new(pool)
-        }));
+        let repo = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { test_support::setup_worktree_repo().await });
         let service = WorktreeService::new(repo, config);
 
         // Path with ".." should be rejected

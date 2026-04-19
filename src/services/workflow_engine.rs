@@ -1785,9 +1785,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{
-        create_migrated_test_pool, task_repository::SqliteTaskRepository,
-    };
+    use crate::adapters::sqlite::test_support;
     use crate::services::event_bus::{EventBus, EventBusConfig};
 
     /// Load the embedded default workflow YAMLs into a name→template map.
@@ -1797,12 +1795,15 @@ mod tests {
     }
 
     /// Construct a `WorkflowEngine` preloaded with the default workflow templates.
-    fn test_engine(
-        task_repo: Arc<SqliteTaskRepository>,
-        task_service: TaskService<SqliteTaskRepository>,
+    fn test_engine<T>(
+        task_repo: Arc<T>,
+        task_service: TaskService<T>,
         event_bus: Arc<EventBus>,
         verification_enabled: bool,
-    ) -> WorkflowEngine<SqliteTaskRepository> {
+    ) -> WorkflowEngine<T>
+    where
+        T: crate::domain::ports::TaskRepository + 'static,
+    {
         WorkflowEngine::new(task_repo, task_service, event_bus, verification_enabled)
             .with_templates(default_templates())
     }
@@ -1829,8 +1830,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_phase_complete_fails_parent_task() {
         // Setup
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
         let task_service = TaskService::new(task_repo.clone());
@@ -1909,8 +1909,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_phase_retried_event_emitted_on_retry() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
         let task_service = TaskService::new(task_repo.clone());
@@ -1978,8 +1977,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_phase_failed_event_emitted_when_retries_exhausted() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
         let task_service = TaskService::new(task_repo.clone());
@@ -2147,8 +2145,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_advance_from_pending_succeeds() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
@@ -2181,8 +2178,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_advance_from_phase_gate_moves_to_next_phase() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
@@ -2216,8 +2212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_advance_from_phase_ready_returns_error() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
@@ -2246,8 +2241,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_advance_from_phase_running_with_active_subtasks_fails() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
@@ -2287,8 +2281,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_advance_nonexistent_task_returns_not_found() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
@@ -2308,8 +2301,7 @@ mod tests {
     async fn test_fan_out_creates_subtasks() {
         use crate::domain::models::workflow_state::FanOutSlice;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
@@ -2354,8 +2346,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fan_out_empty_slices_returns_error() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
@@ -2375,8 +2366,7 @@ mod tests {
     async fn test_fan_out_missing_agent_returns_error() {
         use crate::domain::models::workflow_state::FanOutSlice;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
@@ -2402,8 +2392,7 @@ mod tests {
     async fn test_fan_out_wrong_state_returns_error() {
         use crate::domain::models::workflow_state::FanOutSlice;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
         let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);

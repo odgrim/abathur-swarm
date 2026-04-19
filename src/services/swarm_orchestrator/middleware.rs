@@ -331,18 +331,11 @@ mod tests {
     // -- shared test plumbing -------------------------------------------------
 
     fn make_pre_spawn_ctx() -> PreSpawnContext {
-        use crate::adapters::sqlite::{
-            SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
-        };
-        use sqlx::SqlitePool;
+        use crate::adapters::sqlite::test_support;
         // Build minimal in-memory repos that satisfy the trait objects.
         // The middleware under test in this module doesn't actually exercise
         // the repos; we only need Arc<dyn ...> instances that typecheck.
-        let pool = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
-        let task_repo: Arc<dyn TaskRepository> = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let agent_repo: Arc<dyn AgentRepository> =
-            Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let goal_repo: Arc<dyn GoalRepository> = Arc::new(SqliteGoalRepository::new(pool));
+        let (task_repo, agent_repo, goal_repo) = test_support::lazy_dyn_repos_minimal();
         PreSpawnContext {
             task: sample_task(),
             agent_type: None,
@@ -488,17 +481,10 @@ mod tests {
     }
 
     fn make_post_ctx() -> PostCompletionContext {
-        use crate::adapters::sqlite::{
-            SqliteGoalRepository, SqliteTaskRepository, SqliteWorktreeRepository,
-        };
+        use crate::adapters::sqlite::test_support;
         use crate::services::event_bus::{EventBus, EventBusConfig};
-        use sqlx::SqlitePool;
 
-        let pool = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
-        let task_repo: Arc<dyn TaskRepository> = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let goal_repo: Arc<dyn GoalRepository> = Arc::new(SqliteGoalRepository::new(pool.clone()));
-        let worktree_repo: Arc<dyn WorktreeRepository> =
-            Arc::new(SqliteWorktreeRepository::new(pool));
+        let (task_repo, goal_repo, worktree_repo) = test_support::lazy_dyn_repos_post_completion();
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
 

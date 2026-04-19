@@ -365,20 +365,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{
-        SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
-        create_migrated_test_pool,
-    };
+    use crate::adapters::sqlite::test_support;
 
-    async fn setup_meta_planner()
-    -> MetaPlanner<SqliteGoalRepository, SqliteTaskRepository, SqliteAgentRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
+    async fn setup_meta_planner() -> MetaPlanner<
+        impl GoalRepository + 'static,
+        impl TaskRepository + 'static,
+        impl AgentRepository + 'static,
+    > {
+        let (task_repo, agent_repo, goal_repo) = test_support::setup_task_agent_goal_repos().await;
         let config = MetaPlannerConfig::default();
-
         MetaPlanner::new(goal_repo, task_repo, agent_repo, config)
     }
 

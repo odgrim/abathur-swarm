@@ -1347,30 +1347,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{
-        SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
-        SqliteWorktreeRepository, create_migrated_test_pool,
+    use crate::adapters::sqlite::test_support;
+    use crate::adapters::sqlite::test_support::{
+        TestAgentRepo, TestGoalRepo, TestMemoryRepo, TestTaskRepo, TestWorktreeRepo,
     };
     use crate::adapters::substrates::MockSubstrate;
 
     async fn setup_orchestrator() -> SwarmOrchestrator<
-        SqliteGoalRepository,
-        SqliteTaskRepository,
-        SqliteWorktreeRepository,
-        SqliteAgentRepository,
-        SqliteMemoryRepository,
+        TestGoalRepo,
+        TestTaskRepo,
+        TestWorktreeRepo,
+        TestAgentRepo,
+        TestMemoryRepo,
     > {
         use crate::services::event_bus::{EventBus, EventBusConfig};
         use crate::services::event_reactor::{EventReactor, ReactorConfig};
         use crate::services::event_scheduler::{EventScheduler, SchedulerConfig};
 
-        let pool = create_migrated_test_pool().await.unwrap();
-
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool));
+        let (goal_repo, task_repo, worktree_repo, agent_repo, memory_repo) =
+            test_support::setup_all_repos().await;
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
         // Disable worktrees for tests.
         let config = SwarmConfig {
@@ -1441,22 +1436,18 @@ mod tests {
     async fn setup_orchestrator_bare(
         config: SwarmConfig,
     ) -> SwarmOrchestrator<
-        SqliteGoalRepository,
-        SqliteTaskRepository,
-        SqliteWorktreeRepository,
-        SqliteAgentRepository,
-        SqliteMemoryRepository,
+        TestGoalRepo,
+        TestTaskRepo,
+        TestWorktreeRepo,
+        TestAgentRepo,
+        TestMemoryRepo,
     > {
         use crate::services::event_bus::{EventBus, EventBusConfig};
         use crate::services::event_reactor::{EventReactor, ReactorConfig};
         use crate::services::event_scheduler::{EventScheduler, SchedulerConfig};
 
-        let pool = create_migrated_test_pool().await.unwrap();
-
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let (goal_repo, task_repo, worktree_repo, agent_repo, _memory_repo) =
+            test_support::setup_all_repos().await;
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
 
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));

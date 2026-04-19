@@ -386,48 +386,21 @@ mod tests {
     use super::*;
 
     use super::*;
-    use crate::adapters::sqlite::{
-        SqliteMemoryRepository, create_migrated_test_pool, goal_repository::SqliteGoalRepository,
-        task_repository::SqliteTaskRepository,
-    };
+    use crate::adapters::sqlite::test_support;
+    use crate::adapters::sqlite::test_support::{TestGoalRepo, TestMemoryRepo, TestTaskRepo};
     use crate::domain::models::{GoalStatus, Task, TaskStatus};
 
     use std::sync::Arc;
 
     async fn setup_obstacle_escalation_handler() -> (
-        ObstacleEscalationHandler<
-            SqliteTaskRepository,
-            SqliteMemoryRepository,
-            SqliteGoalRepository,
-        >,
-        Arc<SqliteTaskRepository>,
-        Arc<SqliteMemoryRepository>,
-        Arc<SqliteGoalRepository>,
+        ObstacleEscalationHandler<TestTaskRepo, TestMemoryRepo, TestGoalRepo>,
+        Arc<TestTaskRepo>,
+        Arc<TestMemoryRepo>,
+        Arc<TestGoalRepo>,
     ) {
-        use crate::services::goal_service::GoalService;
-        use crate::services::memory_service::MemoryService;
-        use crate::services::task_service::TaskService;
-
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-
-        let task_service = Arc::new(TaskService::new(task_repo.clone()));
-        let goal_service = Arc::new(GoalService::new(goal_repo.clone()));
-        let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
-        let event_bus = Arc::new(crate::services::EventBus::new(
-            crate::services::EventBusConfig {
-                persist_events: false,
-                ..Default::default()
-            },
-        ));
-        let command_bus = Arc::new(crate::services::command_bus::CommandBus::new(
-            task_service,
-            goal_service,
-            memory_service,
-            event_bus,
-        ));
+        let (task_repo, goal_repo, memory_repo) =
+            test_support::setup_task_goal_memory_repos().await;
+        let command_bus = test_support::make_command_bus(&task_repo, &goal_repo, &memory_repo);
 
         let handler = ObstacleEscalationHandler::new(
             task_repo.clone(),
@@ -441,7 +414,7 @@ mod tests {
     }
 
     /// Create a failed task with the given agent_type.
-    async fn create_failed_task(task_repo: &SqliteTaskRepository, agent_type: &str) -> Task {
+    async fn create_failed_task(task_repo: &TestTaskRepo, agent_type: &str) -> Task {
         let mut task = Task::new("Failing task");
         task.description = "Task that fails".to_string();
         task.agent_type = Some(agent_type.to_string());
@@ -475,9 +448,9 @@ mod tests {
     #[test]
     fn test_normalize_error_basic() {
         let result = ObstacleEscalationHandler::<
-            SqliteTaskRepository,
-            SqliteMemoryRepository,
-            SqliteGoalRepository,
+            TestTaskRepo,
+            TestMemoryRepo,
+            TestGoalRepo,
         >::normalize_error(
             "Compilation error: cannot find type `Foo`\ndetailed backtrace follows...",
         );
@@ -488,9 +461,9 @@ mod tests {
     fn test_normalize_error_truncation() {
         let long_error = "a".repeat(200);
         let result = ObstacleEscalationHandler::<
-            SqliteTaskRepository,
-            SqliteMemoryRepository,
-            SqliteGoalRepository,
+            TestTaskRepo,
+            TestMemoryRepo,
+            TestGoalRepo,
         >::normalize_error(&long_error);
         assert_eq!(result.len(), 100);
     }
@@ -498,9 +471,9 @@ mod tests {
     #[test]
     fn test_normalize_error_multiline() {
         let result = ObstacleEscalationHandler::<
-            SqliteTaskRepository,
-            SqliteMemoryRepository,
-            SqliteGoalRepository,
+            TestTaskRepo,
+            TestMemoryRepo,
+            TestGoalRepo,
         >::normalize_error("First line error\nSecond line\nThird line");
         assert_eq!(result, "first line error");
     }
@@ -508,14 +481,14 @@ mod tests {
     #[test]
     fn test_pattern_key_deterministic() {
         let key1 = ObstacleEscalationHandler::<
-            SqliteTaskRepository,
-            SqliteMemoryRepository,
-            SqliteGoalRepository,
+            TestTaskRepo,
+            TestMemoryRepo,
+            TestGoalRepo,
         >::pattern_key("coder", "some error");
         let key2 = ObstacleEscalationHandler::<
-            SqliteTaskRepository,
-            SqliteMemoryRepository,
-            SqliteGoalRepository,
+            TestTaskRepo,
+            TestMemoryRepo,
+            TestGoalRepo,
         >::pattern_key("coder", "some error");
         assert_eq!(key1, key2);
         assert!(key1.starts_with("failure-pattern:coder:"));
@@ -524,14 +497,14 @@ mod tests {
     #[test]
     fn test_pattern_key_different_for_different_errors() {
         let key1 = ObstacleEscalationHandler::<
-            SqliteTaskRepository,
-            SqliteMemoryRepository,
-            SqliteGoalRepository,
+            TestTaskRepo,
+            TestMemoryRepo,
+            TestGoalRepo,
         >::pattern_key("coder", "error a");
         let key2 = ObstacleEscalationHandler::<
-            SqliteTaskRepository,
-            SqliteMemoryRepository,
-            SqliteGoalRepository,
+            TestTaskRepo,
+            TestMemoryRepo,
+            TestGoalRepo,
         >::pattern_key("coder", "error b");
         assert_ne!(key1, key2);
     }

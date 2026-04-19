@@ -208,17 +208,10 @@ mod tests {
     use super::*;
 
     use super::*;
-    use crate::adapters::sqlite::{
-        create_migrated_test_pool, goal_repository::SqliteGoalRepository,
-    };
+    use crate::adapters::sqlite::test_support::setup_goal_repo;
     use crate::domain::models::GoalPriority;
     use crate::domain::ports::goal_repository::GoalRepository;
     use std::sync::Arc;
-
-    async fn setup_goal_repo() -> Arc<SqliteGoalRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-        Arc::new(SqliteGoalRepository::new(pool))
-    }
 
     fn make_stall_check_event() -> UnifiedEvent {
         UnifiedEvent {

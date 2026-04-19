@@ -338,19 +338,11 @@ impl<R: GoalRepository + 'static> GoalCommandHandler for GoalService<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{
-        create_migrated_test_pool, goal_repository::SqliteGoalRepository,
-    };
-
-    async fn setup_service() -> GoalService<SqliteGoalRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let repo = Arc::new(SqliteGoalRepository::new(pool));
-        GoalService::new(repo)
-    }
+    use crate::adapters::sqlite::test_support;
 
     #[tokio::test]
     async fn test_create_goal() {
-        let service = setup_service().await;
+        let service = test_support::setup_goal_service().await;
         let (goal, events) = service
             .create_goal(
                 "Test".to_string(),
@@ -370,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_transition_status() {
-        let service = setup_service().await;
+        let service = test_support::setup_goal_service().await;
         let (goal, _) = service
             .create_goal(
                 "Test".to_string(),
@@ -392,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_effective_constraints() {
-        let service = setup_service().await;
+        let service = test_support::setup_goal_service().await;
 
         let (parent, _) = service
             .create_goal(

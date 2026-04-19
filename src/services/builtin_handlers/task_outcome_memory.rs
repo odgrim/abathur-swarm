@@ -269,8 +269,8 @@ mod tests {
     #![allow(unused_imports)]
     use super::super::*;
     use super::*;
-    use crate::adapters::sqlite::{
-        create_migrated_test_pool, task_repository::SqliteTaskRepository,
+    use crate::adapters::sqlite::test_support::{
+        make_task_service, setup_task_and_memory_repos, setup_task_repo,
     };
     use crate::domain::models::{Task, TaskStatus};
     use crate::services::EventBusConfig;
@@ -278,32 +278,8 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
-    #[allow(dead_code)]
-    async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-        Arc::new(SqliteTaskRepository::new(pool))
-    }
-
-    #[allow(dead_code)]
-    fn make_task_service(
-        repo: &Arc<SqliteTaskRepository>,
-    ) -> Arc<TaskService<SqliteTaskRepository>> {
-        Arc::new(TaskService::new(repo.clone()))
-    }
-
     // TaskOutcomeMemoryHandler tests
     // ========================================================================
-
-    async fn setup_task_and_memory_repos() -> (
-        Arc<SqliteTaskRepository>,
-        Arc<crate::adapters::sqlite::SqliteMemoryRepository>,
-    ) {
-        use crate::adapters::sqlite::SqliteMemoryRepository;
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool));
-        (task_repo, memory_repo)
-    }
 
     #[tokio::test]
     async fn test_task_outcome_memory_handler_stores_on_task_completed() {

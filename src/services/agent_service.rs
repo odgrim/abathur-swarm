@@ -688,14 +688,12 @@ impl<R: AgentRepository> AgentService<R> {
 #[allow(unused_variables)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{
-        SqliteAgentRepository, create_migrated_test_pool, insert_test_task,
-    };
+    use crate::adapters::sqlite::test_support;
     use sqlx::SqlitePool;
 
-    async fn setup_service() -> (AgentService<SqliteAgentRepository>, SqlitePool) {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+    async fn setup_service()
+    -> (AgentService<impl crate::domain::ports::AgentRepository + 'static>, SqlitePool) {
+        let (repo, pool) = test_support::setup_agent_repo_with_pool().await;
         let event_bus = Arc::new(EventBus::new(
             crate::services::event_bus::EventBusConfig::default(),
         ));
@@ -810,7 +808,7 @@ mod tests {
 
         let instance = service.spawn_instance("lifecycle").await.unwrap();
         let task_id = Uuid::new_v4();
-        insert_test_task(&pool, task_id).await;
+        test_support::insert_test_task(&pool, task_id).await;
 
         let assigned = service.assign_task(instance.id, task_id).await.unwrap();
         assert_eq!(assigned.status, InstanceStatus::Running);

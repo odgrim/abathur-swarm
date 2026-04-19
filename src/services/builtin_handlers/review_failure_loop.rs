@@ -359,42 +359,27 @@ mod tests {
     #![allow(unused_imports)]
     use super::super::*;
     use super::*;
-    use crate::adapters::sqlite::{
-        create_migrated_test_pool, task_repository::SqliteTaskRepository,
-    };
+    use crate::adapters::sqlite::test_support::{make_task_service, setup_task_repo};
     use crate::domain::models::{Task, TaskStatus};
     use crate::services::EventBusConfig;
     use crate::services::task_service::TaskService;
     use std::sync::Arc;
     use uuid::Uuid;
 
-    #[allow(dead_code)]
-    async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-        Arc::new(SqliteTaskRepository::new(pool))
-    }
-
-    #[allow(dead_code)]
-    fn make_task_service(
-        repo: &Arc<SqliteTaskRepository>,
-    ) -> Arc<TaskService<SqliteTaskRepository>> {
-        Arc::new(TaskService::new(repo.clone()))
-    }
-
     // ReviewFailureLoopHandler tests
     // ========================================================================
 
-    async fn setup_command_bus(
-        repo: Arc<SqliteTaskRepository>,
-    ) -> Arc<crate::services::command_bus::CommandBus> {
+    async fn setup_command_bus<R>(repo: Arc<R>) -> Arc<crate::services::command_bus::CommandBus>
+    where
+        R: crate::domain::ports::TaskRepository + 'static,
+    {
+        use crate::adapters::sqlite::test_support;
         use crate::domain::ports::NullMemoryRepository;
         use crate::services::goal_service::GoalService;
         use crate::services::memory_service::MemoryService;
         use crate::services::task_service::TaskService;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let goal_repo =
-            Arc::new(crate::adapters::sqlite::goal_repository::SqliteGoalRepository::new(pool));
+        let goal_repo = test_support::setup_goal_repo().await;
         let task_service = Arc::new(TaskService::new(repo));
         let goal_service = Arc::new(GoalService::new(goal_repo));
         let memory_service = Arc::new(MemoryService::new(Arc::new(NullMemoryRepository::new())));

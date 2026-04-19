@@ -700,16 +700,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::sqlite::test_support::{
+        TestAgentRepo, TestGoalRepo, TestMemoryRepo, TestTaskRepo, TestWorktreeRepo,
+    };
     use crate::services::evolution_loop::{
         EvolutionTrigger, RefinementRequest, RefinementSeverity, RefinementStatus, TemplateStats,
     };
 
     type TestOrchestrator = SwarmOrchestrator<
-        crate::adapters::sqlite::SqliteGoalRepository,
-        crate::adapters::sqlite::SqliteTaskRepository,
-        crate::adapters::sqlite::SqliteWorktreeRepository,
-        crate::adapters::sqlite::SqliteAgentRepository,
-        crate::adapters::sqlite::SqliteMemoryRepository,
+        TestGoalRepo,
+        TestTaskRepo,
+        TestWorktreeRepo,
+        TestAgentRepo,
+        TestMemoryRepo,
     >;
 
     fn make_refinement_request(

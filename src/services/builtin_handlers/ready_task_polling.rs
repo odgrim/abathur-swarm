@@ -122,17 +122,9 @@ mod tests {
     use super::*;
 
     use super::*;
-    use crate::adapters::sqlite::{
-        create_migrated_test_pool, task_repository::SqliteTaskRepository,
-    };
+    use crate::adapters::sqlite::test_support::setup_task_repo;
     use crate::domain::models::{Task, TaskStatus};
     use std::sync::Arc;
-
-    #[allow(dead_code)]
-    async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-        Arc::new(SqliteTaskRepository::new(pool))
-    }
 
     fn make_ready_task_poll_event() -> UnifiedEvent {
         UnifiedEvent {

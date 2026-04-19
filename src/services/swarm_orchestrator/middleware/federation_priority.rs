@@ -134,10 +134,7 @@ impl PreSpawnMiddleware for FederationPriorityMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{
-        SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
-        create_migrated_test_pool,
-    };
+    use crate::adapters::sqlite::test_support;
     use crate::domain::models::{Goal, Task};
     use crate::domain::ports::{AgentRepository, GoalRepository, TaskRepository};
     use crate::services::swarm_orchestrator::middleware::PreSpawnContext;
@@ -150,10 +147,8 @@ mod tests {
         task_priority: TaskPriority,
         goal_id_in_task: Option<Uuid>,
     ) -> PreSpawnContext {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo_concrete = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let agent_repo_concrete = Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let goal_repo_concrete = Arc::new(SqliteGoalRepository::new(pool));
+        let (task_repo_concrete, agent_repo_concrete, goal_repo_concrete) =
+            test_support::setup_task_agent_goal_repos().await;
 
         if let Some(ref g) = goal {
             goal_repo_concrete.create(g).await.unwrap();

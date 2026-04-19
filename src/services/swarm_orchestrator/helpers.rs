@@ -2065,11 +2065,10 @@ mod tests {
 
     #[tokio::test]
     async fn find_root_ancestor_of_root_task_returns_self() {
-        use crate::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
+        use crate::adapters::sqlite::test_support;
         use crate::domain::models::Task;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = SqliteTaskRepository::new(pool);
+        let task_repo = test_support::setup_task_repo().await;
 
         // Root task: parent_id = None.
         let root = Task::new("root task");
@@ -2077,7 +2076,7 @@ mod tests {
         task_repo.create(&root).await.unwrap();
 
         // Must return the task's own id, not panic, not error.
-        let resolved = find_root_ancestor_id(root.id, &task_repo).await;
+        let resolved = find_root_ancestor_id(root.id, &*task_repo).await;
         assert_eq!(
             resolved, root.id,
             "root-task (parent_id=None) must resolve to its own id"
@@ -2086,11 +2085,10 @@ mod tests {
 
     #[tokio::test]
     async fn find_root_ancestor_of_three_level_chain_returns_root() {
-        use crate::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
+        use crate::adapters::sqlite::test_support;
         use crate::domain::models::Task;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = SqliteTaskRepository::new(pool);
+        let task_repo = test_support::setup_task_repo().await;
 
         // Build: root → mid → leaf
         let root = Task::new("root");
@@ -2104,9 +2102,9 @@ mod tests {
         task_repo.create(&leaf).await.unwrap();
 
         // All three must resolve to `root.id`.
-        assert_eq!(find_root_ancestor_id(leaf.id, &task_repo).await, root.id);
-        assert_eq!(find_root_ancestor_id(mid.id, &task_repo).await, root.id);
-        assert_eq!(find_root_ancestor_id(root.id, &task_repo).await, root.id);
+        assert_eq!(find_root_ancestor_id(leaf.id, &*task_repo).await, root.id);
+        assert_eq!(find_root_ancestor_id(mid.id, &*task_repo).await, root.id);
+        assert_eq!(find_root_ancestor_id(root.id, &*task_repo).await, root.id);
     }
 
     #[tokio::test]
@@ -2115,13 +2113,12 @@ mod tests {
         // the helper wraps unwrap_or(task_id) so callers never see a panic
         // even if the DB lookup fails. Guards against reintroducing an
         // unwrap() on the repository result.
-        use crate::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
+        use crate::adapters::sqlite::test_support;
 
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = SqliteTaskRepository::new(pool);
+        let task_repo = test_support::setup_task_repo().await;
 
         let bogus = Uuid::new_v4();
-        assert_eq!(find_root_ancestor_id(bogus, &task_repo).await, bogus);
+        assert_eq!(find_root_ancestor_id(bogus, &*task_repo).await, bogus);
     }
 
     // -------------------------------------------------------------------------

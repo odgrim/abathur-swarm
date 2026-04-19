@@ -1736,13 +1736,13 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
+    use crate::adapters::sqlite::test_support;
 
-    async fn setup_service() -> TaskService<SqliteTaskRepository> {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
-        TaskService::new(task_repo)
+    async fn setup_service() -> TaskService<impl crate::domain::ports::TaskRepository + 'static> {
+        test_support::setup_task_service().await
     }
+    // Note: the `impl Trait` return hides the concrete adapter type from this
+    // test module. Tests call only port methods on the returned service.
 
     #[tokio::test]
     async fn test_submit_task() {
@@ -1945,7 +1945,7 @@ mod tests {
         let mut task = Task::new("Implement a complex feature with many moving parts");
         task.routing_hints.complexity = Complexity::Complex;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         assert!(
             mode.is_convergent(),
             "Complex tasks should classify as Convergent"
@@ -1957,7 +1957,7 @@ mod tests {
         let mut task = Task::new("Rename a variable");
         task.routing_hints.complexity = Complexity::Trivial;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         assert!(mode.is_direct(), "Trivial tasks should classify as Direct");
     }
 
@@ -1966,7 +1966,7 @@ mod tests {
         let mut task = Task::new("Add a config field");
         task.routing_hints.complexity = Complexity::Simple;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         assert!(mode.is_direct(), "Simple tasks should classify as Direct");
     }
 
@@ -1975,7 +1975,7 @@ mod tests {
         let mut task = Task::new("Short description of a moderate task");
         task.routing_hints.complexity = Complexity::Moderate;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         assert!(
             mode.is_direct(),
             "Moderate tasks with short descriptions should be Direct"
@@ -1993,7 +1993,7 @@ mod tests {
         let mut task = Task::new(desc);
         task.routing_hints.complexity = Complexity::Moderate;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         // 2 (long moderate) + 2 (acceptance criteria) = 4 >= 3
         assert!(
             mode.is_convergent(),
@@ -2012,7 +2012,7 @@ mod tests {
             .hints
             .push("constraint: must preserve backwards compat".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         // 0 (moderate, short desc) + 2 (has anti-pattern/constraint) = 2 < 3
         assert!(
             mode.is_direct(),
@@ -2021,7 +2021,7 @@ mod tests {
 
         // Now add acceptance criteria to push over threshold
         task.description = "Fix something. Verify that all tests pass.".to_string();
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         // 0 + 2 (hints) + 2 (acceptance keyword) = 4 >= 3
         assert!(
             mode.is_convergent(),
@@ -2040,7 +2040,7 @@ mod tests {
         let parent_mode = ExecutionMode::Convergent {
             parallel_samples: None,
         };
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(
             &task,
             Some(&parent_mode),
             &None,
@@ -2058,7 +2058,7 @@ mod tests {
         task.priority = TaskPriority::Low;
         // acceptance keyword: +2, low priority: -2 = 0 < 3
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         assert!(mode.is_direct(), "Low priority should push toward Direct");
     }
 
@@ -2068,7 +2068,7 @@ mod tests {
         task.routing_hints.complexity = Complexity::Complex;
 
         let default_mode = Some(ExecutionMode::Direct);
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(
             &task,
             None,
             &default_mode,
@@ -2087,7 +2087,7 @@ mod tests {
         let default_mode = Some(ExecutionMode::Convergent {
             parallel_samples: None,
         });
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(
             &task,
             None,
             &default_mode,
@@ -2107,7 +2107,7 @@ mod tests {
         task.routing_hints.complexity = Complexity::Moderate;
         task.agent_type = Some("implementation-specialist".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         assert!(
             mode.is_convergent(),
             "Implementer agent + acceptance keyword should be Convergent"
@@ -2121,7 +2121,7 @@ mod tests {
         task.routing_hints.complexity = Complexity::Moderate;
         task.agent_type = Some("researcher".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         assert!(
             mode.is_direct(),
             "Researcher agent on moderate task should be Direct"
@@ -2137,7 +2137,7 @@ mod tests {
         task.routing_hints.complexity = Complexity::Complex;
         task.agent_type = Some("researcher".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         // Score: −2 + 3 = 1 < 3 → Direct (complexity partially counters role)
         assert!(
             mode.is_direct(),
@@ -2147,7 +2147,7 @@ mod tests {
         // With an additional acceptance keyword, it should flip to Convergent
         task.description =
             "Research and analyze complex architecture. Verify that the design holds.".to_string();
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         // Score: −2 + 3 + 2 = 3 >= 3 → Convergent
         assert!(
             mode.is_convergent(),
@@ -2164,7 +2164,7 @@ mod tests {
         task.routing_hints.complexity = Complexity::Trivial;
         task.agent_type = Some("implementer".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         assert!(
             mode.is_direct(),
             "Implementer on trivial task should stay Direct"
@@ -2178,7 +2178,7 @@ mod tests {
         task.routing_hints.complexity = Complexity::Moderate;
         task.agent_type = Some("senior-developer".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         // Score: +2 (agent) + 0 (moderate, short) = 2 < 3 → Direct
         assert!(
             mode.is_direct(),
@@ -2187,7 +2187,7 @@ mod tests {
 
         // Add acceptance criteria to push over
         task.description = "Build the feature. Must pass integration tests.".to_string();
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        let mode = TaskService::<test_support::TestTaskRepo>::classify_execution_mode(&task, None, &None);
         // Score: +2 (agent) + 2 (acceptance) = 4 >= 3 → Convergent
         assert!(
             mode.is_convergent(),
@@ -2486,8 +2486,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_task_respects_default_execution_mode() {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let task_repo = test_support::setup_task_repo().await;
         let service =
             TaskService::new(task_repo).with_default_execution_mode(Some(ExecutionMode::Direct));
 

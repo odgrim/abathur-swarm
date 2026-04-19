@@ -18,6 +18,9 @@ pub mod trigger_rule_repository;
 pub mod tx_context;
 pub mod worktree_repository;
 
+#[cfg(test)]
+pub mod test_support;
+
 pub use agent_repository::SqliteAgentRepository;
 pub use connection::{
     ConnectionError, PoolConfig, create_pool, create_test_pool, verify_connection,

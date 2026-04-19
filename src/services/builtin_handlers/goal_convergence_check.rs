@@ -406,46 +406,19 @@ mod tests {
     use super::*;
 
     use super::*;
-    use crate::adapters::sqlite::{
-        create_migrated_test_pool, goal_repository::SqliteGoalRepository,
-        task_repository::SqliteTaskRepository,
-    };
+    use crate::adapters::sqlite::test_support;
+    use crate::adapters::sqlite::test_support::{TestGoalRepo, TestTaskRepo};
     use crate::domain::models::{GoalConstraint, GoalPriority, Task, TaskStatus};
     use std::sync::Arc;
 
     async fn setup_convergence_handler() -> (
-        GoalConvergenceCheckHandler<SqliteGoalRepository, SqliteTaskRepository>,
-        Arc<SqliteGoalRepository>,
-        Arc<SqliteTaskRepository>,
+        GoalConvergenceCheckHandler<TestGoalRepo, TestTaskRepo>,
+        Arc<TestGoalRepo>,
+        Arc<TestTaskRepo>,
     ) {
-        let pool = create_migrated_test_pool().await.unwrap();
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-
-        let task_service = Arc::new(crate::services::task_service::TaskService::new(
-            task_repo.clone(),
-        ));
-        let goal_service = Arc::new(crate::services::goal_service::GoalService::new(
-            goal_repo.clone(),
-        ));
-        let memory_repo = Arc::new(crate::adapters::sqlite::SqliteMemoryRepository::new(
-            pool.clone(),
-        ));
-        let memory_service = Arc::new(crate::services::memory_service::MemoryService::new(
-            memory_repo,
-        ));
-        let event_bus = Arc::new(crate::services::EventBus::new(
-            crate::services::EventBusConfig {
-                persist_events: false,
-                ..Default::default()
-            },
-        ));
-        let command_bus = Arc::new(crate::services::command_bus::CommandBus::new(
-            task_service,
-            goal_service,
-            memory_service,
-            event_bus,
-        ));
+        let (task_repo, goal_repo, memory_repo) =
+            test_support::setup_task_goal_memory_repos().await;
+        let command_bus = test_support::make_command_bus(&task_repo, &goal_repo, &memory_repo);
 
         // Use a 4-hour (14400s) check interval for idempotency bucketing
         let handler = GoalConvergenceCheckHandler::new(
