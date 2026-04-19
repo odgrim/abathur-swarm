@@ -417,11 +417,12 @@ impl CommandBus {
         //    execution and outbox inserts in a single SQLite transaction. This ensures
         //    domain mutations and their corresponding events are committed atomically:
         //    either both succeed or both are rolled back.
-        let outcome = if self.outbox.is_some() && self.pool.is_some() {
+        let outcome = if let (Some(pool), Some(outbox)) =
+            (self.pool.as_ref(), self.outbox.as_ref())
+        {
             // Begin a transaction on the pool shared by all SQLite repositories.
             // The task-local ACTIVE_TX context makes this transaction visible to
             // all repository operations within the handler's execution scope.
-            let pool = self.pool.as_ref().unwrap();
             let tx = pool.begin().await.map_err(|e| {
                 tracing::error!(error = %e, "Failed to begin outbox transaction");
                 CommandError::DomainError(DomainError::DatabaseError(e.to_string()))
@@ -453,7 +454,6 @@ impl CommandBus {
 
             // Insert events into the outbox within the same transaction.
             {
-                let outbox = self.outbox.as_ref().unwrap();
                 let tx_clone = shared_tx.clone();
                 let insert_result = tx_context::run_in_tx_scope(tx_clone, async {
                     for event in &outcome.events {

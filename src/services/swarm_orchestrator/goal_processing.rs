@@ -451,11 +451,57 @@ where
             // Resolve workflow template for this task to determine workspace kind and
             // output delivery mode. SwarmConfig.workflow_template is populated at
             // startup from the resolved config; see `cli::commands::swarm`.
-            let task_workflow = self
-                .config
-                .workflow_template
-                .clone()
-                .expect("workflow_template must be resolved at swarm startup");
+            // If it is missing here, the orchestrator was misconfigured — fail the
+            // task with a structured event rather than crashing the whole swarm.
+            let task_workflow = match self.config.workflow_template.clone() {
+                Some(wf) => wf,
+                None => {
+                    let error_msg =
+                        "workflow_template was not resolved at swarm startup".to_string();
+
+                    tracing::error!(
+                        task_id = %task.id,
+                        "{}",
+                        error_msg,
+                    );
+
+                    if let Ok(Some(mut t)) = self.task_repo.get(task.id).await {
+                        if !t.status.is_terminal() {
+                            let _ = t.transition_to(TaskStatus::Failed);
+                        }
+                        let _ = self.task_repo.update(&t).await;
+                    }
+
+                    self.audit_log.log(
+                        crate::services::AuditEntry::new(
+                            AuditLevel::Error,
+                            AuditCategory::Task,
+                            AuditAction::TaskFailed,
+                            AuditActor::System,
+                            format!(
+                                "Task {} failed: {}",
+                                task.id, error_msg,
+                            ),
+                        )
+                        .with_entity(task.id, "task"),
+                    ).await;
+
+                    self.event_bus.publish(crate::services::event_factory::task_event(
+                        crate::services::event_bus::EventSeverity::Error,
+                        None,
+                        task.id,
+                        crate::services::event_bus::EventPayload::TaskFailed {
+                            task_id: task.id,
+                            error: error_msg,
+                            retry_count: 0,
+                        },
+                    )).await;
+
+                    self.guardrails.register_agent_end(&agent_unique_id).await;
+                    drop(permit);
+                    return Ok(());
+                }
+            };
             let task_workspace_kind = task_workflow.workspace_kind;
             let task_output_delivery = task_workflow.output_delivery.clone();
 
@@ -767,17 +813,26 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 // -----------------------------------------------------------------
                 if is_convergent {
                     // Validate that all convergence infrastructure is available.
-                    // If any piece is missing, fall back to direct execution with a warning.
-                    let can_converge = overseer_cluster.is_some()
-                        && trajectory_repo.is_some()
-                        && memory_repo.is_some()
-                        && convergent_intent_verifier.is_some();
+                    // Bind all four components atomically via a single match so that
+                    // drift between the presence check and the extraction becomes a
+                    // compile error rather than a runtime panic. If any piece is
+                    // missing, fall back to direct execution with a warning.
+                    let converge_components = match (
+                        overseer_cluster.clone(),
+                        trajectory_repo.clone(),
+                        memory_repo.clone(),
+                        convergent_intent_verifier.clone(),
+                    ) {
+                        (Some(oc), Some(tr), Some(mr), Some(iv)) => Some((oc, tr, mr, iv)),
+                        _ => None,
+                    };
 
-                    if can_converge {
-                        let overseer_cluster = overseer_cluster.unwrap();
-                        let trajectory_repo_arc = trajectory_repo.unwrap();
-                        let memory_repo = memory_repo.unwrap();
-                        let convergent_intent_verifier = convergent_intent_verifier.unwrap();
+                    if let Some((
+                        overseer_cluster,
+                        trajectory_repo_arc,
+                        memory_repo,
+                        convergent_intent_verifier,
+                    )) = converge_components {
 
                         // Wrap the dyn TrajectoryRepository in a Sized newtype so
                         // it can satisfy the generic T parameter of ConvergenceEngine.
