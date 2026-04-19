@@ -34,6 +34,7 @@ use crate::services::event_bus::EventCategory;
 use crate::services::event_bus::EventSeverity;
 use crate::services::event_scheduler::interval_schedule;
 use crate::services::goal_service::GoalService;
+use crate::services::memory_maintenance_service::MemoryMaintenanceService;
 use crate::services::memory_service::MemoryService;
 use crate::services::task_service::TaskService;
 use crate::services::trigger_rules::{TriggerRuleEngine, builtin_trigger_rules};
@@ -219,15 +220,19 @@ where
         // MemoryMaintenanceHandler (NORMAL) — periodic memory maintenance
         if let Some(ref memory_repo) = self.memory_repo {
             let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
+            let maintenance_service =
+                Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
             reactor
                 .register(Arc::new(MemoryMaintenanceHandler::new(
-                    memory_service.clone(),
+                    maintenance_service.clone(),
                 )))
                 .await;
 
             // MemoryReconciliationHandler (LOW) — periodic memory reconciliation
             reactor
-                .register(Arc::new(MemoryReconciliationHandler::new(memory_service)))
+                .register(Arc::new(MemoryReconciliationHandler::new(
+                    maintenance_service,
+                )))
                 .await;
         }
 
@@ -331,10 +336,12 @@ where
 
             let bus = if let Some(ref memory_repo) = self.memory_repo {
                 let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
+                let maintenance_service =
+                    Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
                 let mut bus = CommandBus::new(
                     task_service,
                     goal_service,
-                    memory_service,
+                    maintenance_service,
                     self.event_bus.clone(),
                 );
                 if let Some(ref pool) = self.pool {
@@ -347,10 +354,12 @@ where
             } else {
                 let null_memory =
                     Arc::new(MemoryService::new(Arc::new(NullMemoryRepository::new())));
+                let null_maintenance =
+                    Arc::new(MemoryMaintenanceService::from_memory_service(null_memory));
                 let mut bus = CommandBus::new(
                     task_service,
                     goal_service,
-                    null_memory,
+                    null_maintenance,
                     self.event_bus.clone(),
                 );
                 if let Some(ref pool) = self.pool {

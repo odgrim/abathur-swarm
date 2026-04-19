@@ -13,6 +13,7 @@ use crate::services::command_bus::{
 };
 use crate::services::event_bus::EventBus;
 use crate::services::goal_service::GoalService;
+use crate::services::memory_maintenance_service::MemoryMaintenanceService;
 use crate::services::memory_service::MemoryService;
 use crate::services::task_service::TaskService;
 
@@ -32,12 +33,14 @@ impl CliCommandDispatcher {
         let task_service = Arc::new(TaskService::new(task_repo));
         let goal_service = Arc::new(GoalService::new(goal_repo));
         let memory_service = Arc::new(MemoryService::new(memory_repo));
+        let maintenance_service =
+            Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
 
         let outbox_repo = Arc::new(crate::adapters::sqlite::SqliteOutboxRepository::new(
             pool.clone(),
         ));
         let command_bus = Arc::new(
-            CommandBus::new(task_service, goal_service, memory_service, event_bus)
+            CommandBus::new(task_service, goal_service, maintenance_service, event_bus)
                 .with_pool(pool)
                 .with_outbox(outbox_repo),
         );

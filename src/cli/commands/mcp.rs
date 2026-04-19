@@ -18,7 +18,9 @@ use crate::adapters::sqlite::{
 use crate::domain::models::a2a::A2AAgentCard;
 use crate::services::command_bus::CommandBus;
 use crate::services::event_bus::EventBus;
-use crate::services::{AgentService, GoalService, MemoryService, TaskService};
+use crate::services::{
+    AgentService, GoalService, MemoryMaintenanceService, MemoryService, TaskService,
+};
 
 /// Common services shared across MCP server initialization functions.
 struct McpServices {
@@ -73,11 +75,14 @@ impl McpServices {
         let outbox_repo: Arc<dyn crate::domain::ports::OutboxRepository> = Arc::new(
             crate::adapters::sqlite::SqliteOutboxRepository::new(self.pool.clone()),
         );
+        let maintenance_service = Arc::new(MemoryMaintenanceService::from_memory_service(
+            Arc::new(self.memory_service.clone()),
+        ));
         let command_bus = Arc::new(
             CommandBus::new(
                 Arc::new(self.task_service.clone()),
                 Arc::new(self.goal_service),
-                Arc::new(self.memory_service.clone()),
+                maintenance_service,
                 self.event_bus.clone(),
             )
             .with_pool(self.pool.clone())

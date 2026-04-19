@@ -87,6 +87,7 @@ where
         use crate::domain::ports::NullMemoryRepository;
         use crate::services::command_bus::CommandBus;
         use crate::services::goal_service::GoalService;
+        use crate::services::memory_maintenance_service::MemoryMaintenanceService;
         use crate::services::memory_service::MemoryService;
         use crate::services::task_service::TaskService;
 
@@ -100,10 +101,12 @@ where
 
         if let Some(ref memory_repo) = self.memory_repo {
             let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
+            let maintenance_service =
+                Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
             let mut bus = CommandBus::new(
                 task_service,
                 goal_service,
-                memory_service,
+                maintenance_service,
                 self.event_bus.clone(),
             );
             if let Some(ref pool) = self.pool {
@@ -115,10 +118,12 @@ where
             Arc::new(bus)
         } else {
             let null_memory = Arc::new(MemoryService::new(Arc::new(NullMemoryRepository::new())));
+            let null_maintenance =
+                Arc::new(MemoryMaintenanceService::from_memory_service(null_memory));
             let mut bus = CommandBus::new(
                 task_service,
                 goal_service,
-                null_memory,
+                null_maintenance,
                 self.event_bus.clone(),
             );
             if let Some(ref pool) = self.pool {

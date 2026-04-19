@@ -34,7 +34,7 @@ use crate::services::event_reactor::{
 };
 use crate::services::event_store::EventStore;
 use crate::services::goal_context_service::GoalContextService;
-use crate::services::memory_service::MemoryService;
+use crate::services::memory_maintenance_service::MemoryMaintenanceService;
 use crate::services::swarm_orchestrator::SwarmStats;
 use crate::services::task_service::TaskService;
 
@@ -49,12 +49,14 @@ use super::{try_update_task, update_with_retry};
 ///
 /// Triggered by `ScheduledEventFired { name: "memory-reconciliation" }`.
 pub struct MemoryReconciliationHandler<M: MemoryRepository> {
-    memory_service: Arc<MemoryService<M>>,
+    maintenance_service: Arc<MemoryMaintenanceService<M>>,
 }
 
 impl<M: MemoryRepository> MemoryReconciliationHandler<M> {
-    pub fn new(memory_service: Arc<MemoryService<M>>) -> Self {
-        Self { memory_service }
+    pub fn new(maintenance_service: Arc<MemoryMaintenanceService<M>>) -> Self {
+        Self {
+            maintenance_service,
+        }
     }
 }
 
@@ -96,7 +98,7 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryReconciliationHandler
         }
 
         let (report, events) = self
-            .memory_service
+            .maintenance_service
             .run_maintenance()
             .await
             .map_err(|e| format!("Memory reconciliation failed: {}", e))?;

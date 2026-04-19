@@ -32,6 +32,8 @@ pub mod integration_verifier;
 pub mod intent_verifier;
 pub mod llm_planner;
 pub mod memory_decay_daemon;
+pub mod memory_decay_service;
+pub mod memory_maintenance_service;
 pub mod memory_service;
 pub mod merge_queue;
 pub mod metrics_exporter;
@@ -134,6 +136,8 @@ pub use llm_planner::{
 pub use memory_decay_daemon::{
     DaemonHandle, DaemonStatus, DecayDaemonConfig, DecayDaemonEvent, MemoryDecayDaemon, StopReason,
 };
+pub use memory_decay_service::MemoryDecayService;
+pub use memory_maintenance_service::MemoryMaintenanceService;
 pub use memory_service::{DecayConfig, MaintenanceReport, MemoryService, MemoryStats};
 pub use merge_queue::{
     MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage,

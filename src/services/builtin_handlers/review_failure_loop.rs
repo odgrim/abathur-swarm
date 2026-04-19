@@ -376,6 +376,7 @@ mod tests {
         use crate::adapters::sqlite::test_support;
         use crate::domain::ports::NullMemoryRepository;
         use crate::services::goal_service::GoalService;
+        use crate::services::memory_maintenance_service::MemoryMaintenanceService;
         use crate::services::memory_service::MemoryService;
         use crate::services::task_service::TaskService;
 
@@ -383,6 +384,8 @@ mod tests {
         let task_service = Arc::new(TaskService::new(repo));
         let goal_service = Arc::new(GoalService::new(goal_repo));
         let memory_service = Arc::new(MemoryService::new(Arc::new(NullMemoryRepository::new())));
+        let maintenance_service =
+            Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
         let event_bus = Arc::new(crate::services::EventBus::new(
             crate::services::EventBusConfig {
                 persist_events: false,
@@ -392,7 +395,7 @@ mod tests {
         Arc::new(crate::services::command_bus::CommandBus::new(
             task_service,
             goal_service,
-            memory_service,
+            maintenance_service,
             event_bus,
         ))
     }

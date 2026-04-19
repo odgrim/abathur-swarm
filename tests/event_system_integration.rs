@@ -34,7 +34,7 @@ use abathur::services::trigger_rules::{
     SerializableEventFilter, TriggerAction, TriggerCondition, TriggerEventPayload, TriggerRule,
     TriggerRuleEngine,
 };
-use abathur::services::{GoalService, MemoryService, TaskService};
+use abathur::services::{GoalService, MemoryMaintenanceService, MemoryService, TaskService};
 
 // ---------------------------------------------------------------------------
 // Test helper: counting handler
@@ -263,11 +263,13 @@ async fn test_trigger_rule_emits_event_on_match() {
     let task_service = Arc::new(TaskService::new(task_repo));
     let goal_service = Arc::new(GoalService::new(goal_repo));
     let memory_service = Arc::new(MemoryService::new(memory_repo));
+    let maintenance_service =
+        Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
 
     let command_bus = Arc::new(CommandBus::new(
         task_service as Arc<dyn TaskCommandHandler>,
         goal_service as Arc<dyn GoalCommandHandler>,
-        memory_service as Arc<dyn MemoryCommandHandler>,
+        maintenance_service as Arc<dyn MemoryCommandHandler>,
         event_bus.clone(),
     ));
 
@@ -411,11 +413,13 @@ async fn test_command_bus_routes_and_emits() {
     let task_service = Arc::new(TaskService::new(task_repo));
     let goal_service = Arc::new(GoalService::new(goal_repo));
     let memory_service = Arc::new(MemoryService::new(memory_repo));
+    let maintenance_service =
+        Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
 
     let command_bus = CommandBus::new(
         task_service as Arc<dyn TaskCommandHandler>,
         goal_service as Arc<dyn GoalCommandHandler>,
-        memory_service as Arc<dyn MemoryCommandHandler>,
+        maintenance_service as Arc<dyn MemoryCommandHandler>,
         event_bus.clone(),
     );
 
@@ -495,10 +499,12 @@ async fn test_e2e_mutation_persist_react() {
     let task_service = Arc::new(TaskService::new(task_repo));
     let goal_service = Arc::new(GoalService::new(goal_repo));
     let memory_service = Arc::new(MemoryService::new(memory_repo));
+    let maintenance_service =
+        Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
     let command_bus = CommandBus::new(
         task_service as Arc<dyn TaskCommandHandler>,
         goal_service as Arc<dyn GoalCommandHandler>,
-        memory_service as Arc<dyn MemoryCommandHandler>,
+        maintenance_service as Arc<dyn MemoryCommandHandler>,
         event_bus.clone(),
     );
 
@@ -591,11 +597,13 @@ async fn test_trigger_count_threshold() {
     let task_service = Arc::new(TaskService::new(task_repo));
     let goal_service = Arc::new(GoalService::new(goal_repo));
     let memory_service = Arc::new(MemoryService::new(memory_repo));
+    let maintenance_service =
+        Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
 
     let command_bus = Arc::new(CommandBus::new(
         task_service as Arc<dyn TaskCommandHandler>,
         goal_service as Arc<dyn GoalCommandHandler>,
-        memory_service as Arc<dyn MemoryCommandHandler>,
+        maintenance_service as Arc<dyn MemoryCommandHandler>,
         event_bus.clone(),
     ));
 

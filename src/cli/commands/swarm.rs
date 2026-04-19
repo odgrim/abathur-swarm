@@ -1743,6 +1743,11 @@ async fn start_mcp_servers(
     // Create shared CommandBus for MCP servers
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
     let memory_service = MemoryService::new(memory_repo);
+    let maintenance_service = Arc::new(
+        crate::services::memory_maintenance_service::MemoryMaintenanceService::from_memory_service(
+            Arc::new(memory_service.clone()),
+        ),
+    );
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let task_service = TaskService::new(task_repo);
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
@@ -1758,7 +1763,7 @@ async fn start_mcp_servers(
         CommandBus::new(
             Arc::new(task_service.clone()),
             Arc::new(goal_service),
-            Arc::new(memory_service.clone()),
+            maintenance_service,
             mcp_event_bus,
         )
         .with_pool(pool.clone())

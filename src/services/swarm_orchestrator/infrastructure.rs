@@ -17,7 +17,8 @@ use crate::domain::ports::{
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, ColdStartConfig,
     ColdStartReport, ColdStartService, DecayDaemonConfig, IntegrationVerifierService,
-    MemoryDecayDaemon, MemoryService, VerificationResult, VerifierConfig, WorktreeConfig,
+    MemoryDecayDaemon, MemoryMaintenanceService, MemoryService, VerificationResult,
+    VerifierConfig, WorktreeConfig,
     WorktreeService,
     command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
     supervise,
@@ -532,7 +533,9 @@ where
         };
 
         let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
-        let daemon = MemoryDecayDaemon::new(memory_service, DecayDaemonConfig::default())
+        let maintenance_service =
+            Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
+        let daemon = MemoryDecayDaemon::new(maintenance_service, DecayDaemonConfig::default())
             .with_event_bus(self.event_bus.clone());
 
         // Get the handle before running

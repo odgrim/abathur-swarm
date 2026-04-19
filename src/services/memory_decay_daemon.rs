@@ -16,7 +16,8 @@ use crate::domain::ports::MemoryRepository;
 use crate::services::clock::{DynClock, system_clock};
 use crate::services::event_bus::{EventBus, EventCategory, EventPayload, EventSeverity};
 use crate::services::event_factory;
-use crate::services::memory_service::{MaintenanceReport, MemoryService};
+use crate::services::memory_maintenance_service::MemoryMaintenanceService;
+use crate::services::memory_service::MaintenanceReport;
 use crate::services::supervise;
 
 /// Configuration for the memory decay daemon.
@@ -159,7 +160,7 @@ pub struct MemoryDecayDaemon<R>
 where
     R: MemoryRepository + Send + Sync + 'static,
 {
-    memory_service: Arc<MemoryService<R>>,
+    maintenance_service: Arc<MemoryMaintenanceService<R>>,
     config: DecayDaemonConfig,
     status: Arc<RwLock<DaemonStatus>>,
     stop_flag: Arc<AtomicBool>,
@@ -172,9 +173,12 @@ where
     R: MemoryRepository + Send + Sync + 'static,
 {
     /// Create a new decay daemon.
-    pub fn new(memory_service: Arc<MemoryService<R>>, config: DecayDaemonConfig) -> Self {
+    pub fn new(
+        maintenance_service: Arc<MemoryMaintenanceService<R>>,
+        config: DecayDaemonConfig,
+    ) -> Self {
         Self {
-            memory_service,
+            maintenance_service,
             config,
             status: Arc::new(RwLock::new(DaemonStatus::default())),
             stop_flag: Arc::new(AtomicBool::new(false)),
@@ -184,8 +188,8 @@ where
     }
 
     /// Create with default configuration.
-    pub fn with_defaults(memory_service: Arc<MemoryService<R>>) -> Self {
-        Self::new(memory_service, DecayDaemonConfig::default())
+    pub fn with_defaults(maintenance_service: Arc<MemoryMaintenanceService<R>>) -> Self {
+        Self::new(maintenance_service, DecayDaemonConfig::default())
     }
 
     /// Set the event bus for publishing maintenance events.
@@ -297,7 +301,7 @@ where
             .await;
 
         let start = Instant::now();
-        let result = self.memory_service.run_maintenance().await;
+        let result = self.maintenance_service.run_maintenance().await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
@@ -404,7 +408,7 @@ where
 
     /// Run maintenance once (for testing or manual invocation).
     pub async fn run_once(&self) -> DomainResult<MaintenanceReport> {
-        let (report, events) = self.memory_service.run_maintenance().await?;
+        let (report, events) = self.maintenance_service.run_maintenance().await?;
 
         // Publish memory service events via EventBus
         if let Some(ref bus) = self.event_bus {
@@ -438,6 +442,7 @@ mod tests {
     use crate::domain::errors::{DomainError, DomainResult};
     use crate::domain::models::{Memory, MemoryQuery, MemoryTier};
     use crate::domain::ports::MemoryRepository;
+    use crate::services::memory_service::MemoryService;
 
     /// A mock MemoryRepository that can be configured to fail on `prune_expired()`.
     struct FailingMemoryRepository {
@@ -526,7 +531,8 @@ mod tests {
     ) {
         let repo = Arc::new(FailingMemoryRepository::new(should_fail));
         let service = Arc::new(MemoryService::new(repo.clone()));
-        let daemon = MemoryDecayDaemon::new(service, config);
+        let maintenance = Arc::new(MemoryMaintenanceService::from_memory_service(service));
+        let daemon = MemoryDecayDaemon::new(maintenance, config);
         (daemon, repo)
     }
 
@@ -957,7 +963,8 @@ mod tests {
     ) -> MemoryDecayDaemon<EventProducingMemoryRepository> {
         let repo = Arc::new(EventProducingMemoryRepository);
         let service = Arc::new(MemoryService::new(repo));
-        MemoryDecayDaemon::new(service, config)
+        let maintenance = Arc::new(MemoryMaintenanceService::from_memory_service(service));
+        MemoryDecayDaemon::new(maintenance, config)
     }
 
     #[tokio::test]

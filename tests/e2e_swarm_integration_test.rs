@@ -1246,8 +1246,10 @@ async fn test_memory_system_integration() {
     assert!(recalled.is_some());
     assert!(recalled.unwrap().content.contains("Result type"));
 
-    // Run maintenance
-    let (_report, _events) = memory_service
+    // Run maintenance via the maintenance service
+    let maintenance_service =
+        abathur::services::MemoryMaintenanceService::from_memory_service(Arc::new(memory_service));
+    let (_report, _events) = maintenance_service
         .run_maintenance()
         .await
         .expect("Failed to run maintenance");

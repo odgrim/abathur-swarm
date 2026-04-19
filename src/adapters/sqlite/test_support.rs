@@ -202,6 +202,11 @@ pub fn make_command_bus(
     let task_service = make_task_service(task_repo);
     let goal_service = make_goal_service(goal_repo);
     let memory_service = make_memory_service(memory_repo);
+    let maintenance_service = Arc::new(
+        crate::services::memory_maintenance_service::MemoryMaintenanceService::from_memory_service(
+            memory_service,
+        ),
+    );
     let event_bus = Arc::new(crate::services::EventBus::new(
         crate::services::EventBusConfig {
             persist_events: false,
@@ -211,7 +216,7 @@ pub fn make_command_bus(
     Arc::new(crate::services::command_bus::CommandBus::new(
         task_service,
         goal_service,
-        memory_service,
+        maintenance_service,
         event_bus,
     ))
 }

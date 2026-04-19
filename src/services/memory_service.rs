@@ -1,9 +1,11 @@
-//! Memory service implementing business logic with decay management.
+//! Memory service: CRUD, recall, search, and conflict-detection primitives.
+//!
+//! Decay, pruning, and maintenance orchestration live in sibling services:
+//! - [`crate::services::memory_decay_service::MemoryDecayService`]
+//! - [`crate::services::memory_maintenance_service::MemoryMaintenanceService`]
 
 use std::sync::Arc;
 use uuid::Uuid;
-
-use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
@@ -11,9 +13,6 @@ use crate::domain::models::{
     ScoredMemory,
 };
 use crate::domain::ports::MemoryRepository;
-use crate::services::command_bus::{
-    CommandError, CommandOutcome, CommandResult, MemoryCommand, MemoryCommandHandler,
-};
 use crate::services::event_bus::{EventCategory, EventPayload, EventSeverity, UnifiedEvent};
 use crate::services::event_factory;
 
@@ -71,6 +70,22 @@ impl<R: MemoryRepository> MemoryService<R> {
     pub fn with_decay_config(mut self, config: DecayConfig) -> Self {
         self.decay_config = config;
         self
+    }
+
+    /// Access the underlying repository.
+    ///
+    /// Exposed so sibling services (decay, maintenance) and command-bus
+    /// handlers can share the same repository instance without re-wiring.
+    pub fn repository(&self) -> &Arc<R> {
+        &self.repository
+    }
+
+    /// Access the decay configuration.
+    ///
+    /// Sibling services (decay, maintenance) read these thresholds when
+    /// deciding what to prune or promote.
+    pub fn decay_config(&self) -> &DecayConfig {
+        &self.decay_config
     }
 
     /// Helper to build a UnifiedEvent with standard fields.
@@ -411,167 +426,6 @@ impl<R: MemoryRepository> MemoryService<R> {
         Ok(events)
     }
 
-    /// Prune expired memories. Returns the count and events to be journaled.
-    pub async fn prune_expired(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
-        let count = self.repository.prune_expired().await?;
-        let mut events = Vec::new();
-        if count > 0 {
-            events.push(Self::make_event(
-                EventSeverity::Debug,
-                EventCategory::Memory,
-                EventPayload::MemoryPruned {
-                    count,
-                    reason: "expired".to_string(),
-                },
-            ));
-        }
-        Ok((count, events))
-    }
-
-    /// Prune decayed memories (below threshold). Returns count and events.
-    pub async fn prune_decayed(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
-        let mut count = 0;
-        let mut events = Vec::new();
-
-        // Prune working memories
-        let decayed = self
-            .repository
-            .get_decayed(self.decay_config.working_prune_threshold)
-            .await?;
-        for mem in decayed {
-            if mem.tier == MemoryTier::Working {
-                self.repository.delete(mem.id).await?;
-                count += 1;
-            }
-        }
-
-        // Prune episodic memories
-        let decayed = self
-            .repository
-            .get_decayed(self.decay_config.episodic_prune_threshold)
-            .await?;
-        for mem in decayed {
-            if mem.tier == MemoryTier::Episodic {
-                self.repository.delete(mem.id).await?;
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            events.push(Self::make_event(
-                EventSeverity::Debug,
-                EventCategory::Memory,
-                EventPayload::MemoryPruned {
-                    count,
-                    reason: "decayed".to_string(),
-                },
-            ));
-        }
-
-        Ok((count, events))
-    }
-
-    /// Run full maintenance: prune expired and decayed, resolve conflicts.
-    /// Returns the report and all accumulated events.
-    pub async fn run_maintenance(&self) -> DomainResult<(MaintenanceReport, Vec<UnifiedEvent>)> {
-        let mut all_events = Vec::new();
-
-        let (expired, events) = self.prune_expired().await?;
-        all_events.extend(events);
-
-        let (decayed, events) = self.prune_decayed().await?;
-        all_events.extend(events);
-
-        // Check for promotion candidates
-        let (promoted, events) = self.check_all_promotions().await?;
-        all_events.extend(events);
-
-        // Detect and auto-resolve conflicts
-        let (conflicts_resolved, events) = self.auto_resolve_conflicts().await?;
-        all_events.extend(events);
-
-        Ok((
-            MaintenanceReport {
-                expired_pruned: expired,
-                decayed_pruned: decayed,
-                promoted,
-                conflicts_resolved,
-            },
-            all_events,
-        ))
-    }
-
-    /// Automatically detect and resolve memory conflicts.
-    ///
-    /// This method scans all memories for conflicts and applies automatic
-    /// resolution strategies (soft merge, prefer newer/higher confidence).
-    /// Conflicts that cannot be automatically resolved are flagged for review.
-    /// Returns the count and all accumulated events.
-    pub async fn auto_resolve_conflicts(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
-        let mut resolved_count = 0;
-        let mut all_events = Vec::new();
-
-        // Get all namespaces by querying distinct values
-        // For efficiency, we'll scan working and episodic tiers (semantic is long-term stable)
-        let working_memories = self.repository.list_by_tier(MemoryTier::Working).await?;
-        let episodic_memories = self.repository.list_by_tier(MemoryTier::Episodic).await?;
-
-        let all_memories: Vec<Memory> = working_memories
-            .into_iter()
-            .chain(episodic_memories.into_iter())
-            .collect();
-
-        // Detect conflicts
-        let conflicts = self.detect_conflicts(&all_memories);
-
-        // Resolve each conflict that has an automatic resolution
-        for conflict in conflicts {
-            // Collect conflict detection event
-            all_events.push(Self::make_event(
-                EventSeverity::Warning,
-                EventCategory::Memory,
-                EventPayload::MemoryConflictDetected {
-                    memory_a: conflict.memory_a,
-                    memory_b: conflict.memory_b,
-                    key: conflict.key.clone(),
-                    similarity: conflict.similarity,
-                },
-            ));
-
-            if matches!(
-                &conflict.resolution,
-                Some(ConflictResolution::PreferNewer { .. })
-                    | Some(ConflictResolution::PreferHigherConfidence { .. })
-                    | Some(ConflictResolution::SoftMerge { .. })
-            ) {
-                if let Ok(events) = self.resolve_conflict(&conflict).await {
-                    all_events.extend(events);
-                    resolved_count += 1;
-                }
-            } else if matches!(
-                &conflict.resolution,
-                Some(ConflictResolution::FlaggedForReview)
-            ) {
-                // Just flag these for review, count as "processed"
-                if let Ok(events) = self.resolve_conflict(&conflict).await {
-                    all_events.extend(events);
-                    // Don't count flagged as "resolved", but still process them
-                }
-            }
-        }
-
-        Ok((resolved_count, all_events))
-    }
-
-    /// Get all memories flagged for review due to unresolved conflicts.
-    pub async fn get_memories_needing_review(&self) -> DomainResult<Vec<Memory>> {
-        let query = MemoryQuery {
-            tags: vec!["needs-review".to_string()],
-            ..Default::default()
-        };
-        self.repository.query(query).await
-    }
-
     /// Check if a memory should be promoted based on access patterns and distinct accessor count.
     ///
     /// Promotion requires BOTH:
@@ -625,7 +479,9 @@ impl<R: MemoryRepository> MemoryService<R> {
     /// Check all non-semantic memories for promotion. Returns count and events.
     ///
     /// Both access count and distinct accessor count must meet thresholds.
-    async fn check_all_promotions(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
+    ///
+    /// Invoked by [`crate::services::memory_maintenance_service::MemoryMaintenanceService::run_maintenance`].
+    pub async fn check_all_promotions(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
         let mut promoted = 0;
         let mut all_events = Vec::new();
 
@@ -1043,81 +899,6 @@ impl<R: MemoryRepository> MemoryService<R> {
         )];
 
         Ok(events)
-    }
-}
-
-#[async_trait]
-impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
-    async fn handle(&self, cmd: MemoryCommand) -> Result<CommandOutcome, CommandError> {
-        match cmd {
-            MemoryCommand::Store {
-                key,
-                content,
-                namespace,
-                tier,
-                memory_type,
-                metadata,
-            } => {
-                let (memory, events) = self
-                    .store(key, content, namespace, tier, memory_type, metadata)
-                    .await?;
-                Ok(CommandOutcome {
-                    result: CommandResult::Memory(memory),
-                    events,
-                })
-            }
-            MemoryCommand::Recall { id, accessor } => {
-                let (memory, events) = self.recall(id, accessor).await?;
-                Ok(CommandOutcome {
-                    result: CommandResult::MemoryOpt(memory),
-                    events,
-                })
-            }
-            MemoryCommand::RecallByKey {
-                key,
-                namespace,
-                accessor,
-            } => {
-                let (memory, events) = self.recall_by_key(&key, &namespace, accessor).await?;
-                Ok(CommandOutcome {
-                    result: CommandResult::MemoryOpt(memory),
-                    events,
-                })
-            }
-            MemoryCommand::Update {
-                id,
-                content,
-                namespace,
-                tier,
-            } => {
-                let (memory, events) = self.update_memory(id, content, namespace, tier).await?;
-                Ok(CommandOutcome {
-                    result: CommandResult::Memory(memory),
-                    events,
-                })
-            }
-            MemoryCommand::Forget { id } => {
-                let events = self.forget(id).await?;
-                Ok(CommandOutcome {
-                    result: CommandResult::Unit,
-                    events,
-                })
-            }
-            MemoryCommand::PruneExpired => {
-                let (count, events) = self.prune_expired().await?;
-                Ok(CommandOutcome {
-                    result: CommandResult::PruneCount(count),
-                    events,
-                })
-            }
-            MemoryCommand::RunMaintenance => {
-                let (report, events) = self.run_maintenance().await?;
-                Ok(CommandOutcome {
-                    result: CommandResult::MaintenanceReport(report),
-                    events,
-                })
-            }
-        }
     }
 }
 
@@ -1979,53 +1760,6 @@ mod tests {
                 other
             ),
         }
-    }
-
-    #[tokio::test]
-    async fn test_auto_resolve_conflicts_end_to_end() {
-        let service = test_support::setup_memory_service().await;
-
-        // Create two Working-tier memories with same key and ~80% overlap (PreferNewer)
-        let (older, _) = service
-            .store(
-                "e2e_key".to_string(),
-                "the quick brown fox jumps over the lazy dog".to_string(),
-                "ns".to_string(),
-                MemoryTier::Working,
-                MemoryType::Fact,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let (_newer, _) = service
-            .store(
-                "e2e_key".to_string(),
-                "the quick brown fox jumps over the lazy cat today".to_string(),
-                "ns".to_string(),
-                MemoryTier::Working,
-                MemoryType::Fact,
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Run auto-resolve
-        let (resolved_count, events) = service.auto_resolve_conflicts().await.unwrap();
-
-        assert!(resolved_count >= 1, "Should resolve at least 1 conflict");
-        assert!(
-            !events.is_empty(),
-            "Should emit events for conflict detection and resolution"
-        );
-
-        // The older memory should now be tagged as "superseded"
-        let deprecated = service.repository.get(older.id).await.unwrap().unwrap();
-        assert!(
-            deprecated.metadata.tags.contains(&"superseded".to_string()),
-            "Deprecated memory should be tagged 'superseded', got tags: {:?}",
-            deprecated.metadata.tags
-        );
     }
 
     #[tokio::test]
