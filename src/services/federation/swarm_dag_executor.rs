@@ -67,9 +67,13 @@ impl SwarmDagExecutor {
         goal: &Goal,
     ) -> DomainResult<Vec<Uuid>> {
         // Mark the node as Converged.
-        if let Some(node) = dag.get_node_mut(node_id) {
-            node.state = SwarmDagNodeState::Converged;
-        }
+        let node = dag.get_node_mut(node_id).ok_or_else(|| {
+            crate::domain::errors::DomainError::ValidationFailed(format!(
+                "swarm_dag_executor: node {} not found during on_node_converged",
+                node_id
+            ))
+        })?;
+        node.state = SwarmDagNodeState::Converged;
 
         // Find dependents that are now ready.
         let dependent_ids: Vec<Uuid> = dag.dependents_of(node_id).iter().map(|n| n.id).collect();
@@ -153,13 +157,14 @@ impl SwarmDagExecutor {
     ) -> DomainResult<Vec<Uuid>> {
         // Mark the node as Failed.
         let node_label = {
-            let node = dag.get_node_mut(node_id);
-            if let Some(n) = node {
-                n.state = SwarmDagNodeState::Failed;
-                n.label.clone()
-            } else {
-                String::new()
-            }
+            let n = dag.get_node_mut(node_id).ok_or_else(|| {
+                crate::domain::errors::DomainError::ValidationFailed(format!(
+                    "swarm_dag_executor: node {} not found during on_node_failed",
+                    node_id
+                ))
+            })?;
+            n.state = SwarmDagNodeState::Failed;
+            n.label.clone()
         };
 
         self.event_bus
@@ -180,9 +185,13 @@ impl SwarmDagExecutor {
 
         let mut failed_ids = Vec::new();
         for dep_id in &transitive {
-            if let Some(dep_node) = dag.get_node_mut(*dep_id)
-                && !dep_node.state.is_terminal()
-            {
+            let dep_node = dag.get_node_mut(*dep_id).ok_or_else(|| {
+                crate::domain::errors::DomainError::ValidationFailed(format!(
+                    "swarm_dag_executor: node {} not found during on_node_failed cascade",
+                    dep_id
+                ))
+            })?;
+            if !dep_node.state.is_terminal() {
                 dep_node.state = SwarmDagNodeState::Failed;
                 failed_ids.push(*dep_id);
             }
@@ -273,10 +282,14 @@ impl SwarmDagExecutor {
         let fed_goal_id = federated_goal.id;
 
         // Update node state.
-        if let Some(node) = dag.get_node_mut(node_id) {
-            node.state = SwarmDagNodeState::Delegated;
-            node.federated_goal_id = Some(fed_goal_id);
-        }
+        let node = dag.get_node_mut(node_id).ok_or_else(|| {
+            crate::domain::errors::DomainError::ValidationFailed(format!(
+                "swarm_dag_executor: node {} not found during delegate_node state update",
+                node_id
+            ))
+        })?;
+        node.state = SwarmDagNodeState::Delegated;
+        node.federated_goal_id = Some(fed_goal_id);
 
         // Emit delegation event.
         self.event_bus
