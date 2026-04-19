@@ -424,12 +424,25 @@ impl TryFrom<MemoryRow> for Memory {
         // Use content if available, fall back to value
         let content = row.content.unwrap_or(row.value);
 
-        // Deserialize distinct_accessors from JSON array; default to empty set
-        let distinct_accessors: std::collections::HashSet<AccessorId> = row
+        // Deserialize distinct_accessors from JSON array; propagate errors rather
+        // than silently substituting an empty set, which would mask corruption.
+        let distinct_accessors: std::collections::HashSet<AccessorId> = match row
             .distinct_accessors
             .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        {
+            Some(s) => serde_json::from_str(s).map_err(|e| {
+                tracing::error!(
+                    memory_id = %id,
+                    error = %e,
+                    "failed to deserialize distinct_accessors JSON"
+                );
+                DomainError::SerializationError(format!(
+                    "distinct_accessors for memory {}: {}",
+                    id, e
+                ))
+            })?,
+            None => std::collections::HashSet::new(),
+        };
 
         Ok(Memory {
             id,

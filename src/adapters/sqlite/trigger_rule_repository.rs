@@ -48,9 +48,28 @@ fn row_to_rule(row: TriggerRuleRow) -> DomainResult<TriggerRule> {
     let condition = match row.condition_type.as_str() {
         "always" => TriggerCondition::Always,
         "count_threshold" | "absence" | "cron" => {
-            let data = row.condition_data.unwrap_or_default();
-            serde_json::from_str(&data)
-                .map_err(|e| DomainError::SerializationError(e.to_string()))?
+            let data = row.condition_data.as_deref().ok_or_else(|| {
+                tracing::error!(
+                    trigger_rule_id = %row.id,
+                    condition_type = %row.condition_type,
+                    "trigger rule has NULL condition_data for non-always condition"
+                );
+                DomainError::SerializationError(format!(
+                    "trigger rule {}: condition_data is NULL for condition_type={}",
+                    row.id, row.condition_type
+                ))
+            })?;
+            serde_json::from_str(data).map_err(|e| {
+                tracing::error!(
+                    trigger_rule_id = %row.id,
+                    error = %e,
+                    "failed to deserialize trigger rule condition_data"
+                );
+                DomainError::SerializationError(format!(
+                    "trigger rule {} condition_data: {}",
+                    row.id, e
+                ))
+            })?
         }
         other => {
             return Err(DomainError::SerializationError(format!(
@@ -62,9 +81,28 @@ fn row_to_rule(row: TriggerRuleRow) -> DomainResult<TriggerRule> {
 
     let action = match row.action_type.as_str() {
         "emit_event" | "issue_command" | "emit_and_command" => {
-            let data = row.action_data.unwrap_or_default();
-            serde_json::from_str(&data)
-                .map_err(|e| DomainError::SerializationError(e.to_string()))?
+            let data = row.action_data.as_deref().ok_or_else(|| {
+                tracing::error!(
+                    trigger_rule_id = %row.id,
+                    action_type = %row.action_type,
+                    "trigger rule has NULL action_data"
+                );
+                DomainError::SerializationError(format!(
+                    "trigger rule {}: action_data is NULL for action_type={}",
+                    row.id, row.action_type
+                ))
+            })?;
+            serde_json::from_str(data).map_err(|e| {
+                tracing::error!(
+                    trigger_rule_id = %row.id,
+                    error = %e,
+                    "failed to deserialize trigger rule action_data"
+                );
+                DomainError::SerializationError(format!(
+                    "trigger rule {} action_data: {}",
+                    row.id, e
+                ))
+            })?
         }
         other => {
             return Err(DomainError::SerializationError(format!(

@@ -40,8 +40,18 @@ impl SqliteMergeRequestRepository {
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
 
-        let conflict_files: Vec<String> =
-            serde_json::from_str(&row.conflict_files_json).unwrap_or_default();
+        let conflict_files: Vec<String> = serde_json::from_str(&row.conflict_files_json)
+            .map_err(|e| {
+                tracing::error!(
+                    merge_request_id = %row.id,
+                    error = %e,
+                    "failed to deserialize conflict_files_json"
+                );
+                DomainError::SerializationError(format!(
+                    "conflict_files_json for merge request {}: {}",
+                    row.id, e
+                ))
+            })?;
 
         Ok(MergeRequest {
             id,
