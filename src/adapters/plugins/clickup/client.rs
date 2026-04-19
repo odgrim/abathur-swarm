@@ -153,7 +153,7 @@ impl ClickUpClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "clickup".to_string(),
                 reason: format!("get_tasks returned {status}: {body}"),
@@ -186,7 +186,7 @@ impl ClickUpClient {
 
         if !resp.status().is_success() {
             let status_code = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "clickup".to_string(),
                 reason: format!("update_task_status returned {status_code}: {body}"),
@@ -216,7 +216,7 @@ impl ClickUpClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "clickup".to_string(),
                 reason: format!("post_comment returned {status}: {body}"),
@@ -254,7 +254,7 @@ impl ClickUpClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "clickup".to_string(),
                 reason: format!("create_task returned {status}: {body}"),

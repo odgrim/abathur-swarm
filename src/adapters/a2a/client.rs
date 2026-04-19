@@ -229,7 +229,7 @@ impl HttpA2AClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(A2AWireError::Protocol {
                 code: status.as_u16() as i32,
                 message: format!("HTTP {}: {}", status, body),

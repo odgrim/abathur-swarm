@@ -206,7 +206,7 @@ impl GitHubClient {
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
+                let body = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
                 return Err(DomainError::ExternalServiceError {
                     service: "github".to_string(),
                     reason: format!("list_issues returned {status}: {body}"),
@@ -268,7 +268,7 @@ impl GitHubClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
+            let body_text = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "github".to_string(),
                 reason: format!("update_issue_state returned {status}: {body_text}"),
@@ -307,7 +307,7 @@ impl GitHubClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
+            let body_text = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "github".to_string(),
                 reason: format!("post_comment returned {status}: {body_text}"),
@@ -348,7 +348,7 @@ impl GitHubClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
+            let body_text = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "github".to_string(),
                 reason: format!("create_issue returned {status}: {body_text}"),
@@ -406,7 +406,7 @@ impl GitHubClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "github".to_string(),
                 reason: format!("get_pull_request returned {status}: {body}"),
@@ -452,7 +452,7 @@ impl GitHubClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "github".to_string(),
                 reason: format!("get_pull_request_diff returned {status}: {body}"),
@@ -500,7 +500,7 @@ impl GitHubClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
+            let body_text = resp.text().await.unwrap_or_else(|e| format!("<body read failed: {e}>"));
             return Err(DomainError::ExternalServiceError {
                 service: "github".to_string(),
                 reason: format!("create_pull_request returned {status}: {body_text}"),

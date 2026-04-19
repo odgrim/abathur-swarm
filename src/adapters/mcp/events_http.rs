@@ -229,8 +229,8 @@ async fn stream_all_events(
     let receiver = state.event_bus.subscribe();
     let heartbeat = Duration::from_millis(state.config.heartbeat_interval_ms);
 
-    let replay_events = get_replay_events(&state, last_event_id, None, None).await;
-    let stream = create_event_stream_with_replay(replay_events, receiver, None, None);
+    let replay_result = get_replay_events(&state, last_event_id, None, None).await;
+    let stream = create_event_stream_with_replay(replay_result, receiver, None, None);
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(heartbeat))
 }
@@ -245,8 +245,8 @@ async fn stream_goal_events(
     let receiver = state.event_bus.subscribe();
     let heartbeat = Duration::from_millis(state.config.heartbeat_interval_ms);
 
-    let replay_events = get_replay_events(&state, last_event_id, Some(goal_id), None).await;
-    let stream = create_event_stream_with_replay(replay_events, receiver, Some(goal_id), None);
+    let replay_result = get_replay_events(&state, last_event_id, Some(goal_id), None).await;
+    let stream = create_event_stream_with_replay(replay_result, receiver, Some(goal_id), None);
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(heartbeat))
 }
@@ -261,8 +261,8 @@ async fn stream_task_events(
     let receiver = state.event_bus.subscribe();
     let heartbeat = Duration::from_millis(state.config.heartbeat_interval_ms);
 
-    let replay_events = get_replay_events(&state, last_event_id, None, Some(task_id)).await;
-    let stream = create_event_stream_with_replay(replay_events, receiver, None, Some(task_id));
+    let replay_result = get_replay_events(&state, last_event_id, None, Some(task_id)).await;
+    let stream = create_event_stream_with_replay(replay_result, receiver, None, Some(task_id));
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(heartbeat))
 }
@@ -276,20 +276,25 @@ fn parse_last_event_id(headers: &HeaderMap) -> Option<u64> {
 }
 
 /// Query the event store for events since `last_event_id` for replay.
+///
+/// Returns `Ok(events)` on success (possibly empty if no replay was requested
+/// or no store is configured). Returns `Err(message)` if the store query itself
+/// failed, so callers can surface that instead of silently serving an empty
+/// replay.
 async fn get_replay_events(
     state: &EventsState,
     last_event_id: Option<u64>,
     goal_filter: Option<Uuid>,
     task_filter: Option<Uuid>,
-) -> Vec<UnifiedEvent> {
+) -> Result<Vec<UnifiedEvent>, String> {
     let since = match last_event_id {
         Some(seq) => seq,
-        None => return Vec::new(),
+        None => return Ok(Vec::new()),
     };
 
     let store = match &state.event_store {
         Some(s) => s,
-        None => return Vec::new(),
+        None => return Ok(Vec::new()),
     };
 
     let mut query = EventQuery::new()
@@ -304,24 +309,60 @@ async fn get_replay_events(
         query = query.task_id(task_id);
     }
 
-    store.query(query).await.unwrap_or_default()
+    store.query(query).await.map_err(|e| e.to_string())
+}
+
+/// Build an SSE event representing a serialization failure so clients are
+/// explicitly told something went wrong rather than receiving an empty frame.
+fn serialization_error_event(err: &serde_json::Error, sequence: Option<u64>) -> Event {
+    let payload = serde_json::json!({
+        "type": "serialization_error",
+        "error": err.to_string(),
+        "sequence": sequence,
+    })
+    .to_string();
+    let mut evt = Event::default().event("error").data(payload);
+    if let Some(seq) = sequence {
+        evt = evt.id(seq.to_string());
+    }
+    evt
 }
 
 /// Create an SSE stream that replays missed events first, then streams live.
 fn create_event_stream_with_replay(
-    replay: Vec<UnifiedEvent>,
+    replay: Result<Vec<UnifiedEvent>, String>,
     receiver: broadcast::Receiver<UnifiedEvent>,
     goal_filter: Option<Uuid>,
     task_filter: Option<Uuid>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
-    // Phase 1: replay buffered events
-    let replay_stream = stream::iter(replay.into_iter().map(|event| {
-        let sse_event = Event::default()
-            .event(format!("{}", event.category))
-            .id(event.sequence.0.to_string())
-            .data(serde_json::to_string(&event).unwrap_or_default());
-        Ok(sse_event)
-    }));
+    // If the replay query itself failed, emit a single error SSE event in
+    // place of the replay phase. The live stream still runs so the client
+    // remains connected.
+    let replay_events: Vec<Result<Event, Infallible>> = match replay {
+        Ok(events) => events
+            .into_iter()
+            .map(|event| {
+                let sse_event = match serde_json::to_string(&event) {
+                    Ok(data) => Event::default()
+                        .event(format!("{}", event.category))
+                        .id(event.sequence.0.to_string())
+                        .data(data),
+                    Err(e) => serialization_error_event(&e, Some(event.sequence.0)),
+                };
+                Ok(sse_event)
+            })
+            .collect(),
+        Err(err) => {
+            let payload = serde_json::json!({
+                "type": "replay_error",
+                "error": err,
+            })
+            .to_string();
+            vec![Ok(Event::default().event("error").data(payload))]
+        }
+    };
+
+    let replay_stream = stream::iter(replay_events);
 
     // Phase 2: live events from broadcast
     let live_stream = stream::unfold(receiver, move |mut rx| {
@@ -343,10 +384,13 @@ fn create_event_stream_with_replay(
                             continue;
                         }
 
-                        let sse_event = Event::default()
-                            .event(format!("{}", event.category))
-                            .id(event.sequence.0.to_string())
-                            .data(serde_json::to_string(&event).unwrap_or_default());
+                        let sse_event = match serde_json::to_string(&event) {
+                            Ok(data) => Event::default()
+                                .event(format!("{}", event.category))
+                                .id(event.sequence.0.to_string())
+                                .data(data),
+                            Err(e) => serialization_error_event(&e, Some(event.sequence.0)),
+                        };
 
                         return Some((Ok(sse_event), rx));
                     }
@@ -410,7 +454,14 @@ async fn handle_ws_events(mut socket: WebSocket, params: WsEventParams, state: A
                 {
                     continue;
                 }
-                let json = serde_json::to_string(event).unwrap_or_default();
+                let json = match serde_json::to_string(event) {
+                    Ok(s) => s,
+                    Err(e) => format!(
+                        "{{\"type\":\"serialization_error\",\"error\":{:?},\"sequence\":{}}}",
+                        e.to_string(),
+                        event.sequence.0
+                    ),
+                };
                 if socket.send(Message::Text(json.into())).await.is_err() {
                     return;
                 }
@@ -430,7 +481,14 @@ async fn handle_ws_events(mut socket: WebSocket, params: WsEventParams, state: A
                             && event.category != cat {
                                 continue;
                             }
-                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        let json = match serde_json::to_string(&event) {
+                            Ok(s) => s,
+                            Err(e) => format!(
+                                "{{\"type\":\"serialization_error\",\"error\":{:?},\"sequence\":{}}}",
+                                e.to_string(),
+                                event.sequence.0
+                            ),
+                        };
                         if socket.send(Message::Text(json.into())).await.is_err() {
                             break;
                         }
@@ -655,7 +713,15 @@ async fn test_webhook(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .unwrap_or_default();
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("failed to build HTTP client: {e}"),
+                    code: "CLIENT_BUILD_FAILED".to_string(),
+                }),
+            )
+        })?;
 
     let mut request = client
         .post(&webhook.url)
