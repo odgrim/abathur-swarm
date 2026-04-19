@@ -5,7 +5,7 @@
 
 #![allow(unused_imports)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -52,11 +52,13 @@ use super::{try_update_task, update_with_retry};
 /// This handler provides a fast-path signal: when it fires, the orchestrator
 /// can immediately check deadlines rather than waiting for the next poll tick.
 pub struct EscalationTimeoutHandler {
-    escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
+    escalation_store: Arc<RwLock<HashMap<uuid::Uuid, HumanEscalationEvent>>>,
 }
 
 impl EscalationTimeoutHandler {
-    pub fn new(escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>) -> Self {
+    pub fn new(
+        escalation_store: Arc<RwLock<HashMap<uuid::Uuid, HumanEscalationEvent>>>,
+    ) -> Self {
         Self { escalation_store }
     }
 }
@@ -93,7 +95,7 @@ impl EventHandler for EscalationTimeoutHandler {
         let now = chrono::Utc::now();
         let store = self.escalation_store.read().await;
         let expired: Vec<_> = store
-            .iter()
+            .values()
             .filter(|e| e.escalation.deadline.is_some_and(|d| now > d))
             .cloned()
             .collect();

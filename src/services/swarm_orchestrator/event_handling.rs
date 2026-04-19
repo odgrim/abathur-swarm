@@ -2,9 +2,42 @@
 //!
 //! Manages human escalation events, A2A messaging, and event bus integration.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+/// Max age for an escalation entry before eviction (7 days).
+/// Matches the retention window used for the processed_commands dedup cache.
+const ESCALATION_STORE_TTL_SECS: i64 = 7 * 24 * 3600;
+/// Hard ceiling on resident escalation entries. If exceeded after TTL eviction,
+/// the oldest entries by `created_at` are evicted until size <= this value.
+const ESCALATION_STORE_MAX_SIZE: usize = 1024;
+
+/// Prune the escalation store under the held write lock.
+///
+/// Runs on every mutation path (respond, defer, check_deadlines) to bound
+/// memory. Evicts:
+/// 1. Entries older than `ESCALATION_STORE_TTL_SECS`.
+/// 2. If still over `ESCALATION_STORE_MAX_SIZE`, the oldest remaining entries
+///    by `created_at` until size <= max.
+fn prune_escalation_store_locked(
+    store: &mut HashMap<Uuid, HumanEscalationEvent>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let cutoff = now - chrono::Duration::seconds(ESCALATION_STORE_TTL_SECS);
+    store.retain(|_, e| e.created_at >= cutoff);
+
+    if store.len() > ESCALATION_STORE_MAX_SIZE {
+        let mut ids_by_age: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
+            store.iter().map(|(id, e)| (*id, e.created_at)).collect();
+        ids_by_age.sort_by_key(|(_, ts)| *ts);
+        let excess = store.len() - ESCALATION_STORE_MAX_SIZE;
+        for (id, _) in ids_by_age.into_iter().take(excess) {
+            store.remove(&id);
+        }
+    }
+}
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
@@ -37,7 +70,7 @@ where
 
     /// List pending (unresponded) escalation events.
     pub async fn list_pending_escalations(&self) -> Vec<HumanEscalationEvent> {
-        self.escalation_store.read().await.clone()
+        self.escalation_store.read().await.values().cloned().collect()
     }
 
     /// Get the stored CommandBus, falling back to building one if not yet initialized.
@@ -104,16 +137,14 @@ where
         response: HumanEscalationResponse,
         _event_tx: Option<&mpsc::Sender<SwarmEvent>>,
     ) -> DomainResult<()> {
-        use crate::services::command_bus::{
-            CommandEnvelope, CommandSource, DomainCommand, GoalCommand, TaskCommand,
-        };
-
-        // Find and remove the escalation from the store
+        // Find and remove the escalation from the store atomically.
         let escalation = {
             let mut store = self.escalation_store.write().await;
-            let idx = store.iter().position(|e| e.id == response.event_id);
-            match idx {
-                Some(i) => store.remove(i),
+            let removed = store.remove(&response.event_id);
+            // Opportunistically prune while we hold the write lock.
+            prune_escalation_store_locked(&mut store, chrono::Utc::now());
+            match removed {
+                Some(e) => e,
                 None => {
                     return Err(DomainError::ValidationFailed(format!(
                         "Escalation {} not found",
@@ -121,6 +152,24 @@ where
                     )));
                 }
             }
+        };
+
+        self.apply_escalation_response(escalation, response).await
+    }
+
+    /// Apply an escalation response to an already-owned `HumanEscalationEvent`.
+    ///
+    /// This is the decision-application logic factored out of
+    /// `respond_to_escalation` so callers that have already atomically drained
+    /// entries from the store (e.g. `check_escalation_deadlines`) can process
+    /// owned values without re-running the find-remove step.
+    async fn apply_escalation_response(
+        &self,
+        escalation: HumanEscalationEvent,
+        response: HumanEscalationResponse,
+    ) -> DomainResult<()> {
+        use crate::services::command_bus::{
+            CommandEnvelope, CommandSource, DomainCommand, GoalCommand, TaskCommand,
         };
 
         let command_bus = self.get_command_bus().await;
@@ -274,7 +323,10 @@ where
                 if let Some(deadline) = revisit_after {
                     deferred.escalation.deadline = Some(*deadline);
                 }
-                self.escalation_store.write().await.push(deferred);
+                let deferred_id = deferred.id;
+                let mut store = self.escalation_store.write().await;
+                store.insert(deferred_id, deferred);
+                prune_escalation_store_locked(&mut store, chrono::Utc::now());
             }
         }
 
@@ -320,13 +372,22 @@ where
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
         let now = chrono::Utc::now();
+        // Atomically REMOVE timed-out entries under the write lock, then
+        // process the owned values. This closes the TOCTOU race: between
+        // reading the list and issuing the auto-response, another task could
+        // otherwise mutate (e.g. human `respond_to_escalation`) the same
+        // entry, causing duplicate processing or lost decisions.
         let timed_out: Vec<HumanEscalationEvent> = {
-            let store = self.escalation_store.read().await;
-            store
+            let mut store = self.escalation_store.write().await;
+            let ids: Vec<Uuid> = store
                 .iter()
-                .filter(|e| e.escalation.deadline.is_some_and(|d| now > d))
-                .cloned()
-                .collect()
+                .filter(|(_, e)| e.escalation.deadline.is_some_and(|d| now > d))
+                .map(|(id, _)| *id)
+                .collect();
+            let drained: Vec<HumanEscalationEvent> =
+                ids.iter().filter_map(|id| store.remove(id)).collect();
+            prune_escalation_store_locked(&mut store, now);
+            drained
         };
 
         for escalation in timed_out {
@@ -347,14 +408,18 @@ where
                 responded_at: now,
             };
 
-            if let Err(e) = self.respond_to_escalation(response, Some(event_tx)).await {
+            let escalation_id = escalation.id;
+            if let Err(e) = self.apply_escalation_response(escalation, response).await {
                 tracing::warn!(
                     "Failed to auto-respond to timed-out escalation {}: {}",
-                    escalation.id,
+                    escalation_id,
                     e
                 );
             }
         }
+        // event_tx is still part of the public signature for forward-compat;
+        // the EventBus bridge now handles the notification path.
+        let _ = event_tx;
 
         Ok(())
     }

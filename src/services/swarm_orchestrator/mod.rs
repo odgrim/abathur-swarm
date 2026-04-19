@@ -72,7 +72,7 @@ where
     pub(super) agent_semaphore: Arc<Semaphore>,
     pub(super) total_tokens: Arc<AtomicU64>,
     pub(super) active_goals_cache: Arc<RwLock<Vec<Goal>>>,
-    pub(super) escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
+    pub(super) escalation_store: Arc<RwLock<std::collections::HashMap<uuid::Uuid, HumanEscalationEvent>>>,
 
     // ---------------- Core services (always present) ----------------
     pub(super) audit_log: Arc<AuditLogService>,
@@ -198,7 +198,7 @@ where
             agent_semaphore: Arc::new(Semaphore::new(max_agents)),
             total_tokens: Arc::new(AtomicU64::new(0)),
             active_goals_cache: Arc::new(RwLock::new(Vec::new())),
-            escalation_store: Arc::new(RwLock::new(Vec::new())),
+            escalation_store: Arc::new(RwLock::new(std::collections::HashMap::new())),
 
             // ---------------- Core services (always present) ----------------
             audit_log: Arc::new(AuditLogService::with_defaults()),
