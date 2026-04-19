@@ -33,12 +33,48 @@ use crate::domain::models::convergence::*;
 use crate::domain::ports::{MemoryRepository, TrajectoryRepository};
 
 use super::ports::{
-    AdvisorDirective, ConvergenceAdvisor, ConvergenceRunOutcome, IterationGate, PolicyOverlay,
-    StrategyExecutionContext, StrategyExecutionOutput, StrategyExecutor,
+    AdvisorDirective, ConvergenceAdvisor, ConvergenceDomainEvent, ConvergenceRunOutcome,
+    IterationGate, PolicyOverlay, PromptBuilder, StrategyExecutionContext, StrategyExecutionOutput,
+    StrategyExecutor,
 };
 use super::{ConvergenceEngine, OverseerMeasurer};
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
+    /// Per-call variant of [`Self::run`] that takes the ports as arguments
+    /// instead of reading them from the engine's installed builder fields.
+    ///
+    /// Used by the orchestrator's `run_convergent_execution_inner` (PR 4b)
+    /// where the engine's caller already holds a constructed engine and
+    /// building up a new one via `with_executor` etc. is awkward.
+    ///
+    /// `effects`, `prompt_builder`, and `event_sink` are optional; when
+    /// `event_sink` is `None`, the engine's existing sink (default
+    /// `TracingEventSink`) is used.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_with_ports(
+        &self,
+        submission: TaskSubmission,
+        task_id: Uuid,
+        resume: Option<Uuid>,
+        executor: Arc<dyn StrategyExecutor>,
+        effects: Option<Arc<dyn super::ports::StrategyEffects>>,
+        advisor: Arc<dyn ConvergenceAdvisor>,
+        prompt_builder: Option<Arc<dyn PromptBuilder>>,
+        event_sink: Option<Arc<dyn super::ports::ConvergenceEventSink>>,
+    ) -> DomainResult<ConvergenceRunOutcome> {
+        self.run_inner(
+            submission,
+            task_id,
+            resume,
+            executor,
+            effects,
+            advisor,
+            prompt_builder,
+            event_sink,
+        )
+        .await
+    }
+
     /// Run a full convergence from submission to terminal outcome, driving the
     /// inner loop through the installed [`StrategyExecutor`],
     /// [`StrategyEffects`](super::ports::StrategyEffects), and
@@ -73,9 +109,38 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                     .to_string(),
             )
         })?;
-        // Effects is optional — FreshStart / RevertAndBranch still function
-        // without worktree side effects (matches pre-port behaviour for tests).
         let effects = self.effects.clone();
+        let prompt_builder: Option<Arc<dyn PromptBuilder>> = self.prompt_builder.clone();
+        self.run_inner(
+            submission,
+            task_id,
+            resume,
+            executor,
+            effects,
+            advisor,
+            prompt_builder,
+            None,
+        )
+        .await
+    }
+
+    /// Shared implementation used by [`Self::run`] and [`Self::run_with_ports`].
+    #[allow(clippy::too_many_arguments)]
+    async fn run_inner(
+        &self,
+        submission: TaskSubmission,
+        task_id: Uuid,
+        resume: Option<Uuid>,
+        executor: Arc<dyn StrategyExecutor>,
+        effects: Option<Arc<dyn super::ports::StrategyEffects>>,
+        advisor: Arc<dyn ConvergenceAdvisor>,
+        prompt_builder: Option<Arc<dyn PromptBuilder>>,
+        event_sink_override: Option<Arc<dyn super::ports::ConvergenceEventSink>>,
+    ) -> DomainResult<ConvergenceRunOutcome> {
+        // When a per-call sink is supplied, route events through it; otherwise
+        // use the engine's installed sink (default TracingEventSink).
+        let event_sink: Arc<dyn super::ports::ConvergenceEventSink> =
+            event_sink_override.unwrap_or_else(|| self.event_sink.clone());
 
         // ------------------------------------------------------------------
         // PREPARE or RESUME.
@@ -100,6 +165,10 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
         };
 
         trajectory.phase = ConvergencePhase::Iterating;
+
+        // Track attractor classification across iterations so we can emit
+        // AttractorTransitionChanged on real transitions.
+        let mut prev_attractor = trajectory.attractor_state.classification.clone();
 
         // ------------------------------------------------------------------
         // Main loop.
@@ -159,14 +228,15 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                 fx.on_revert(&trajectory, target).await?;
             }
 
-            // 4. Build prompt. The engine has no dependency on
-            // convergence_bridge::build_convergent_prompt (it lives in the
-            // orchestrator crate path), so we pass a minimal prompt through
-            // the executor. Orchestrator impls can use the trajectory +
-            // strategy to rebuild the rich prompt on their side. This matches
-            // the PR 2 port boundary: prompt construction is the executor's
-            // responsibility, the engine just hands it the context.
-            let prompt = default_prompt(&trajectory, &strategy);
+            // 4. Build prompt. Prefer the installed PromptBuilder port if
+            // present (orchestrator path); otherwise fall back to a minimal
+            // default for engine-only tests.
+            let iteration_seq = trajectory.observations.len() as u32;
+            let prompt = if let Some(ref pb) = prompt_builder {
+                pb.build(&trajectory, &strategy, iteration_seq).await?
+            } else {
+                default_prompt(&trajectory, &strategy)
+            };
 
             // 5. Execute strategy via StrategyExecutor.
             let strategy_context = self.build_strategy_context(&strategy, &trajectory);
@@ -174,7 +244,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                 trajectory: &trajectory,
                 strategy: &strategy,
                 strategy_context: &strategy_context,
-                iteration_seq: trajectory.observations.len() as u32,
+                iteration_seq,
                 prompt: &prompt,
             };
             let StrategyExecutionOutput {
@@ -219,11 +289,48 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                 .iterate_once(&mut trajectory, &mut bandit, &strategy, observation)
                 .await?;
 
+            // 7b. Emit AttractorTransitionChanged if classification changed.
+            let current_attractor = trajectory.attractor_state.classification.clone();
+            if self.attractor_type_name(&current_attractor)
+                != self.attractor_type_name(&prev_attractor)
+            {
+                event_sink
+                    .emit(ConvergenceDomainEvent::AttractorTransitionChanged {
+                        trajectory_id: trajectory.id,
+                        from: self.attractor_type_name(&prev_attractor).to_string(),
+                        to: self.attractor_type_name(&current_attractor).to_string(),
+                        confidence: trajectory.attractor_state.confidence,
+                    })
+                    .await;
+                prev_attractor = current_attractor.clone();
+            }
+
+            // 7c. Emit IterationCompleted with post-iteration metrics.
+            let (delta, level) = trajectory
+                .observations
+                .last()
+                .and_then(|o| o.metrics.as_ref())
+                .map(|m| (m.convergence_delta, m.convergence_level))
+                .unwrap_or((0.0, 0.0));
+            event_sink
+                .emit(ConvergenceDomainEvent::IterationCompleted {
+                    trajectory_id: trajectory.id,
+                    iteration: sequence,
+                    strategy: strategy.kind_name().to_string(),
+                    convergence_delta: delta,
+                    convergence_level: level,
+                    attractor_type: self
+                        .attractor_type_name(&trajectory.attractor_state.classification)
+                        .to_string(),
+                    budget_remaining_fraction: trajectory.budget.remaining_fraction(),
+                })
+                .await;
+
             // 8. Route loop control through the advisor.
             match control {
                 LoopControl::Continue => continue,
                 LoopControl::IntentCheck => {
-                    let directive = advisor.on_intent_check(&trajectory, sequence).await?;
+                    let directive = advisor.on_intent_check(&mut trajectory, sequence).await?;
                     if let Some(outcome) =
                         self.apply_directive(directive, &mut trajectory, &bandit).await?
                     {

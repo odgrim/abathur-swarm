@@ -113,6 +113,29 @@ pub enum ConvergenceDomainEvent {
     BanditQueryFailed {
         error: String,
     },
+
+    // -- run.rs (PR 4b) -------------------------------------------------
+    /// Emitted once per iteration of `engine.run()` with the post-iteration
+    /// metrics + bookkeeping. Orchestrator sinks translate this to
+    /// `EventPayload::ConvergenceIteration`.
+    IterationCompleted {
+        trajectory_id: uuid::Uuid,
+        iteration: u32,
+        strategy: String,
+        convergence_delta: f64,
+        convergence_level: f64,
+        attractor_type: String,
+        budget_remaining_fraction: f64,
+    },
+    /// Emitted when the engine detects an attractor-classification change
+    /// between two successive iterations. Orchestrator sinks translate this
+    /// to `EventPayload::ConvergenceAttractorTransition`.
+    AttractorTransitionChanged {
+        trajectory_id: uuid::Uuid,
+        from: String,
+        to: String,
+        confidence: f64,
+    },
 }
 
 impl ConvergenceDomainEvent {
@@ -276,6 +299,40 @@ impl ConvergenceEventSink for TracingEventSink {
             }
             ConvergenceDomainEvent::BanditQueryFailed { error } => {
                 tracing::warn!("Failed to query bandit memory: {}; using defaults", error);
+            }
+            ConvergenceDomainEvent::IterationCompleted {
+                trajectory_id,
+                iteration,
+                strategy,
+                convergence_delta,
+                convergence_level,
+                attractor_type,
+                budget_remaining_fraction,
+            } => {
+                tracing::info!(
+                    trajectory_id = %trajectory_id,
+                    iteration = iteration,
+                    strategy = %strategy,
+                    convergence_delta = convergence_delta,
+                    convergence_level = convergence_level,
+                    attractor_type = %attractor_type,
+                    budget_remaining_fraction = budget_remaining_fraction,
+                    "Convergence iteration completed",
+                );
+            }
+            ConvergenceDomainEvent::AttractorTransitionChanged {
+                trajectory_id,
+                from,
+                to,
+                confidence,
+            } => {
+                tracing::info!(
+                    trajectory_id = %trajectory_id,
+                    from = %from,
+                    to = %to,
+                    confidence = confidence,
+                    "Attractor classification changed",
+                );
             }
         }
     }
@@ -457,9 +514,15 @@ pub trait ConvergenceAdvisor: Send + Sync {
     /// Called when the engine's [`LoopControl::IntentCheck`] fires. The
     /// advisor runs its LLM intent verifier (or equivalent) and returns an
     /// [`AdvisorDirective`].
+    ///
+    /// The trajectory is passed `&mut` so the advisor can apply
+    /// specification amendments (e.g. from intent-verification results)
+    /// before returning the directive — subsequent iterations will then see
+    /// the enriched specification. Advisors that don't need to mutate the
+    /// trajectory may simply read it.
     async fn on_intent_check(
         &self,
-        trajectory: &Trajectory,
+        trajectory: &mut Trajectory,
         iteration: u32,
     ) -> DomainResult<AdvisorDirective>;
 
@@ -508,4 +571,28 @@ pub enum ConvergenceRunOutcome {
     /// A terminal failure distinct from `Exhausted` -- trapped, budget denied,
     /// etc. Message describes the condition.
     Failed(String),
+}
+
+// ---------------------------------------------------------------------------
+// PromptBuilder (PR 4b)
+// ---------------------------------------------------------------------------
+
+/// Port the engine uses to build the per-iteration substrate prompt.
+///
+/// The orchestrator's prompt construction depends on outer-loop state that
+/// does not live inside the `Trajectory` (the `Task`, the most-recent intent
+/// verification result, etc.), so the engine delegates to an implementor.
+/// Implementations typically wrap `convergence_bridge::build_convergent_prompt`.
+///
+/// The engine calls `build(...)` at the top of each iteration (after strategy
+/// selection, before strategy execution) and passes the returned string as the
+/// `StrategyExecutionContext::prompt` field.
+#[async_trait]
+pub trait PromptBuilder: Send + Sync {
+    async fn build(
+        &self,
+        trajectory: &Trajectory,
+        strategy: &StrategyKind,
+        iteration: u32,
+    ) -> DomainResult<String>;
 }

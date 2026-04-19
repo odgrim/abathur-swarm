@@ -28,8 +28,9 @@ mod run;
 
 pub use ports::{
     AdvisorDirective, ConvergenceAdvisor, ConvergenceDomainEvent, ConvergenceEventSink,
-    ConvergenceRunOutcome, IterationGate, NullEventSink, PolicyOverlay, StrategyEffects,
-    StrategyExecutionContext, StrategyExecutionOutput, StrategyExecutor, TracingEventSink,
+    ConvergenceRunOutcome, IterationGate, NullEventSink, PolicyOverlay, PromptBuilder,
+    StrategyEffects, StrategyExecutionContext, StrategyExecutionOutput, StrategyExecutor,
+    TracingEventSink,
 };
 
 #[cfg(test)]
@@ -154,6 +155,14 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     /// to `run()`.
     #[allow(dead_code)]
     pub(super) advisor: Option<Arc<dyn ConvergenceAdvisor>>,
+    /// Optional prompt-builder port.
+    ///
+    /// Used by [`ConvergenceEngine::run`] (PR 4b onward) to build the
+    /// per-iteration substrate prompt. When unset, `run()` falls back to a
+    /// minimal default prompt derived from the trajectory specification,
+    /// matching the Phase A engine-owned test behaviour.
+    #[allow(dead_code)]
+    pub(super) prompt_builder: Option<Arc<dyn PromptBuilder>>,
 }
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
@@ -180,6 +189,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             executor: None,
             effects: None,
             advisor: None,
+            prompt_builder: None,
         }
     }
 
@@ -225,6 +235,16 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
     /// [`ConvergenceEngine::converge`] ignores this field.
     pub fn with_advisor<A: ConvergenceAdvisor + 'static>(mut self, a: Arc<A>) -> Self {
         self.advisor = Some(a);
+        self
+    }
+
+    /// Attach a [`PromptBuilder`] implementation (builder-style).
+    ///
+    /// The engine's [`ConvergenceEngine::run`] entrypoint calls the prompt
+    /// builder once per iteration to build the substrate prompt. When unset
+    /// `run()` uses a minimal fallback prompt.
+    pub fn with_prompt_builder<P: PromptBuilder + 'static>(mut self, p: Arc<P>) -> Self {
+        self.prompt_builder = Some(p);
         self
     }
 
