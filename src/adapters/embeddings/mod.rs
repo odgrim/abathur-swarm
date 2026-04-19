@@ -17,7 +17,7 @@ pub use openai::{OpenAiEmbeddingConfig, OpenAiEmbeddingProvider};
 /// leaves `v` untouched. This matches what OpenAI `text-embedding-3-small`
 /// returns in practice and gives downstream cosine-similarity / centroid-
 /// averaging code a clean invariant to depend on.
-pub fn normalize_unit(v: &mut Vec<f32>) {
+pub fn normalize_unit(v: &mut [f32]) {
     if v.is_empty() {
         return;
     }
