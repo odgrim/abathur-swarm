@@ -44,7 +44,7 @@ use super::{try_update_task, update_with_retry};
 // GoalCreatedHandler
 // ============================================================================
 
-/// When a goal starts, refresh the active goals cache.
+/// When a goal starts (locally or via federation), refresh the active goals cache.
 pub struct GoalCreatedHandler<G: GoalRepository> {
     goal_repo: Arc<G>,
     active_goals_cache: Arc<RwLock<Vec<Goal>>>,
@@ -65,9 +65,16 @@ impl<G: GoalRepository + 'static> EventHandler for GoalCreatedHandler<G> {
         HandlerMetadata {
             id: HandlerId::new(),
             name: "GoalCreatedHandler".to_string(),
+            // Note: `FederatedGoalCreated` has category `Federation` (not `Goal`),
+            // and `EventFilter::matches` AND-combines the `categories` and
+            // `payload_types` lists — so we must include `Federation` here or
+            // federation-originated goal creations would be silently filtered out.
             filter: EventFilter::new()
-                .categories(vec![EventCategory::Goal])
-                .payload_types(vec!["GoalStarted".to_string()]),
+                .categories(vec![EventCategory::Goal, EventCategory::Federation])
+                .payload_types(vec![
+                    "GoalStarted".to_string(),
+                    "FederatedGoalCreated".to_string(),
+                ]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
             critical: false,

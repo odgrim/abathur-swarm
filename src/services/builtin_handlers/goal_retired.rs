@@ -44,9 +44,10 @@ use super::{try_update_task, update_with_retry};
 // GoalRetiredHandler
 // ============================================================================
 
-/// When a goal is retired, invalidate the active goals cache and emit a
-/// summary event. Does not cancel tasks (goals and tasks are decoupled
-/// in this architecture — tasks do not carry a goal_id field).
+/// When a goal's state changes (status transition, domain list update, or
+/// deletion), invalidate the active goals cache so agent prompts reflect the
+/// current set of active goals. Does not cancel tasks (goals and tasks are
+/// decoupled in this architecture — tasks do not carry a goal_id field).
 pub struct GoalRetiredHandler<G: GoalRepository> {
     goal_repo: Arc<G>,
     active_goals_cache: Arc<RwLock<Vec<Goal>>>,
@@ -67,17 +68,17 @@ impl<G: GoalRepository + 'static> EventHandler for GoalRetiredHandler<G> {
         HandlerMetadata {
             id: HandlerId::new(),
             name: "GoalRetiredHandler".to_string(),
-            filter: EventFilter {
-                categories: vec![EventCategory::Goal],
-                payload_types: vec!["GoalStatusChanged".to_string()],
-                custom_predicate: Some(Arc::new(|event| {
-                    matches!(
-                        &event.payload,
-                        EventPayload::GoalStatusChanged { to_status, .. } if to_status == "retired"
-                    )
-                })),
-                ..Default::default()
-            },
+            // Fire on any goal state change that could affect the cached set of
+            // active goals: any status transition (not just retirement), domain
+            // list updates, and deletions. The handler is idempotent — it just
+            // re-fetches from the repo — so broad coverage is cheap.
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Goal])
+                .payload_types(vec![
+                    "GoalStatusChanged".to_string(),
+                    "GoalDomainsUpdated".to_string(),
+                    "GoalDeleted".to_string(),
+                ]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::CircuitBreak,
             critical: false,
@@ -89,17 +90,14 @@ impl<G: GoalRepository + 'static> EventHandler for GoalRetiredHandler<G> {
         event: &UnifiedEvent,
         _ctx: &HandlerContext,
     ) -> Result<Reaction, String> {
-        let goal_id = match event.goal_id {
-            Some(id) => id,
-            None => return Ok(Reaction::None),
-        };
-
         tracing::info!(
-            "GoalRetiredHandler: goal {} retired, refreshing active goals cache",
-            goal_id
+            "GoalRetiredHandler: goal {:?} state changed ({}), refreshing active goals cache",
+            event.goal_id,
+            event.payload.variant_name()
         );
 
-        // Refresh the active goals cache to exclude the retired goal
+        // Refresh the active goals cache to reflect the current set of active goals.
+        // DB fetch happens before the write lock so we don't hold the lock across await.
         let goals = self
             .goal_repo
             .get_active_with_constraints()
@@ -110,8 +108,6 @@ impl<G: GoalRepository + 'static> EventHandler for GoalRetiredHandler<G> {
             *cache = goals;
         }
 
-        // Emit a GoalStatusChanged event is already the triggering event;
-        // we log for observability and emit no additional events.
         Ok(Reaction::None)
     }
 }
