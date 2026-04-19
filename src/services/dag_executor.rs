@@ -1384,4 +1384,170 @@ mod tests {
         let executor = setup_executor().await;
         assert_eq!(executor.status().await, ExecutionStatus::Pending);
     }
+
+    // -------------------------------------------------------------------------
+    // Wave construction / ordering
+    //
+    // A (no deps), B depends on A, C depends on A+B. execution_waves() must
+    // place them in three disjoint waves in that order. execute_with_events
+    // then actually runs them through the mock substrate end-to-end, which
+    // guards the full DAG→wave→execution plumbing — not just the graph
+    // topology (which has its own coverage in domain/models/dag.rs).
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_three_level_wave_construction_and_execution() {
+        use crate::domain::models::Task;
+
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+        let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
+        let config = ExecutorConfig::default();
+        let executor =
+            DagExecutor::new(task_repo.clone(), agent_repo, substrate, config).with_goal_repo(goal_repo);
+
+        // Build: A ← B ← C, with C also depending on A.
+        let a = Task::new("A");
+        let mut b = Task::new("B");
+        b.depends_on = vec![a.id];
+        let mut c = Task::new("C");
+        c.depends_on = vec![a.id, b.id];
+
+        task_repo.create(&a).await.unwrap();
+        task_repo.create(&b).await.unwrap();
+        task_repo.create(&c).await.unwrap();
+
+        let dag = TaskDag::from_tasks(vec![a.clone(), b.clone(), c.clone()]);
+
+        // Direct topology check.
+        let waves = dag.execution_waves().expect("valid DAG");
+        assert_eq!(waves.len(), 3, "expected 3 waves for linear-ish chain");
+        assert_eq!(waves[0], vec![a.id], "wave 0 must contain only A");
+        assert_eq!(waves[1], vec![b.id], "wave 1 must contain only B");
+        assert_eq!(waves[2], vec![c.id], "wave 2 must contain only C");
+
+        // End-to-end: all three tasks should execute and complete under mock.
+        let results = executor.execute(&dag).await.unwrap();
+        assert_eq!(results.total_tasks, 3);
+        assert_eq!(results.completed_tasks, 3);
+        assert_eq!(results.failed_tasks, 0);
+        assert_eq!(results.status(), ExecutionStatus::Completed);
+    }
+
+    // -------------------------------------------------------------------------
+    // Active-goals snapshot semantics
+    //
+    // DagExecutor snapshots active goals into `active_goals_cache` via
+    // refresh_active_goals_cache() at the top of execute_with_events(). Each
+    // wave then clones from that cache — goals added to the repo mid-run
+    // must NOT appear in later waves of the same execution. This is task #32
+    // intent. Here we exercise the cache mechanic directly: refresh, add a
+    // goal, and confirm the cache has not grown until refreshed again.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_active_goals_cache_is_snapshot_not_live_view() {
+        use crate::domain::models::Goal;
+        use crate::domain::ports::GoalRepository;
+
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+        let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
+        let config = ExecutorConfig::default();
+        let executor = DagExecutor::new(task_repo, agent_repo, substrate, config)
+            .with_goal_repo(goal_repo.clone());
+
+        // Seed one goal and refresh.
+        let goal_a = Goal::new("goal-a", "first goal");
+        goal_repo.create(&goal_a).await.unwrap();
+        executor.refresh_active_goals_cache().await.unwrap();
+        {
+            let cache = executor.active_goals_cache.read().await;
+            assert_eq!(cache.len(), 1, "cache must hold initial goal");
+            assert_eq!(cache[0].id, goal_a.id);
+        }
+
+        // Add a second goal WITHOUT refreshing — cache must remain stale.
+        let goal_b = Goal::new("goal-b", "second goal added mid-run");
+        goal_repo.create(&goal_b).await.unwrap();
+        {
+            let cache = executor.active_goals_cache.read().await;
+            assert_eq!(
+                cache.len(),
+                1,
+                "cache must NOT auto-refresh when new goals arrive"
+            );
+            assert_eq!(cache[0].id, goal_a.id);
+        }
+
+        // Explicit refresh picks up the new goal.
+        executor.refresh_active_goals_cache().await.unwrap();
+        {
+            let cache = executor.active_goals_cache.read().await;
+            assert_eq!(cache.len(), 2, "explicit refresh must pick up new goals");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Error during wave: with fail_fast enabled, a failing wave must abort
+    // subsequent waves. The mock substrate is configured to fail the first
+    // task; the dependent task in wave 2 must never run.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fail_fast_stops_subsequent_waves() {
+        use crate::adapters::substrates::mock::MockResponse;
+        use crate::domain::models::Task;
+
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+
+        let mock = MockSubstrate::new();
+        // Build tasks first so we can target the first one by id.
+        let a = Task::new("A (fails)");
+        let mut b = Task::new("B (would run after A)");
+        b.depends_on = vec![a.id];
+
+        mock.set_response_for_task(a.id, MockResponse::failure("boom")).await;
+        let substrate: Arc<dyn Substrate> = Arc::new(mock);
+
+        let config = ExecutorConfig {
+            fail_fast: true,
+            max_retries: 0,
+            ..Default::default()
+        };
+        let executor = DagExecutor::new(task_repo.clone(), agent_repo, substrate, config)
+            .with_goal_repo(goal_repo);
+
+        task_repo.create(&a).await.unwrap();
+        task_repo.create(&b).await.unwrap();
+
+        let dag = TaskDag::from_tasks(vec![a.clone(), b.clone()]);
+        let results = executor.execute(&dag).await.unwrap();
+
+        assert_eq!(results.total_tasks, 2);
+        assert_eq!(results.failed_tasks, 1, "A must be recorded as failed");
+        assert_eq!(
+            results.completed_tasks, 0,
+            "no tasks should have completed"
+        );
+        // B skipped: with fail_fast, wave 1 aborts before executing B.
+        assert!(
+            results.skipped_tasks >= 1,
+            "B must be skipped (fail_fast aborts wave 1); got {}",
+            results.skipped_tasks
+        );
+        assert!(!results
+            .task_results
+            .iter()
+            .any(|r| r.task_id == b.id && r.status == TaskStatus::Complete),
+            "B must not have completed after A failed under fail_fast"
+        );
+    }
 }

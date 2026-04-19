@@ -2053,4 +2053,138 @@ mod tests {
             "same repo path must return the cached lock instance"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // find_root_ancestor_id — root / orphan / chain handling
+    //
+    // Regression guard for the unwrap-on-None panic previously in
+    // merge_subtask_into_feature_branch: an orphan (parent_id = None) task
+    // must not panic when callers walk the ancestor chain. Also verifies that
+    // a 3-level chain traverses to the root.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn find_root_ancestor_of_root_task_returns_self() {
+        use crate::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
+        use crate::domain::models::Task;
+
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = SqliteTaskRepository::new(pool);
+
+        // Root task: parent_id = None.
+        let root = Task::new("root task");
+        assert!(root.parent_id.is_none());
+        task_repo.create(&root).await.unwrap();
+
+        // Must return the task's own id, not panic, not error.
+        let resolved = find_root_ancestor_id(root.id, &task_repo).await;
+        assert_eq!(
+            resolved, root.id,
+            "root-task (parent_id=None) must resolve to its own id"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_root_ancestor_of_three_level_chain_returns_root() {
+        use crate::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
+        use crate::domain::models::Task;
+
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = SqliteTaskRepository::new(pool);
+
+        // Build: root → mid → leaf
+        let root = Task::new("root");
+        let mut mid = Task::new("mid");
+        mid.parent_id = Some(root.id);
+        let mut leaf = Task::new("leaf");
+        leaf.parent_id = Some(mid.id);
+
+        task_repo.create(&root).await.unwrap();
+        task_repo.create(&mid).await.unwrap();
+        task_repo.create(&leaf).await.unwrap();
+
+        // All three must resolve to `root.id`.
+        assert_eq!(find_root_ancestor_id(leaf.id, &task_repo).await, root.id);
+        assert_eq!(find_root_ancestor_id(mid.id, &task_repo).await, root.id);
+        assert_eq!(find_root_ancestor_id(root.id, &task_repo).await, root.id);
+    }
+
+    #[tokio::test]
+    async fn find_root_ancestor_falls_back_to_task_id_on_missing_task() {
+        // Missing task: the repo returns an error from find_root_task_id;
+        // the helper wraps unwrap_or(task_id) so callers never see a panic
+        // even if the DB lookup fails. Guards against reintroducing an
+        // unwrap() on the repository result.
+        use crate::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
+
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = SqliteTaskRepository::new(pool);
+
+        let bogus = Uuid::new_v4();
+        assert_eq!(find_root_ancestor_id(bogus, &task_repo).await, bogus);
+    }
+
+    // -------------------------------------------------------------------------
+    // auto_commit_worktree — exercises the rewritten `git add -A` error match.
+    //
+    // The old `add.is_err() || !add.unwrap().status.success()` form panicked
+    // on Err (||'s short-circuit requires `true`, so the Err branch still
+    // ran .unwrap()). These tests drive the function through success and
+    // no-op paths end-to-end to guarantee the explicit-match rewrite stays
+    // panic-free under real git invocations.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn auto_commit_worktree_returns_false_on_clean_repo() {
+        let dir = init_test_repo();
+        let p = dir.path();
+
+        let result = auto_commit_worktree(p.to_str().unwrap(), Uuid::new_v4()).await;
+        assert!(!result, "clean repo must not produce a commit");
+    }
+
+    #[tokio::test]
+    async fn auto_commit_worktree_commits_uncommitted_changes() {
+        let dir = init_test_repo();
+        let p = dir.path();
+
+        // Introduce an uncommitted change.
+        std::fs::write(p.join("file.txt"), "dirty").unwrap();
+        assert!(!is_clean(p));
+
+        let result = auto_commit_worktree(p.to_str().unwrap(), Uuid::new_v4()).await;
+        assert!(result, "expected auto_commit_worktree to create a commit");
+        assert!(
+            is_clean(p),
+            "working tree should be clean after auto-commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_commit_worktree_removes_transient_artifacts_before_commit() {
+        // Transient artifacts (PLAN.md, REVIEW.md, …) must be stripped prior
+        // to auto-commit — we don't want agent scratch surviving into main.
+        let dir = init_test_repo();
+        let p = dir.path();
+
+        std::fs::write(p.join("PLAN.md"), "scratch").unwrap();
+        std::fs::write(p.join("real.txt"), "real work").unwrap();
+
+        let result = auto_commit_worktree(p.to_str().unwrap(), Uuid::new_v4()).await;
+        assert!(result, "expected a commit for the real file");
+        assert!(!p.join("PLAN.md").exists(), "transient PLAN.md must be removed");
+        assert!(p.join("real.txt").exists(), "legitimate file must remain");
+        assert!(is_clean(p));
+    }
+
+    #[tokio::test]
+    async fn auto_commit_worktree_returns_false_on_non_git_path() {
+        // Non-git directory: git status prints nothing to stdout, so the
+        // early-return "empty status" branch kicks in and we return false
+        // without panicking. Guards against reintroducing an unwrap on the
+        // Command result.
+        let dir = tempfile::tempdir().unwrap();
+        let result = auto_commit_worktree(dir.path().to_str().unwrap(), Uuid::new_v4()).await;
+        assert!(!result);
+    }
 }
