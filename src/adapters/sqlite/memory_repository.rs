@@ -181,7 +181,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         }
 
         let rows: Vec<MemoryRow> = q.fetch_all(&self.pool).await?;
-        rows.into_iter().map(|r| r.try_into()).collect()
+        Ok(super::rows_into_lossy(rows, "memories.query"))
     }
 
     async fn search(&self, query: &str, namespace: Option<&str>, limit: usize) -> DomainResult<Vec<Memory>> {
@@ -221,7 +221,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                 .await?
         };
 
-        rows.into_iter().map(|r| r.try_into()).collect()
+        Ok(super::rows_into_lossy(rows, "memories.search"))
     }
 
     async fn list_by_tier(&self, tier: MemoryTier) -> DomainResult<Vec<Memory>> {
@@ -232,7 +232,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(|r| r.try_into()).collect()
+        Ok(super::rows_into_lossy(rows, "memories.list_by_tier"))
     }
 
     async fn list_by_namespace(&self, namespace: &str) -> DomainResult<Vec<Memory>> {
@@ -243,7 +243,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(|r| r.try_into()).collect()
+        Ok(super::rows_into_lossy(rows, "memories.list_by_namespace"))
     }
 
     async fn get_expired(&self) -> DomainResult<Vec<Memory>> {
@@ -255,7 +255,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(|r| r.try_into()).collect()
+        Ok(super::rows_into_lossy(rows, "memories.get_expired"))
     }
 
     async fn prune_expired(&self) -> DomainResult<u64> {

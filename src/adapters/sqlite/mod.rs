@@ -75,6 +75,29 @@ pub fn parse_json_or_default<T: serde::de::DeserializeOwned + Default>(s: Option
         .map(|opt| opt.unwrap_or_default())
 }
 
+/// Convert a Vec of DB rows into domain objects, skipping (and warning about)
+/// any row that fails to deserialize. Intended for list-style queries where a
+/// single corrupt row should not poison the entire result set. Single-row
+/// getters should use the normal `try_into` path so callers see the error.
+pub fn rows_into_lossy<R, T>(rows: Vec<R>, source: &'static str) -> Vec<T>
+where
+    R: TryInto<T, Error = DomainError>,
+{
+    rows.into_iter()
+        .filter_map(|r| match r.try_into() {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    source = source,
+                    error = %e,
+                    "skipping corrupt row during list query"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {
     #[error("Connection error: {0}")]

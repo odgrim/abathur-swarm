@@ -793,13 +793,13 @@ where
         }
     }
 
-    // Get system prompt, tools, and constraints from agent template
+    // Get system prompt, tools, constraints, and max_turns from agent template
     let agent_type = task.agent_type.as_deref().unwrap_or("default");
-    let (base_system_prompt, agent_tools, agent_constraints) = match agent_repo.get_template_by_name(agent_type).await {
+    let (base_system_prompt, agent_tools, agent_constraints, template_max_turns) = match agent_repo.get_template_by_name(agent_type).await {
         Ok(Some(template)) => {
             let tools: Vec<String> = template.tools.iter().map(|t| t.name.clone()).collect();
             let constraints = template.constraints.clone();
-            (template.system_prompt, tools, constraints)
+            (template.system_prompt, tools, constraints, template.max_turns)
         }
         _ => (
             format!(
@@ -810,6 +810,7 @@ where
             ),
             vec![], // Empty means use default tool set
             vec![], // No constraints
+            0,     // Sentinel: no template override, fall back to config default
         ),
     };
 
@@ -878,9 +879,17 @@ where
         iteration_context
     );
 
+    // Respect the agent template's declared max_turns when present;
+    // fall back to the executor's default only if the template didn't set one.
+    let effective_max_turns = if template_max_turns > 0 {
+        template_max_turns
+    } else {
+        config.default_max_turns
+    };
+
     // Build substrate config with MCP servers and agent tools
     let mut substrate_config = SubstrateConfig::default()
-        .with_max_turns(config.default_max_turns)
+        .with_max_turns(effective_max_turns)
         .with_allowed_tools(agent_tools);
     if let Some(ref url) = config.memory_server_url {
         substrate_config = substrate_config.with_mcp_server(url.clone());

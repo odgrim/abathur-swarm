@@ -231,11 +231,9 @@ impl TaskRepository for SqliteTaskRepository {
         }
 
         let rows: Vec<TaskRow> = q.fetch_all(&self.pool).await?;
-        let mut tasks = Vec::new();
-        for row in rows {
-            let mut task: Task = row.try_into()?;
-            self.load_dependencies(&mut task).await?;
-            tasks.push(task);
+        let mut tasks: Vec<Task> = super::rows_into_lossy(rows, "tasks.list");
+        for task in tasks.iter_mut() {
+            self.load_dependencies(task).await?;
         }
         Ok(tasks)
     }
@@ -263,11 +261,9 @@ impl TaskRepository for SqliteTaskRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut tasks = Vec::new();
-        for row in rows {
-            let mut task: Task = row.try_into()?;
-            self.load_dependencies(&mut task).await?;
-            tasks.push(task);
+        let mut tasks: Vec<Task> = super::rows_into_lossy(rows, "tasks.get_ready_tasks");
+        for task in tasks.iter_mut() {
+            self.load_dependencies(task).await?;
         }
         Ok(tasks)
     }
@@ -285,7 +281,7 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task_id.to_string());
         let rows: Vec<TaskRow> = exec_tx!(&self.pool, deps_q, fetch_all)?;
 
-        rows.into_iter().map(|r| r.try_into()).collect()
+        Ok(super::rows_into_lossy(rows, "tasks.get_dependencies"))
     }
 
     async fn get_dependents(&self, task_id: Uuid) -> DomainResult<Vec<Task>> {
@@ -298,7 +294,7 @@ impl TaskRepository for SqliteTaskRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(|r| r.try_into()).collect()
+        Ok(super::rows_into_lossy(rows, "tasks.get_dependents"))
     }
 
     async fn add_dependency(&self, task_id: Uuid, depends_on: Uuid) -> DomainResult<()> {

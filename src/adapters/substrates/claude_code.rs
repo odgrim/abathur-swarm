@@ -269,10 +269,14 @@ impl ClaudeCodeSubstrate {
                     })
                     .unwrap_or_else(|| "Completed".to_string());
 
-                // Check for error_max_turns subtype
-                let is_max_turns = json.get("subtype")
-                    .and_then(|s| s.as_str())
-                    == Some("error_max_turns");
+                // A result event can carry a terminal error: either `is_error: true`
+                // or a `subtype` starting with "error". We must NOT treat these as
+                // SessionComplete, otherwise the swarm collapses real failures
+                // (max_turns, mid-execution crashes) into successful completions.
+                let subtype = json.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                let is_error_flag = json.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+                let is_max_turns = subtype == "error_max_turns";
+                let is_other_error = is_error_flag || subtype.starts_with("error");
 
                 // Extract final usage if present
                 if let Some(usage) = json.get("usage") {
@@ -291,6 +295,19 @@ impl ClaudeCodeSubstrate {
 
                 if is_max_turns {
                     Some(SubstrateOutput::MaxTurnsExceeded { result })
+                } else if is_other_error {
+                    // Pull num_turns into the message so operators can distinguish
+                    // "crashed at turn N" from other failures during triage —
+                    // otherwise identical error strings hash to the same value and
+                    // masquerade as semantic drift.
+                    let num_turns = json.get("num_turns").and_then(|n| n.as_u64());
+                    let turns_suffix = num_turns
+                        .map(|n| format!(" (after {} turns)", n))
+                        .unwrap_or_default();
+                    let subtype_label = if subtype.is_empty() { "error" } else { subtype };
+                    Some(SubstrateOutput::Error {
+                        message: format!("{}: {}{}", subtype_label, result, turns_suffix),
+                    })
                 } else {
                     Some(SubstrateOutput::SessionComplete { result })
                 }
@@ -404,6 +421,7 @@ impl Substrate for ClaudeCodeSubstrate {
 
         // Set task-specific environment
         cmd.env("ABATHUR_TASK_ID", request.task_id.to_string());
+        cmd.env("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "1");
 
         let mut child = cmd.spawn()
             .map_err(|e| DomainError::ValidationFailed(format!("Failed to spawn claude: {}", e)))?;
@@ -613,6 +631,7 @@ impl Substrate for ClaudeCodeSubstrate {
 
         // Set task-specific environment
         cmd.env("ABATHUR_TASK_ID", request.task_id.to_string());
+        cmd.env("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "1");
 
         let mut child = cmd.spawn()
             .map_err(|e| DomainError::ValidationFailed(format!("Failed to spawn claude: {}", e)))?;
@@ -966,6 +985,23 @@ mod tests {
         let line = r#"{"type":"result","result":"Task completed successfully","cost_usd":0.3,"num_turns":5}"#;
         let output = ClaudeCodeSubstrate::parse_stream_json(line);
         assert!(matches!(output, Some(SubstrateOutput::SessionComplete { result }) if result == "Task completed successfully"));
+    }
+
+    #[test]
+    fn test_parse_stream_json_result_is_error_flag() {
+        // A `result` event carrying is_error:true (no max_turns subtype) must not
+        // be reported as SessionComplete — regression guard for the bug where
+        // mid-execution crashes collapsed into successful completions.
+        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":17}"#;
+        let output = ClaudeCodeSubstrate::parse_stream_json(line);
+        match output {
+            Some(SubstrateOutput::Error { message }) => {
+                assert!(message.contains("error_during_execution"), "subtype missing: {}", message);
+                assert!(message.contains("boom"), "result body missing: {}", message);
+                assert!(message.contains("17 turns"), "num_turns missing: {}", message);
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
     }
 
     #[test]

@@ -72,9 +72,13 @@ CREATE TABLE IF NOT EXISTS memories (
     expires_at TEXT,
     metadata TEXT,
     content TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    last_accessed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Timestamps are RFC3339 strings. No SQLite `datetime('now')` default:
+    -- it emits "YYYY-MM-DD HH:MM:SS" (space separator, no TZ), which is not
+    -- RFC3339 and poisons chrono::DateTime::parse_from_rfc3339. Callers must
+    -- supply these explicitly — NOT NULL makes omissions fail at insert time.
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_accessed_at TEXT NOT NULL,
     UNIQUE(namespace, key, version)
 );
 
