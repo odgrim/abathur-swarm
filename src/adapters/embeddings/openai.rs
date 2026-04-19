@@ -114,7 +114,18 @@ impl OpenAiEmbeddingProvider {
         let mut data = result.data;
         data.sort_by_key(|d| d.index);
 
-        Ok(data.into_iter().map(|d| d.embedding).collect())
+        // Enforce the module-level invariant that adapter-returned vectors are
+        // unit-length. OpenAI `text-embedding-3-small` returns unit vectors in
+        // practice, but normalizing explicitly makes downstream code (cosine
+        // similarity, centroid merge) able to depend on it.
+        Ok(data
+            .into_iter()
+            .map(|d| {
+                let mut v = d.embedding;
+                super::normalize_unit(&mut v);
+                v
+            })
+            .collect())
     }
 }
 

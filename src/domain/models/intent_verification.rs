@@ -1839,9 +1839,13 @@ impl EmbeddedGapFingerprint {
     ///
     /// Updates the embedding via weighted average `E' = (E*n + I) / (n+1)`
     /// so that repeated merges converge the fingerprint toward the centroid
-    /// of the gaps it represents. If the existing embedding was approximately
-    /// unit-length (as OpenAI `text-embedding-3-small` returns), the result
-    /// is renormalized so cosine similarity stays stable across merges.
+    /// of the gaps it represents. The result is always renormalized to unit
+    /// length so cosine similarity stays stable across merges.
+    ///
+    /// This relies on the invariant that embeddings enter the pipeline
+    /// already L2-normalized — see `src/adapters/embeddings/mod.rs`
+    /// (`normalize_unit`). All production providers enforce it; tests that
+    /// synthesize `IntentGap::embedding` directly should supply unit vectors.
     pub fn merge(&mut self, gap: &IntentGap) {
         match (self.embedding.as_mut(), gap.embedding.as_ref()) {
             (Some(existing), Some(incoming)) => {
@@ -1859,25 +1863,18 @@ impl EmbeddedGapFingerprint {
                             *e = *i;
                         }
                     } else {
-                        // Check whether the inputs were approximately unit-length
-                        // BEFORE averaging so we can preserve that invariant.
-                        let existing_norm_sq: f32 = existing.iter().map(|x| x * x).sum();
-                        let incoming_norm_sq: f32 = incoming.iter().map(|x| x * x).sum();
-                        let inputs_unit = (existing_norm_sq - 1.0).abs() < 1e-3
-                            && (incoming_norm_sq - 1.0).abs() < 1e-3;
                         // Weighted average: E' = (E*n + I) / (n+1)
                         for (e, i) in existing.iter_mut().zip(incoming.iter()) {
                             *e = (*e * n + *i) / (n + 1.0);
                         }
-                        // Re-normalize only if the inputs carried the unit-length
-                        // invariant, keeping cosine similarity stable across merges.
-                        if inputs_unit {
-                            let norm_sq: f32 = existing.iter().map(|x| x * x).sum();
-                            let norm = norm_sq.sqrt();
-                            if norm > 0.0 && norm.is_finite() {
-                                for e in existing.iter_mut() {
-                                    *e /= norm;
-                                }
+                        // Unconditionally renormalize. Adapter-level
+                        // normalize_unit guarantees unit-length inputs, so the
+                        // centroid is always a well-defined direction.
+                        let norm_sq: f32 = existing.iter().map(|x| x * x).sum();
+                        let norm = norm_sq.sqrt();
+                        if norm > 0.0 && norm.is_finite() {
+                            for e in existing.iter_mut() {
+                                *e /= norm;
                             }
                         }
                     }
