@@ -123,7 +123,10 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
         }
     };
 
-    // 1. Abort in-progress merge
+    // 1. Abort in-progress merge. A failure here means we CANNOT guarantee a
+    // clean state, so return false immediately rather than fall through to the
+    // final status probe (which would misreport "clean" whenever the abort
+    // actually failed but git status happened to look empty).
     if git_dir.join("MERGE_HEAD").exists() {
         tracing::warn!(path = %repo_path.display(), "ensure_clean_working_dir: aborting in-progress merge");
         let result = Command::new("git")
@@ -137,9 +140,11 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
                     stderr = %String::from_utf8_lossy(&o.stderr),
                     "ensure_clean_working_dir: merge --abort failed"
                 );
+                return false;
             }
             Err(e) => {
                 tracing::error!(error = %e, "ensure_clean_working_dir: failed to run merge --abort");
+                return false;
             }
             _ => {}
         }
@@ -159,9 +164,11 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
                     stderr = %String::from_utf8_lossy(&o.stderr),
                     "ensure_clean_working_dir: rebase --abort failed"
                 );
+                return false;
             }
             Err(e) => {
                 tracing::error!(error = %e, "ensure_clean_working_dir: failed to run rebase --abort");
+                return false;
             }
             _ => {}
         }
@@ -181,9 +188,11 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
                     stderr = %String::from_utf8_lossy(&o.stderr),
                     "ensure_clean_working_dir: cherry-pick --abort failed"
                 );
+                return false;
             }
             Err(e) => {
                 tracing::error!(error = %e, "ensure_clean_working_dir: failed to run cherry-pick --abort");
+                return false;
             }
             _ => {}
         }
@@ -204,7 +213,9 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
     if is_dirty {
         tracing::warn!(path = %repo_path.display(), "ensure_clean_working_dir: working directory is dirty — resetting");
 
-        // Reset staged and unstaged changes
+        // Reset staged and unstaged changes. A failed reset means we have no
+        // confidence the working dir is clean — surface that instead of
+        // relying on the subsequent status probe.
         let reset_result = Command::new("git")
             .args(["reset", "--hard", "HEAD"])
             .current_dir(repo_path)
@@ -217,6 +228,7 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
                     stderr = %String::from_utf8_lossy(&o.stderr),
                     "ensure_clean_working_dir: git reset --hard HEAD failed"
                 );
+                return false;
             }
             Err(e) => {
                 tracing::error!(
@@ -224,6 +236,7 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
                     error = %e,
                     "ensure_clean_working_dir: failed to run git reset --hard HEAD"
                 );
+                return false;
             }
             _ => {}
         }
@@ -328,12 +341,33 @@ async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> 
                     return false;
                 }
                 tracing::warn!(attempt, base_ref, %stderr, "git push rejected, fetching and rebasing");
-                // Fetch latest
-                let _ = Command::new("git")
+                // Fetch latest. If the fetch itself fails, rebasing would be done
+                // onto stale local state — which is exactly the bug we're trying
+                // to prevent. Bail out instead of silently retrying on stale refs.
+                let fetch = Command::new("git")
                     .args(["fetch", "origin", base_ref])
                     .current_dir(repo_path)
                     .output()
                     .await;
+                match &fetch {
+                    Ok(o) if !o.status.success() => {
+                        tracing::warn!(
+                            base_ref,
+                            stderr = %String::from_utf8_lossy(&o.stderr),
+                            "push_with_retry: git fetch failed — aborting retry to avoid rebasing on stale state"
+                        );
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            base_ref,
+                            error = %e,
+                            "push_with_retry: git fetch command failed — aborting retry to avoid rebasing on stale state"
+                        );
+                        return false;
+                    }
+                    _ => {}
+                }
                 // Rebase local commits on top of remote
                 let rebase = Command::new("git")
                     .args(["rebase", &format!("origin/{}", base_ref)])
@@ -420,15 +454,33 @@ pub async fn auto_commit_worktree(worktree_path: &str, task_id: Uuid) -> bool {
         return false;
     }
 
-    // Stage all changes
-    let add = Command::new("git")
+    // Stage all changes. The previous `add.is_err() || !add.unwrap().status.success()`
+    // form panicked: `||` short-circuits only on `true`, so on `Err` the RHS
+    // still evaluated and `unwrap()` on that `Err` panicked. Explicit match
+    // avoids the panic.
+    match Command::new("git")
         .args(["add", "-A"])
         .current_dir(worktree_path)
         .output()
-        .await;
-
-    if add.is_err() || !add.unwrap().status.success() {
-        return false;
+        .await
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            tracing::warn!(
+                task_id = %task_id,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "auto_commit_worktree: git add -A failed"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "auto_commit_worktree: failed to run git add -A"
+            );
+            return false;
+        }
     }
 
     // Commit with a descriptive message
@@ -740,7 +792,18 @@ pub(crate) async fn merge_subtask_into_feature_branch(
         None => return Ok(MergeBackOutcome::NoCommits),
     };
 
-    let root_id = find_root_ancestor_id(task.parent_id.unwrap(), &*task_repo).await;
+    // If the task has no parent, it IS the root — nothing to merge "back into"
+    // a feature branch. Previous code unwrapped and panicked on orphan tasks.
+    let root_id = match task.parent_id {
+        Some(pid) => find_root_ancestor_id(pid, &*task_repo).await,
+        None => {
+            tracing::debug!(
+                task_id = %task_id,
+                "merge_subtask_into_feature_branch: task has no parent (is root) — skipping merge-back"
+            );
+            return Ok(MergeBackOutcome::NoCommits);
+        }
+    };
     let root_wt = match worktree_repo.get_by_task(root_id).await? {
         Some(wt) => wt,
         None => return Ok(MergeBackOutcome::NoCommits),

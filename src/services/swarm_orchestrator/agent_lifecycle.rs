@@ -327,13 +327,16 @@ where
                 );
 
                 match self.substrate.execute(refinement_request).await {
-                    Ok(session) if session.result.is_some() => session.result.unwrap(),
-                    Ok(_) => {
-                        tracing::warn!(
-                            "LLM refinement returned no result for '{}', falling back to heuristic",
-                            request.template_name
-                        );
-                        Self::heuristic_refinement_prompt(&template.system_prompt, &request)
+                    Ok(session) => {
+                        if let Some(result) = session.result {
+                            result
+                        } else {
+                            tracing::warn!(
+                                "LLM refinement returned no result for '{}', falling back to heuristic",
+                                request.template_name
+                            );
+                            Self::heuristic_refinement_prompt(&template.system_prompt, &request)
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(

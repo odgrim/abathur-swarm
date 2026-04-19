@@ -866,11 +866,24 @@ where
                 });
             }
 
-            // Sync main worktree to match the updated branch tip
-            let _ = Command::new("git")
+            // Sync main worktree to match the updated branch tip. If this fails
+            // the worktree will be out of sync with the ref, which breaks later
+            // auto-ship steps — surface it as a ValidationFailed error.
+            let reset = Command::new("git")
                 .args(["reset", "--hard", "HEAD"])
                 .current_dir(&repo_path)
-                .output();
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!(
+                    "post-merge git reset --hard HEAD failed to run: {}",
+                    e
+                )))?;
+            if !reset.status.success() {
+                let stderr = String::from_utf8_lossy(&reset.stderr);
+                return Err(DomainError::ValidationFailed(format!(
+                    "post-merge git reset --hard HEAD failed: {}",
+                    stderr
+                )));
+            }
 
             Ok((Some(commit_sha), vec![]))
         })

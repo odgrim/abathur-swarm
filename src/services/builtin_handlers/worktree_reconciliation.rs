@@ -123,7 +123,42 @@ impl<T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler
                     None => "task not found".to_string(),
                 };
 
-                // Actually destroy the orphaned worktree
+                // Actually destroy the orphaned worktree on disk BEFORE marking
+                // it Removed in the DB, so operators don't end up with stale
+                // on-disk worktrees that the DB thinks are gone. `--force`
+                // because the task is in a terminal state — we don't care
+                // about dirty state at this point. On failure we log and
+                // continue: the DB reconciliation must still proceed.
+                match tokio::process::Command::new("git")
+                    .args(["worktree", "remove", "--force", &wt.path])
+                    .output()
+                    .await
+                {
+                    Ok(output) if output.status.success() => {
+                        tracing::debug!(
+                            worktree_id = %wt.id,
+                            path = %wt.path,
+                            "WorktreeReconciliation: removed orphaned worktree from disk"
+                        );
+                    }
+                    Ok(output) => {
+                        tracing::warn!(
+                            worktree_id = %wt.id,
+                            path = %wt.path,
+                            stderr = %String::from_utf8_lossy(&output.stderr),
+                            "WorktreeReconciliation: git worktree remove --force failed — continuing with DB update"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            worktree_id = %wt.id,
+                            path = %wt.path,
+                            error = %e,
+                            "WorktreeReconciliation: failed to run git worktree remove --force — continuing with DB update"
+                        );
+                    }
+                }
+
                 let mut updated_wt = wt.clone();
                 updated_wt.status = WorktreeStatus::Removed;
                 updated_wt.updated_at = chrono::Utc::now();
