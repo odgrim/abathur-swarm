@@ -206,9 +206,9 @@ mod tests {
         .await;
 
         // Commit the transaction — atomically persists both mutation and outbox event
-        let tx = Arc::try_unwrap(shared_tx)
-            .expect("no other references")
-            .into_inner();
+        let tx = tx_context::take_inner_tx(shared_tx)
+            .await
+            .expect("no other references");
         tx.commit().await.unwrap();
 
         // After commit: both task and outbox event are visible
@@ -251,9 +251,9 @@ mod tests {
 
         // Drop the transaction without committing (rollback)
         drop(
-            Arc::try_unwrap(shared_tx)
-                .expect("no other references")
-                .into_inner(),
+            tx_context::take_inner_tx(shared_tx)
+                .await
+                .expect("no other references"),
         );
 
         // Neither the task nor the outbox event should exist

@@ -53,6 +53,28 @@ where
     ACTIVE_TX.scope(tx, f).await
 }
 
+/// Attempts to acquire exclusive ownership of a SharedTx for commit/rollback.
+/// Retries up to 10 times with 5ms yields (~50ms budget) to give any spawned
+/// holder a chance to drop their clone. On exhaustion, returns the SharedTx
+/// back to the caller — dropping it will roll back the transaction cleanly.
+pub async fn take_inner_tx(
+    shared: SharedTx,
+) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, SharedTx> {
+    let mut shared = shared;
+    for _ in 0..10 {
+        match Arc::try_unwrap(shared) {
+            Ok(m) => return Ok(m.into_inner()),
+            Err(s) => {
+                shared = s;
+                tokio::task::yield_now().await;
+                // tiny sleep to allow actual other tasks to run
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+    }
+    Err(shared)
+}
+
 /// Macro to execute a sqlx query using the active transaction if available,
 /// otherwise the pool. Supports all common sqlx fetch methods.
 ///
