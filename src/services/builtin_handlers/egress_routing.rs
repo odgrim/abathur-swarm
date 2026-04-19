@@ -44,9 +44,20 @@ use super::{try_update_task, update_with_retry};
 // EgressRoutingHandler (Adapter integration)
 // ============================================================================
 
-/// Routes task completion results to egress adapters. When a task completes
-/// with a result containing an "egress" key, this handler deserializes the
-/// [`EgressDirective`] and calls the appropriate egress adapter.
+/// Routes task completion results to egress adapters.
+///
+/// # Directive source
+///
+/// Preferred path: the producer sets
+/// [`TaskResultPayload::egress`](crate::services::event_bus::TaskResultPayload::egress)
+/// to a structured [`EgressDirective`].
+///
+/// Legacy path (retained for backwards compatibility with persisted events
+/// written before the dedicated field existed): the `status` string is parsed
+/// as JSON and an `"egress"` key, if present, is deserialized into a
+/// directive. When this fallback is exercised a `debug!` log is emitted so we
+/// can tell when old rows have aged out and the legacy parser is safe to
+/// delete.
 pub struct EgressRoutingHandler {
     adapter_registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
 }
@@ -83,28 +94,40 @@ impl EventHandler for EgressRoutingHandler {
             _ => return Ok(Reaction::None),
         };
 
-        // Check if the result status contains egress routing info.
-        // Convention: the result status field contains JSON with an "egress" key
-        // when the completing agent wants to push results to an external system.
-        let directive: crate::domain::models::adapter::EgressDirective = {
-            // Try to parse the status field as JSON containing an egress directive
+        // Prefer the dedicated structured field. If absent, fall back to
+        // parsing a JSON blob out of the status string — a legacy encoding
+        // retained for backwards compatibility with events written before
+        // TaskResultPayload.egress existed.
+        let directive: crate::domain::models::adapter::EgressDirective = if let Some(d) =
+            result.egress.clone()
+        {
+            d
+        } else {
+            // Legacy path: try to parse the status field as JSON containing an
+            // egress directive under the "egress" key.
             let status_str = &result.status;
-            match serde_json::from_str::<serde_json::Value>(status_str) {
-                Ok(val) => {
-                    if let Some(egress_val) = val.get("egress") {
-                        match serde_json::from_value::<
-                            crate::domain::models::adapter::EgressDirective,
-                        >(egress_val.clone())
-                        {
-                            Ok(d) => d,
-                            Err(_) => return Ok(Reaction::None),
-                        }
-                    } else {
-                        return Ok(Reaction::None);
-                    }
-                }
+            let parsed_value = match serde_json::from_str::<serde_json::Value>(status_str) {
+                Ok(val) => val,
                 Err(_) => return Ok(Reaction::None),
-            }
+            };
+            let egress_val = match parsed_value.get("egress") {
+                Some(v) => v,
+                None => return Ok(Reaction::None),
+            };
+            let directive = match serde_json::from_value::<
+                crate::domain::models::adapter::EgressDirective,
+            >(egress_val.clone())
+            {
+                Ok(d) => d,
+                Err(_) => return Ok(Reaction::None),
+            };
+            tracing::debug!(
+                task_id = %task_id,
+                adapter = directive.adapter_name.as_str(),
+                "EgressRoutingHandler used legacy status-JSON fallback; \
+                 producer should migrate to TaskResultPayload.egress"
+            );
+            directive
         };
 
         let adapter_name = &directive.adapter_name;
@@ -176,5 +199,221 @@ impl EventHandler for EgressRoutingHandler {
                 Ok(Reaction::EmitEvents(vec![fail_event]))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::adapter::{EgressAction, EgressDirective};
+    use crate::services::adapter_registry::AdapterRegistry;
+    use crate::services::event_bus::TaskResultPayload;
+    use crate::services::event_reactor::{EventHandler, HandlerContext, Reaction};
+    use uuid::Uuid;
+
+    fn make_handler() -> EgressRoutingHandler {
+        EgressRoutingHandler::new(Arc::new(AdapterRegistry::default()))
+    }
+
+    fn make_event(payload: EventPayload, task_id: Uuid) -> UnifiedEvent {
+        UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task_id),
+            correlation_id: None,
+            source_process_id: None,
+            payload,
+        }
+    }
+
+    fn ctx() -> HandlerContext {
+        HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        }
+    }
+
+    /// Status is a plain enum string ("Complete") and egress is None:
+    /// handler must do nothing.
+    #[tokio::test]
+    async fn test_plain_status_no_egress_is_noop() {
+        let handler = make_handler();
+        let task_id = Uuid::new_v4();
+        let result = TaskResultPayload {
+            task_id,
+            status: "Complete".to_string(),
+            error: None,
+            duration_secs: 1,
+            retry_count: 0,
+            tokens_used: 0,
+            egress: None,
+        };
+        let event = make_event(
+            EventPayload::TaskCompletedWithResult { task_id, result },
+            task_id,
+        );
+        let reaction = handler.handle(&event, &ctx()).await.unwrap();
+        assert!(matches!(reaction, Reaction::None));
+    }
+
+    /// Preferred path: structured egress field populated. Adapter is not
+    /// registered in the empty registry, so an AdapterEgressFailed event is
+    /// emitted — proving the directive was picked up via the dedicated
+    /// field rather than ignored.
+    #[tokio::test]
+    async fn test_dedicated_egress_field_preferred() {
+        let handler = make_handler();
+        let task_id = Uuid::new_v4();
+        let directive = EgressDirective::new(
+            "nonexistent_adapter",
+            EgressAction::UpdateStatus {
+                external_id: "EXT-1".to_string(),
+                new_status: "Done".to_string(),
+            },
+        );
+        let result = TaskResultPayload {
+            task_id,
+            status: "Complete".to_string(),
+            error: None,
+            duration_secs: 1,
+            retry_count: 0,
+            tokens_used: 0,
+            egress: Some(directive),
+        };
+        let event = make_event(
+            EventPayload::TaskCompletedWithResult { task_id, result },
+            task_id,
+        );
+        let reaction = handler.handle(&event, &ctx()).await.unwrap();
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                match &events[0].payload {
+                    EventPayload::AdapterEgressFailed { adapter_name, .. } => {
+                        assert_eq!(adapter_name, "nonexistent_adapter");
+                    }
+                    other => panic!("Expected AdapterEgressFailed, got {:?}", other),
+                }
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+    }
+
+    /// Legacy path: egress is None but status contains a JSON blob carrying
+    /// an "egress" key. The handler should parse it (backwards compat for
+    /// events persisted before the dedicated field existed).
+    #[tokio::test]
+    async fn test_legacy_status_json_fallback() {
+        let handler = make_handler();
+        let task_id = Uuid::new_v4();
+        // Build the legacy payload by serializing a real EgressDirective so
+        // the shape stays in sync with the canonical serde representation.
+        let legacy_directive = EgressDirective::new(
+            "legacy_adapter",
+            EgressAction::UpdateStatus {
+                external_id: "EXT-L".to_string(),
+                new_status: "Done".to_string(),
+            },
+        );
+        let legacy_json = serde_json::json!({
+            "egress": serde_json::to_value(&legacy_directive).unwrap(),
+        });
+        let result = TaskResultPayload {
+            task_id,
+            status: legacy_json.to_string(),
+            error: None,
+            duration_secs: 1,
+            retry_count: 0,
+            tokens_used: 0,
+            egress: None,
+        };
+        let event = make_event(
+            EventPayload::TaskCompletedWithResult { task_id, result },
+            task_id,
+        );
+        let reaction = handler.handle(&event, &ctx()).await.unwrap();
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                match &events[0].payload {
+                    EventPayload::AdapterEgressFailed { adapter_name, .. } => {
+                        assert_eq!(adapter_name, "legacy_adapter");
+                    }
+                    other => panic!("Expected AdapterEgressFailed, got {:?}", other),
+                }
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+    }
+
+    /// When both the dedicated field and legacy JSON are populated, the
+    /// dedicated field wins.
+    #[tokio::test]
+    async fn test_dedicated_field_wins_over_legacy_json() {
+        let handler = make_handler();
+        let task_id = Uuid::new_v4();
+        let dedicated = EgressDirective::new(
+            "dedicated_adapter",
+            EgressAction::UpdateStatus {
+                external_id: "EXT-D".to_string(),
+                new_status: "Done".to_string(),
+            },
+        );
+        let legacy_directive = EgressDirective::new(
+            "legacy_adapter",
+            EgressAction::UpdateStatus {
+                external_id: "EXT-L".to_string(),
+                new_status: "Done".to_string(),
+            },
+        );
+        let legacy_json = serde_json::json!({
+            "egress": serde_json::to_value(&legacy_directive).unwrap(),
+        });
+        let result = TaskResultPayload {
+            task_id,
+            status: legacy_json.to_string(),
+            error: None,
+            duration_secs: 1,
+            retry_count: 0,
+            tokens_used: 0,
+            egress: Some(dedicated),
+        };
+        let event = make_event(
+            EventPayload::TaskCompletedWithResult { task_id, result },
+            task_id,
+        );
+        let reaction = handler.handle(&event, &ctx()).await.unwrap();
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                match &events[0].payload {
+                    EventPayload::AdapterEgressFailed { adapter_name, .. } => {
+                        assert_eq!(adapter_name, "dedicated_adapter");
+                    }
+                    other => panic!("Expected AdapterEgressFailed, got {:?}", other),
+                }
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+    }
+
+    /// Backwards compatibility at the serde level: events persisted without
+    /// the new `egress` field (older schema) must still deserialize.
+    #[test]
+    fn test_task_result_payload_deserializes_without_egress_field() {
+        let old_json = serde_json::json!({
+            "task_id": Uuid::new_v4(),
+            "status": "Complete",
+            "error": null,
+            "duration_secs": 1,
+            "retry_count": 0,
+            "tokens_used": 100
+        });
+        let parsed: TaskResultPayload = serde_json::from_value(old_json).unwrap();
+        assert!(parsed.egress.is_none());
     }
 }

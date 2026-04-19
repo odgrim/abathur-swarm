@@ -1527,6 +1527,16 @@ impl From<SwarmStats> for SwarmStatsPayload {
 }
 
 /// Serializable version of TaskResult (without SubstrateSession which is not serializable).
+///
+/// # Egress routing
+///
+/// The optional [`egress`](Self::egress) field carries a structured
+/// [`EgressDirective`](crate::domain::models::adapter::EgressDirective) when a
+/// task completion should be routed to an external system. Historically, this
+/// was overloaded onto the [`status`](Self::status) string as a JSON blob with
+/// an `"egress"` key; that legacy path is still honored by
+/// `EgressRoutingHandler` for backwards compatibility with older persisted
+/// events, but new producers should populate this dedicated field instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResultPayload {
     pub task_id: Uuid,
@@ -1535,6 +1545,13 @@ pub struct TaskResultPayload {
     pub duration_secs: u64,
     pub retry_count: u32,
     pub tokens_used: u64,
+    /// Optional structured egress routing directive. When present,
+    /// `EgressRoutingHandler` consumes this instead of trying to parse the
+    /// status field for a JSON-embedded directive. `None` on events produced
+    /// before this field existed — deserialization tolerates its absence via
+    /// `serde(default)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<crate::domain::models::adapter::EgressDirective>,
 }
 
 impl From<TaskResult> for TaskResultPayload {
@@ -1550,6 +1567,7 @@ impl From<TaskResult> for TaskResultPayload {
                 .as_ref()
                 .map(|s| s.total_tokens())
                 .unwrap_or(0),
+            egress: None,
         }
     }
 }

@@ -187,6 +187,7 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceEvolutionHandler<T
                     duration_secs,
                     retry_count: updated.retry_count,
                     tokens_used: total_tokens,
+                    egress: None,
                 },
             },
         };
