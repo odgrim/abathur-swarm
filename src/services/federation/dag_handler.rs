@@ -86,7 +86,11 @@ impl EventHandler for SwarmDagEventHandler {
         }
     }
 
-    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+    async fn handle(
+        &self,
+        event: &UnifiedEvent,
+        _ctx: &HandlerContext,
+    ) -> Result<Reaction, String> {
         match &event.payload {
             EventPayload::FederatedGoalConverged {
                 local_goal_id,
@@ -108,16 +112,20 @@ impl EventHandler for SwarmDagEventHandler {
                         "DAG handler: found matching node, advancing DAG"
                     );
 
-                    let dag = dags.get_mut(&dag_id).ok_or_else(|| {
-                        format!("DAG {} disappeared during lookup", dag_id)
-                    })?;
+                    let dag = dags
+                        .get_mut(&dag_id)
+                        .ok_or_else(|| format!("DAG {} disappeared during lookup", dag_id))?;
 
                     // Get the goal for this DAG (or use a minimal placeholder).
                     let goals = self.placeholder_goal.read().await;
                     let goal = goals.get(&dag_id);
 
                     if let Some(goal) = goal {
-                        match self.dag_executor.on_node_converged(dag, node_id, goal).await {
+                        match self
+                            .dag_executor
+                            .on_node_converged(dag, node_id, goal)
+                            .await
+                        {
                             Ok(newly_delegated) => {
                                 tracing::info!(
                                     dag_id = %dag_id,
@@ -133,10 +141,7 @@ impl EventHandler for SwarmDagEventHandler {
                                     error = %e,
                                     "DAG handler: failed to process node convergence"
                                 );
-                                return Err(format!(
-                                    "Failed to process node convergence: {}",
-                                    e
-                                ));
+                                return Err(format!("Failed to process node convergence: {}", e));
                             }
                         }
                     } else {
@@ -177,9 +182,9 @@ impl EventHandler for SwarmDagEventHandler {
                         "DAG handler: found matching node, failing DAG node"
                     );
 
-                    let dag = dags.get_mut(&dag_id).ok_or_else(|| {
-                        format!("DAG {} disappeared during lookup", dag_id)
-                    })?;
+                    let dag = dags
+                        .get_mut(&dag_id)
+                        .ok_or_else(|| format!("DAG {} disappeared during lookup", dag_id))?;
 
                     match self.dag_executor.on_node_failed(dag, node_id, reason).await {
                         Ok(cascaded_failures) => {
@@ -197,10 +202,7 @@ impl EventHandler for SwarmDagEventHandler {
                                 error = %e,
                                 "DAG handler: failed to process node failure"
                             );
-                            return Err(format!(
-                                "Failed to process node failure: {}",
-                                e
-                            ));
+                            return Err(format!("Failed to process node failure: {}", e));
                         }
                     }
                 } else {
@@ -223,7 +225,9 @@ mod tests {
     use super::*;
     use crate::domain::models::goal_federation::ConvergenceContract;
     use crate::domain::models::swarm_dag::{SwarmDagNode, SwarmDagNodeState};
-    use crate::services::event_bus::{EventBus, EventBusConfig, EventId, EventSeverity, SequenceNumber};
+    use crate::services::event_bus::{
+        EventBus, EventBusConfig, EventId, EventSeverity, SequenceNumber,
+    };
     use crate::services::federation::config::FederationConfig;
     use crate::services::federation::service::FederationService;
 
@@ -274,9 +278,7 @@ mod tests {
         (dag, fed_goal_id, node_id)
     }
 
-    fn make_handler(
-        dags: Arc<RwLock<HashMap<Uuid, SwarmDag>>>,
-    ) -> SwarmDagEventHandler {
+    fn make_handler(dags: Arc<RwLock<HashMap<Uuid, SwarmDag>>>) -> SwarmDagEventHandler {
         let config = FederationConfig::default();
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let federation_service = Arc::new(FederationService::new(config, event_bus.clone()));
@@ -292,8 +294,16 @@ mod tests {
         let meta = handler.metadata();
         assert_eq!(meta.name, "SwarmDagEventHandler");
         assert!(meta.filter.categories.contains(&EventCategory::Federation));
-        assert!(meta.filter.payload_types.contains(&"FederatedGoalConverged".to_string()));
-        assert!(meta.filter.payload_types.contains(&"FederatedGoalFailed".to_string()));
+        assert!(
+            meta.filter
+                .payload_types
+                .contains(&"FederatedGoalConverged".to_string())
+        );
+        assert!(
+            meta.filter
+                .payload_types
+                .contains(&"FederatedGoalFailed".to_string())
+        );
     }
 
     #[test]
@@ -316,8 +326,7 @@ mod tests {
         let mut dags = HashMap::new();
         dags.insert(dag.id, dag);
 
-        let result =
-            SwarmDagEventHandler::find_node_by_federated_goal(&dags, Uuid::new_v4());
+        let result = SwarmDagEventHandler::find_node_by_federated_goal(&dags, Uuid::new_v4());
         assert!(result.is_none());
     }
 

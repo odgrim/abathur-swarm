@@ -17,9 +17,7 @@ use uuid::Uuid;
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum WorkflowState {
     /// Enrolled in workflow, awaiting first phase advance.
-    Pending {
-        workflow_name: String,
-    },
+    Pending { workflow_name: String },
     /// Subtask(s) executing current phase; overmind creates agent(s) to work on them.
     PhaseRunning {
         workflow_name: String,
@@ -63,9 +61,7 @@ pub enum WorkflowState {
         phase_name: String,
     },
     /// All phases done.
-    Completed {
-        workflow_name: String,
-    },
+    Completed { workflow_name: String },
     /// Gate verdict rejected the task.
     Rejected {
         workflow_name: String,
@@ -98,7 +94,10 @@ impl WorkflowState {
 
     /// Whether this is a terminal state.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed { .. } | Self::Rejected { .. } | Self::Failed { .. })
+        matches!(
+            self,
+            Self::Completed { .. } | Self::Rejected { .. } | Self::Failed { .. }
+        )
     }
 
     /// Whether the workflow is actively tracking phase subtasks.
@@ -175,17 +174,33 @@ mod tests {
 
     #[test]
     fn test_workflow_state_terminal() {
-        assert!(!WorkflowState::Pending { workflow_name: "code".to_string() }.is_terminal());
-        assert!(WorkflowState::Completed { workflow_name: "code".to_string() }.is_terminal());
-        assert!(WorkflowState::Rejected {
-            workflow_name: "code".to_string(),
-            phase_index: 0,
-            reason: "bad".to_string(),
-        }.is_terminal());
-        assert!(WorkflowState::Failed {
-            workflow_name: "code".to_string(),
-            error: "oops".to_string(),
-        }.is_terminal());
+        assert!(
+            !WorkflowState::Pending {
+                workflow_name: "code".to_string()
+            }
+            .is_terminal()
+        );
+        assert!(
+            WorkflowState::Completed {
+                workflow_name: "code".to_string()
+            }
+            .is_terminal()
+        );
+        assert!(
+            WorkflowState::Rejected {
+                workflow_name: "code".to_string(),
+                phase_index: 0,
+                reason: "bad".to_string(),
+            }
+            .is_terminal()
+        );
+        assert!(
+            WorkflowState::Failed {
+                workflow_name: "code".to_string(),
+                error: "oops".to_string(),
+            }
+            .is_terminal()
+        );
     }
 
     #[test]

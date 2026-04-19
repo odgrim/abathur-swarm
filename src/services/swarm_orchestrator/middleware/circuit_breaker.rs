@@ -7,7 +7,9 @@
 use async_trait::async_trait;
 
 use crate::domain::errors::DomainResult;
-use crate::services::{AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, CircuitScope};
+use crate::services::{
+    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, CircuitScope,
+};
 
 use super::{PreSpawnContext, PreSpawnDecision, PreSpawnMiddleware};
 
@@ -31,10 +33,7 @@ impl PreSpawnMiddleware for CircuitBreakerMiddleware {
         "circuit-breaker"
     }
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision> {
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
         let Some(ref agent_type) = ctx.agent_type else {
             // Routing hasn't run; nothing to check. Stay out of the way.
             return Ok(PreSpawnDecision::Continue);

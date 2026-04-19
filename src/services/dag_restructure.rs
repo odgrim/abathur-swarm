@@ -40,7 +40,10 @@ impl Default for RestructureConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestructureTrigger {
     /// Task exhausted all retries.
-    PermanentFailure { task_id: Uuid, retries_exhausted: u32 },
+    PermanentFailure {
+        task_id: Uuid,
+        retries_exhausted: u32,
+    },
     /// Spawn limit exceeded and extension denied.
     SpawnLimitExceeded { task_id: Uuid },
     /// Circular dependency detected.
@@ -117,19 +120,11 @@ pub enum RestructureDecision {
         remove_original: bool,
     },
     /// Escalate to human attention.
-    Escalate {
-        reason: String,
-        context: String,
-    },
+    Escalate { reason: String, context: String },
     /// Wait and retry later.
-    WaitAndRetry {
-        delay: Duration,
-        reason: String,
-    },
+    WaitAndRetry { delay: Duration, reason: String },
     /// Mark as permanently failed, no recovery possible.
-    AcceptFailure {
-        reason: String,
-    },
+    AcceptFailure { reason: String },
 }
 
 /// Specification for a new task created during restructuring.
@@ -235,9 +230,10 @@ impl DagRestructureService {
 
             // Check cooldown
             if let Some(last) = state.last_attempt
-                && last.elapsed() < self.config.restructure_cooldown {
-                    return false;
-                }
+                && last.elapsed() < self.config.restructure_cooldown
+            {
+                return false;
+            }
         }
 
         true
@@ -254,14 +250,15 @@ impl DagRestructureService {
     ) -> DomainResult<RestructureDecision> {
         // Try LLM path if configured
         if self.config.use_llm_restructure
-            && let Some(overmind) = self.overmind.clone() {
-                match self.analyze_with_overmind(context, &overmind).await {
-                    Ok(decision) => return Ok(decision),
-                    Err(e) => {
-                        tracing::warn!("LLM restructure failed, falling back to heuristic: {}", e);
-                    }
+            && let Some(overmind) = self.overmind.clone()
+        {
+            match self.analyze_with_overmind(context, &overmind).await {
+                Ok(decision) => return Ok(decision),
+                Err(e) => {
+                    tracing::warn!("LLM restructure failed, falling back to heuristic: {}", e);
                 }
             }
+        }
 
         self.analyze_and_decide_heuristic(context)
     }
@@ -274,10 +271,7 @@ impl DagRestructureService {
         let task_id = context.failed_task.id;
 
         // Get current attempt count
-        let current_attempts = self.state
-            .get(&task_id)
-            .map(|s| s.attempts)
-            .unwrap_or(0);
+        let current_attempts = self.state.get(&task_id).map(|s| s.attempts).unwrap_or(0);
 
         let new_attempts = current_attempts + 1;
 
@@ -295,11 +289,14 @@ impl DagRestructureService {
         let decision = self.heuristic_decision(context, new_attempts);
 
         // Record this attempt
-        let state = self.state.entry(task_id).or_insert_with(|| RestructureState {
-            attempts: 0,
-            last_attempt: None,
-            decisions: Vec::new(),
-        });
+        let state = self
+            .state
+            .entry(task_id)
+            .or_insert_with(|| RestructureState {
+                attempts: 0,
+                last_attempt: None,
+                decisions: Vec::new(),
+            });
 
         state.attempts = new_attempts;
         state.last_attempt = Some(Instant::now());
@@ -309,7 +306,11 @@ impl DagRestructureService {
     }
 
     /// Make a heuristic-based restructure decision.
-    fn heuristic_decision(&self, context: &RestructureContext, attempt: u32) -> RestructureDecision {
+    fn heuristic_decision(
+        &self,
+        context: &RestructureContext,
+        attempt: u32,
+    ) -> RestructureDecision {
         // First attempt: Try a different approach
         if attempt == 1 {
             // Check if there are alternative approaches available
@@ -354,7 +355,8 @@ impl DagRestructureService {
                     context: format!(
                         "{} tasks failed in this subtree: {}",
                         context.related_failures.len(),
-                        context.related_failures
+                        context
+                            .related_failures
                             .iter()
                             .map(|t| t.title.as_str())
                             .collect::<Vec<_>>()
@@ -369,8 +371,7 @@ impl DagRestructureService {
                     title: format!("Alternative: {}", context.failed_task.title),
                     description: format!(
                         "Find an alternative way to achieve: {}. Previous approach failed: {}",
-                        context.failed_task.description,
-                        context.failure_reason
+                        context.failed_task.description, context.failure_reason
                     ),
                     agent_type: non_orchestrator_agent_type(&context.failed_task.agent_type)
                         .or_else(|| Some("problem-solver".to_string())),
@@ -384,12 +385,17 @@ impl DagRestructureService {
         RestructureDecision::Escalate {
             reason: format!(
                 "Task '{}' has failed {} times despite restructuring",
-                context.failed_task.title, context.previous_attempts.len()
+                context.failed_task.title,
+                context.previous_attempts.len()
             ),
             context: format!(
                 "Failure reason: {}\nGoal: {}",
                 context.failure_reason,
-                context.goal.as_ref().map(|g| g.name.as_str()).unwrap_or("unknown")
+                context
+                    .goal
+                    .as_ref()
+                    .map(|g| g.name.as_str())
+                    .unwrap_or("unknown")
             ),
         }
     }
@@ -438,17 +444,13 @@ impl DagRestructureService {
         overmind: &crate::services::OvermindService,
     ) -> DomainResult<RestructureDecision> {
         use crate::domain::models::overmind::{
-            StuckStateRecoveryRequest, GoalContext, FailureRecord, RecoveryAttempt,
-            RecoveryAction,
+            FailureRecord, GoalContext, RecoveryAction, RecoveryAttempt, StuckStateRecoveryRequest,
         };
 
         let task_id = context.failed_task.id;
 
         // Check if we've hit the limit
-        let current_attempts = self.state
-            .get(&task_id)
-            .map(|s| s.attempts)
-            .unwrap_or(0);
+        let current_attempts = self.state.get(&task_id).map(|s| s.attempts).unwrap_or(0);
 
         let new_attempts = current_attempts + 1;
         if new_attempts > self.config.max_restructure_attempts {
@@ -461,7 +463,8 @@ impl DagRestructureService {
         }
 
         // Build the Overmind request
-        let failure_history: Vec<FailureRecord> = context.previous_attempts
+        let failure_history: Vec<FailureRecord> = context
+            .previous_attempts
             .iter()
             .enumerate()
             .map(|(i, attempt)| FailureRecord {
@@ -473,14 +476,19 @@ impl DagRestructureService {
             })
             .collect();
 
-        let previous_recovery_attempts: Vec<RecoveryAttempt> = self.state
+        let previous_recovery_attempts: Vec<RecoveryAttempt> = self
+            .state
             .get(&task_id)
             .map(|s| {
-                s.decisions.iter().enumerate().map(|(i, d)| RecoveryAttempt {
-                    attempt: i as u32 + 1,
-                    strategy: format!("{:?}", d),
-                    outcome: "Applied".to_string(),
-                }).collect()
+                s.decisions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| RecoveryAttempt {
+                        attempt: i as u32 + 1,
+                        strategy: format!("{:?}", d),
+                        outcome: "Applied".to_string(),
+                    })
+                    .collect()
             })
             .unwrap_or_default();
 
@@ -490,12 +498,17 @@ impl DagRestructureService {
             task_description: context.failed_task.description.clone(),
             goal_context: GoalContext {
                 goal_id: context.goal.as_ref().map(|g| g.id).unwrap_or(Uuid::nil()),
-                goal_name: context.goal.as_ref().map(|g| g.name.clone()).unwrap_or_default(),
-                goal_description: context.goal.as_ref().map(|g| g.description.clone()).unwrap_or_default(),
-                other_tasks_status: format!(
-                    "{} related failures",
-                    context.related_failures.len()
-                ),
+                goal_name: context
+                    .goal
+                    .as_ref()
+                    .map(|g| g.name.clone())
+                    .unwrap_or_default(),
+                goal_description: context
+                    .goal
+                    .as_ref()
+                    .map(|g| g.description.clone())
+                    .unwrap_or_default(),
+                other_tasks_status: format!("{} related failures", context.related_failures.len()),
             },
             failure_history,
             previous_recovery_attempts,
@@ -507,23 +520,26 @@ impl DagRestructureService {
             Ok(decision) => {
                 // Convert Overmind decision to RestructureDecision
                 let restructure_decision = match decision.recovery_action {
-                    RecoveryAction::RetryDifferentApproach { approach, agent_type } => {
-                        RestructureDecision::RetryDifferentApproach {
-                            new_approach: approach,
-                            new_agent_type: agent_type,
-                        }
-                    }
+                    RecoveryAction::RetryDifferentApproach {
+                        approach,
+                        agent_type,
+                    } => RestructureDecision::RetryDifferentApproach {
+                        new_approach: approach,
+                        new_agent_type: agent_type,
+                    },
                     RecoveryAction::Redecompose => {
                         // Convert new tasks from Overmind to NewTaskSpec
-                        let new_subtasks = decision.new_tasks.into_iter().map(|t| {
-                            NewTaskSpec {
+                        let new_subtasks = decision
+                            .new_tasks
+                            .into_iter()
+                            .map(|t| NewTaskSpec {
                                 title: t.title,
                                 description: t.description,
                                 agent_type: non_orchestrator_agent_type(&t.agent_type),
                                 depends_on: t.depends_on,
                                 priority: TaskPriorityModifier::Same,
-                            }
-                        }).collect();
+                            })
+                            .collect();
 
                         RestructureDecision::DecomposeDifferently {
                             new_subtasks,
@@ -546,37 +562,44 @@ impl DagRestructureService {
                                 NewTaskSpec {
                                     title: context.failed_task.title.clone(),
                                     description: context.failed_task.description.clone(),
-                                    agent_type: non_orchestrator_agent_type(&context.failed_task.agent_type),
-                                    depends_on: vec![format!("Research: {}", context.failed_task.title)],
+                                    agent_type: non_orchestrator_agent_type(
+                                        &context.failed_task.agent_type,
+                                    ),
+                                    depends_on: vec![format!(
+                                        "Research: {}",
+                                        context.failed_task.title
+                                    )],
                                     priority: TaskPriorityModifier::Same,
                                 },
                             ],
                             remove_original: true,
                         }
                     }
-                    RecoveryAction::WaitFor { condition, check_interval_mins } => {
-                        RestructureDecision::WaitAndRetry {
-                            delay: std::time::Duration::from_secs(check_interval_mins as u64 * 60),
-                            reason: condition,
-                        }
-                    }
-                    RecoveryAction::Escalate { reason } => {
-                        RestructureDecision::Escalate {
-                            reason,
-                            context: decision.root_cause.explanation,
-                        }
-                    }
+                    RecoveryAction::WaitFor {
+                        condition,
+                        check_interval_mins,
+                    } => RestructureDecision::WaitAndRetry {
+                        delay: std::time::Duration::from_secs(check_interval_mins as u64 * 60),
+                        reason: condition,
+                    },
+                    RecoveryAction::Escalate { reason } => RestructureDecision::Escalate {
+                        reason,
+                        context: decision.root_cause.explanation,
+                    },
                     RecoveryAction::AcceptFailure { reason } => {
                         RestructureDecision::AcceptFailure { reason }
                     }
                 };
 
                 // Record this attempt
-                let state = self.state.entry(task_id).or_insert_with(|| RestructureState {
-                    attempts: 0,
-                    last_attempt: None,
-                    decisions: Vec::new(),
-                });
+                let state = self
+                    .state
+                    .entry(task_id)
+                    .or_insert_with(|| RestructureState {
+                        attempts: 0,
+                        last_attempt: None,
+                        decisions: Vec::new(),
+                    });
                 state.attempts = new_attempts;
                 state.last_attempt = Some(std::time::Instant::now());
                 state.decisions.push(restructure_decision.clone());
@@ -584,7 +607,10 @@ impl DagRestructureService {
                 Ok(restructure_decision)
             }
             Err(e) => {
-                tracing::warn!("Overmind stuck recovery failed, using heuristic fallback: {}", e);
+                tracing::warn!(
+                    "Overmind stuck recovery failed, using heuristic fallback: {}",
+                    e
+                );
                 // Fall back to heuristic decision
                 self.analyze_and_decide_heuristic(context)
             }
@@ -598,15 +624,14 @@ mod tests {
     use crate::domain::models::{GoalPriority, TaskPriority};
 
     fn create_test_task() -> Task {
-        let mut task = Task::with_title("Test Task", "Test description")
-            .with_priority(TaskPriority::Normal);
+        let mut task =
+            Task::with_title("Test Task", "Test description").with_priority(TaskPriority::Normal);
         task.status = TaskStatus::Failed;
         task
     }
 
     fn create_test_goal() -> Goal {
-        Goal::new("Test Goal", "Test goal description")
-            .with_priority(GoalPriority::Normal)
+        Goal::new("Test Goal", "Test goal description").with_priority(GoalPriority::Normal)
     }
 
     #[test]
@@ -631,9 +656,7 @@ mod tests {
         };
         assert_eq!(trigger.primary_task_id(), Some(task_id));
 
-        let trigger = RestructureTrigger::CircularDependency {
-            task_ids: vec![],
-        };
+        let trigger = RestructureTrigger::CircularDependency { task_ids: vec![] };
         assert_eq!(trigger.primary_task_id(), None);
     }
 
@@ -691,7 +714,10 @@ mod tests {
         let decision = service.analyze_and_decide(&context).await.unwrap();
 
         match decision {
-            RestructureDecision::DecomposeDifferently { new_subtasks, remove_original } => {
+            RestructureDecision::DecomposeDifferently {
+                new_subtasks,
+                remove_original,
+            } => {
                 assert_eq!(new_subtasks.len(), 2);
                 assert!(remove_original);
             }

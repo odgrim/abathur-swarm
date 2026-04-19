@@ -36,18 +36,12 @@ impl GitHubEgressAdapter {
 
     /// Read the `owner` from the manifest config.
     fn owner(&self) -> Option<&str> {
-        self.manifest
-            .config
-            .get("owner")
-            .and_then(|v| v.as_str())
+        self.manifest.config.get("owner").and_then(|v| v.as_str())
     }
 
     /// Read the `repo` from the manifest config.
     fn repo(&self) -> Option<&str> {
-        self.manifest
-            .config
-            .get("repo")
-            .and_then(|v| v.as_str())
+        self.manifest.config.get("repo").and_then(|v| v.as_str())
     }
 
     /// Parse an issue number from an `external_id` string.
@@ -102,15 +96,13 @@ impl EgressAdapter for GitHubEgressAdapter {
 
     async fn execute(&self, action: &EgressAction) -> DomainResult<EgressResult> {
         // Resolve owner/repo once and return early with a clear error if missing.
-        let owner = self.owner().ok_or_else(|| {
-            DomainError::ValidationFailed(
-                "GitHub Issues egress adapter config missing required 'owner'".to_string(),
-            )
+        let owner = self.owner().ok_or_else(|| DomainError::ConfigError {
+            key: "github.owner".to_string(),
+            reason: "GitHub Issues egress adapter config missing required 'owner'".to_string(),
         })?;
-        let repo = self.repo().ok_or_else(|| {
-            DomainError::ValidationFailed(
-                "GitHub Issues egress adapter config missing required 'repo'".to_string(),
-            )
+        let repo = self.repo().ok_or_else(|| DomainError::ConfigError {
+            key: "github.repo".to_string(),
+            reason: "GitHub Issues egress adapter config missing required 'repo'".to_string(),
         })?;
 
         match action {
@@ -160,10 +152,8 @@ impl EgressAdapter for GitHubEgressAdapter {
                 fields,
             } => {
                 // Optional labels from fields.
-                let labels: Option<Vec<String>> = fields
-                    .get("labels")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
+                let labels: Option<Vec<String>> =
+                    fields.get("labels").and_then(|v| v.as_array()).map(|arr| {
                         arr.iter()
                             .filter_map(|v| v.as_str().map(str::to_string))
                             .collect()
@@ -178,17 +168,11 @@ impl EgressAdapter for GitHubEgressAdapter {
 
                 let resp = self
                     .client
-                    .create_issue(
-                        owner,
-                        repo,
-                        title,
-                        Some(description.as_str()),
-                        labels,
-                    )
+                    .create_issue(owner, repo, title, Some(description.as_str()), labels)
                     .await?;
 
-                let result = EgressResult::ok_with_id(resp.number.to_string())
-                    .with_url(&resp.html_url);
+                let result =
+                    EgressResult::ok_with_id(resp.number.to_string()).with_url(&resp.html_url);
                 Ok(result)
             }
 
@@ -197,13 +181,16 @@ impl EgressAdapter for GitHubEgressAdapter {
                     issue = %external_id,
                     "GitHub Issues adapter does not support AttachArtifact"
                 );
-                Err(DomainError::ValidationFailed(
+                Err(DomainError::NotImplemented(
                     "Unsupported operation: AttachArtifact is not supported by the GitHub Issues adapter. \
                      Use PostComment to share artifact details instead.".to_string(),
                 ))
             }
 
-            EgressAction::Custom { action_name, params } => {
+            EgressAction::Custom {
+                action_name,
+                params,
+            } => {
                 if action_name == "create_pr" {
                     let title = params
                         .get("title")
@@ -213,18 +200,12 @@ impl EgressAdapter for GitHubEgressAdapter {
                                 "GitHub Issues create_pr requires 'title' param".to_string(),
                             )
                         })?;
-                    let body = params
-                        .get("body")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let head = params
-                        .get("head")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            DomainError::ValidationFailed(
-                                "GitHub Issues create_pr requires 'head' param".to_string(),
-                            )
-                        })?;
+                    let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                    let head = params.get("head").and_then(|v| v.as_str()).ok_or_else(|| {
+                        DomainError::ValidationFailed(
+                            "GitHub Issues create_pr requires 'head' param".to_string(),
+                        )
+                    })?;
                     let base = params
                         .get("base")
                         .and_then(|v| v.as_str())
@@ -258,8 +239,8 @@ impl EgressAdapter for GitHubEgressAdapter {
                         .create_pull_request(owner, repo, title, &full_body, head, base)
                         .await?;
 
-                    let result = EgressResult::ok_with_id(resp.number.to_string())
-                        .with_url(&resp.html_url);
+                    let result =
+                        EgressResult::ok_with_id(resp.number.to_string()).with_url(&resp.html_url);
                     Ok(result)
                 } else {
                     tracing::warn!(
@@ -278,9 +259,7 @@ impl EgressAdapter for GitHubEgressAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::adapter::{
-        AdapterCapability, AdapterDirection, AdapterType,
-    };
+    use crate::domain::models::adapter::{AdapterCapability, AdapterDirection, AdapterType};
 
     fn test_manifest() -> AdapterManifest {
         AdapterManifest::new(
@@ -301,7 +280,10 @@ mod tests {
 
     #[test]
     fn test_parse_issue_number_valid() {
-        assert_eq!(GitHubEgressAdapter::parse_issue_number("42").unwrap(), 42u64);
+        assert_eq!(
+            GitHubEgressAdapter::parse_issue_number("42").unwrap(),
+            42u64
+        );
     }
 
     #[test]
@@ -315,7 +297,10 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(DomainError::ValidationFailed(msg)) => {
-                assert!(msg.contains("abc"), "error message should mention the bad input, got: {msg}");
+                assert!(
+                    msg.contains("abc"),
+                    "error message should mention the bad input, got: {msg}"
+                );
             }
             other => panic!("Expected ValidationFailed, got: {other:?}"),
         }
@@ -340,7 +325,10 @@ mod tests {
         assert_eq!(GitHubEgressAdapter::to_github_state("in_progress"), "open");
         assert_eq!(GitHubEgressAdapter::to_github_state("pending"), "open");
         // Unknown → open
-        assert_eq!(GitHubEgressAdapter::to_github_state("anything_else"), "open");
+        assert_eq!(
+            GitHubEgressAdapter::to_github_state("anything_else"),
+            "open"
+        );
     }
 
     #[test]
@@ -398,8 +386,16 @@ mod tests {
         let adapter = GitHubEgressAdapter::new(manifest.clone(), client);
 
         assert_eq!(adapter.manifest().name, "github-issues");
-        assert!(adapter.manifest().has_capability(AdapterCapability::UpdateStatus));
-        assert!(adapter.manifest().has_capability(AdapterCapability::PostComment));
+        assert!(
+            adapter
+                .manifest()
+                .has_capability(AdapterCapability::UpdateStatus)
+        );
+        assert!(
+            adapter
+                .manifest()
+                .has_capability(AdapterCapability::PostComment)
+        );
     }
 
     // ── format_pr_body / create_pr body formatting ──────────────────────────

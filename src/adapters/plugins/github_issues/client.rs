@@ -82,7 +82,7 @@ impl RateLimiter {
 /// HTTP client for the GitHub REST API v3.
 ///
 /// All methods return [`DomainResult`] and map HTTP / network errors
-/// to [`DomainError::ExecutionFailed`].
+/// to [`DomainError::ExternalServiceError`].
 #[derive(Debug, Clone)]
 pub struct GitHubClient {
     /// The underlying HTTP client.
@@ -194,20 +194,23 @@ impl GitHubClient {
         while let Some(url) = next_url.take() {
             tracing::debug!(page = page, url = %url, "GitHub list_issues: fetching page");
 
-            let req = self
-                .rate_limited_request(reqwest::Method::GET, &url)
-                .await;
+            let req = self.rate_limited_request(reqwest::Method::GET, &url).await;
 
-            let resp = req.send().await.map_err(|e| {
-                DomainError::ExecutionFailed(format!("GitHub list_issues request failed: {e}"))
-            })?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "github".to_string(),
+                    reason: format!("list_issues request failed: {e}"),
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                return Err(DomainError::ExecutionFailed(format!(
-                    "GitHub list_issues returned {status}: {body}"
-                )));
+                return Err(DomainError::ExternalServiceError {
+                    service: "github".to_string(),
+                    reason: format!("list_issues returned {status}: {body}"),
+                });
             }
 
             // Extract the Link header *before* consuming the response body.
@@ -218,10 +221,17 @@ impl GitHubClient {
                 .and_then(Self::parse_next_link);
 
             let page_issues = resp.json::<Vec<GitHubIssue>>().await.map_err(|e| {
-                DomainError::ExecutionFailed(format!("GitHub list_issues parse failed: {e}"))
+                DomainError::ExternalServiceError {
+                    service: "github".to_string(),
+                    reason: format!("list_issues parse failed: {e}"),
+                }
             })?;
 
-            tracing::debug!(count = page_issues.len(), page = page, "GitHub list_issues: page fetched");
+            tracing::debug!(
+                count = page_issues.len(),
+                page = page,
+                "GitHub list_issues: page fetched"
+            );
             all_issues.extend(page_issues);
             page += 1;
         }
@@ -251,18 +261,18 @@ impl GitHubClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!(
-                    "GitHub update_issue_state request failed: {e}"
-                ))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("update_issue_state request failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "GitHub update_issue_state returned {status}: {body_text}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("update_issue_state returned {status}: {body_text}"),
+            });
         }
 
         Ok(())
@@ -290,16 +300,18 @@ impl GitHubClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!("GitHub post_comment request failed: {e}"))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("post_comment request failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "GitHub post_comment returned {status}: {body_text}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("post_comment returned {status}: {body_text}"),
+            });
         }
 
         Ok(())
@@ -329,20 +341,25 @@ impl GitHubClient {
             .json(&req_body)
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!("GitHub create_issue request failed: {e}"))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("create_issue request failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "GitHub create_issue returned {status}: {body_text}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("create_issue returned {status}: {body_text}"),
+            });
         }
 
         resp.json::<GitHubCreateIssueResponse>().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("GitHub create_issue parse failed: {e}"))
+            DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("create_issue parse failed: {e}"),
+            }
         })
     }
 
@@ -382,20 +399,25 @@ impl GitHubClient {
             .await
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!("GitHub get_pull_request failed: {e}"))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("get_pull_request failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "GitHub get_pull_request returned {status}: {body}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("get_pull_request returned {status}: {body}"),
+            });
         }
 
         resp.json::<GitHubPullRequestDetail>().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("GitHub get_pull_request parse failed: {e}"))
+            DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("get_pull_request parse failed: {e}"),
+            }
         })
     }
 
@@ -423,25 +445,26 @@ impl GitHubClient {
             .await
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!(
-                    "GitHub get_pull_request_diff failed: {e}"
-                ))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("get_pull_request_diff failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "GitHub get_pull_request_diff returned {status}: {body}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("get_pull_request_diff returned {status}: {body}"),
+            });
         }
 
-        resp.text().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!(
-                "GitHub get_pull_request_diff body read failed: {e}"
-            ))
-        })
+        resp.text()
+            .await
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("get_pull_request_diff body read failed: {e}"),
+            })
     }
 
     /// Create a pull request in a repository.
@@ -470,22 +493,25 @@ impl GitHubClient {
             .json(&req_body)
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!(
-                    "GitHub create_pull_request request failed: {e}"
-                ))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("create_pull_request request failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "GitHub create_pull_request returned {status}: {body_text}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("create_pull_request returned {status}: {body_text}"),
+            });
         }
 
         resp.json::<GitHubCreateIssueResponse>().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("GitHub create_pull_request parse failed: {e}"))
+            DomainError::ExternalServiceError {
+                service: "github".to_string(),
+                reason: format!("create_pull_request parse failed: {e}"),
+            }
         })
     }
 }

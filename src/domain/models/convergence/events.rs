@@ -37,7 +37,6 @@ pub enum ConvergenceEvent {
     // -------------------------------------------------------------------
     // Lifecycle events
     // -------------------------------------------------------------------
-
     /// A new convergence trajectory has been created and is entering the
     /// iteration loop.
     ///
@@ -110,7 +109,6 @@ pub enum ConvergenceEvent {
     // -------------------------------------------------------------------
     // Per-iteration events
     // -------------------------------------------------------------------
-
     /// An observation has been recorded after a strategy execution.
     ///
     /// Emitted once per iteration after overseer signals are collected and
@@ -162,7 +160,6 @@ pub enum ConvergenceEvent {
     // -------------------------------------------------------------------
     // Intervention events
     // -------------------------------------------------------------------
-
     /// Context degradation has been detected in the LLM's working context.
     ///
     /// Emitted when the context health score drops below the degradation
@@ -274,7 +271,6 @@ pub enum ConvergenceEvent {
     // -------------------------------------------------------------------
     // Budget calibration events
     // -------------------------------------------------------------------
-
     /// P95 token usage for a complexity tier exceeded the allocated budget
     /// by more than 20%.
     ///
@@ -307,28 +303,18 @@ impl ConvergenceEvent {
             ConvergenceEvent::ObservationRecorded { .. } => "observation_recorded",
             ConvergenceEvent::AttractorClassified { .. } => "attractor_classified",
             ConvergenceEvent::StrategySelected { .. } => "strategy_selected",
-            ConvergenceEvent::ContextDegradationDetected { .. } => {
-                "context_degradation_detected"
-            }
-            ConvergenceEvent::BudgetExtensionRequested { .. } => {
-                "budget_extension_requested"
-            }
+            ConvergenceEvent::ContextDegradationDetected { .. } => "context_degradation_detected",
+            ConvergenceEvent::BudgetExtensionRequested { .. } => "budget_extension_requested",
             ConvergenceEvent::BudgetExtensionGranted { .. } => "budget_extension_granted",
             ConvergenceEvent::BudgetExtensionDenied { .. } => "budget_extension_denied",
             ConvergenceEvent::SpecificationAmended { .. } => "specification_amended",
             ConvergenceEvent::SpecificationAmbiguityDetected { .. } => {
                 "specification_ambiguity_detected"
             }
-            ConvergenceEvent::DecompositionRecommended { .. } => {
-                "decomposition_recommended"
-            }
+            ConvergenceEvent::DecompositionRecommended { .. } => "decomposition_recommended",
             ConvergenceEvent::DecompositionTriggered { .. } => "decomposition_triggered",
-            ConvergenceEvent::ParallelConvergenceStarted { .. } => {
-                "parallel_convergence_started"
-            }
-            ConvergenceEvent::BudgetCalibrationExceeded { .. } => {
-                "budget_calibration_exceeded"
-            }
+            ConvergenceEvent::ParallelConvergenceStarted { .. } => "parallel_convergence_started",
+            ConvergenceEvent::BudgetCalibrationExceeded { .. } => "budget_calibration_exceeded",
         }
     }
 

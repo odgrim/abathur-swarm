@@ -12,26 +12,25 @@ use tokio::sync::mpsc;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{
-    AgentTier,
-    RelevanceWeights, ScoredMemory,
-    SessionStatus, SubstrateConfig, SubstrateRequest,
+    AgentTier, RelevanceWeights, ScoredMemory, SessionStatus, SubstrateConfig, SubstrateRequest,
     Task, TaskStatus,
 };
+use crate::domain::ports::{
+    AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
+};
 use crate::services::memory_service::MemoryService;
-use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
-    AgentTierHint, AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    CircuitScope, GoalContextService, ModelRouter,
-    TaskExecution, TaskOutcome,
+    AgentTierHint, AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, CircuitScope,
+    GoalContextService, ModelRouter, TaskExecution, TaskOutcome,
     command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
 };
 
 use crate::domain::models::workflow_state::WorkflowState;
 use crate::domain::models::workflow_template::WorkflowTemplate;
 
+use super::SwarmOrchestrator;
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
 use super::types::SwarmEvent;
-use super::SwarmOrchestrator;
 
 /// Re-emit `WorkflowGateRejected` for tasks that were rejected via MCP.
 ///
@@ -43,14 +42,17 @@ async fn replay_gate_rejection_event(
     event_bus: &crate::services::event_bus::EventBus,
     workflows: &[WorkflowTemplate],
 ) {
-    let state = match task.context.custom.get("workflow_state")
-        .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok())
-    {
+    let state = match task.workflow_state() {
         Some(s) => s,
         None => return,
     };
 
-    if let WorkflowState::Rejected { workflow_name, phase_index, reason } = state {
+    if let WorkflowState::Rejected {
+        workflow_name,
+        phase_index,
+        reason,
+    } = state
+    {
         let phase_name = workflows
             .iter()
             .find(|t| t.name == workflow_name)
@@ -58,18 +60,20 @@ async fn replay_gate_rejection_event(
             .map(|p| p.name.clone())
             .unwrap_or_else(|| format!("phase_{}", phase_index));
 
-        event_bus.publish(crate::services::event_factory::make_event(
-            crate::services::event_bus::EventSeverity::Warning,
-            crate::services::event_bus::EventCategory::Workflow,
-            None,
-            Some(task.id),
-            crate::services::event_bus::EventPayload::WorkflowGateRejected {
-                task_id: task.id,
-                phase_index,
-                phase_name,
-                reason,
-            },
-        )).await;
+        event_bus
+            .publish(crate::services::event_factory::make_event(
+                crate::services::event_bus::EventSeverity::Warning,
+                crate::services::event_bus::EventCategory::Workflow,
+                None,
+                Some(task.id),
+                crate::services::event_bus::EventPayload::WorkflowGateRejected {
+                    task_id: task.id,
+                    phase_index,
+                    phase_name,
+                    reason,
+                },
+            ))
+            .await;
     }
 }
 
@@ -131,13 +135,28 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
             // Pass through any already-PascalCase tool names, but reject blocked tools
             other => {
                 const BLOCKED: &[&str] = &[
-                    "task", "todowrite", "todoread", "taskcreate", "taskupdate",
-                    "tasklist", "taskget", "taskstop", "taskoutput",
-                    "teamcreate", "teamdelete", "sendmessage",
-                    "enterplanmode", "exitplanmode", "skill", "notebookedit",
+                    "task",
+                    "todowrite",
+                    "todoread",
+                    "taskcreate",
+                    "taskupdate",
+                    "tasklist",
+                    "taskget",
+                    "taskstop",
+                    "taskoutput",
+                    "teamcreate",
+                    "teamdelete",
+                    "sendmessage",
+                    "enterplanmode",
+                    "exitplanmode",
+                    "skill",
+                    "notebookedit",
                 ];
                 if BLOCKED.contains(&other.to_lowercase().as_str()) {
-                    tracing::warn!("Agent template requested blocked tool '{}' - skipping", other);
+                    tracing::warn!(
+                        "Agent template requested blocked tool '{}' - skipping",
+                        other
+                    );
                 } else {
                     cli_tools.push(other.to_string());
                 }
@@ -149,7 +168,10 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
     // Orchestration-only agents (overmind, aggregator) should NOT get these —
     // they delegate to workers instead of exploring the codebase themselves.
     let is_orchestration_only = template_tool_names.iter().all(|t| {
-        matches!(t.as_str(), "memory" | "tasks" | "agents" | "task_status" | "egress_publish")
+        matches!(
+            t.as_str(),
+            "memory" | "tasks" | "agents" | "task_status" | "egress_publish"
+        )
     });
     if !is_orchestration_only {
         for baseline in &["Read", "Glob", "Grep"] {
@@ -173,7 +195,10 @@ fn format_memory_context(memories: &[ScoredMemory]) -> String {
         let mem = &entry.memory;
         output.push_str(&format!(
             "**{}** *(tier: {}, score: {:.2})*\n{}\n\n",
-            mem.key, mem.tier.as_str(), entry.score, mem.content,
+            mem.key,
+            mem.tier.as_str(),
+            entry.score,
+            mem.content,
         ));
     }
     output
@@ -192,9 +217,15 @@ where
     /// Goals no longer decompose into tasks. Tasks are created independently
     /// (by humans, system triggers, or goal evaluation service). This method
     /// simply finds ready tasks and spawns agents to execute them.
-    pub(super) async fn process_goals(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+    pub(super) async fn process_goals(
+        &self,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
         // Get ready tasks and spawn agents for them
-        let ready_tasks = self.task_repo.get_ready_tasks(self.config.max_agents).await?;
+        let ready_tasks = self
+            .task_repo
+            .get_ready_tasks(self.config.max_agents)
+            .await?;
 
         for task in &ready_tasks {
             self.spawn_task_agent(task, event_tx).await?;
@@ -209,7 +240,10 @@ where
         event_tx: &mpsc::Sender<SwarmEvent>,
         already_spawned: &std::collections::HashSet<uuid::Uuid>,
     ) -> DomainResult<()> {
-        let ready_tasks = self.task_repo.get_ready_tasks(self.config.max_agents).await?;
+        let ready_tasks = self
+            .task_repo
+            .get_ready_tasks(self.config.max_agents)
+            .await?;
 
         for task in &ready_tasks {
             if !already_spawned.contains(&task.id) {
@@ -275,10 +309,12 @@ where
         // Routing middleware is required to have populated agent_type before
         // we reach substrate invocation. If it didn't, the chain is broken.
         let agent_type = ctx.agent_type.clone().ok_or_else(|| {
-            crate::domain::errors::DomainError::ExecutionFailed(
-                "pre-spawn chain completed without resolving an agent_type — \
-                 RouteTaskMiddleware must be registered".to_string(),
-            )
+            crate::domain::errors::DomainError::ConfigError {
+                key: "RouteTaskMiddleware".to_string(),
+                reason: "pre-spawn chain completed without resolving an agent_type — \
+                 RouteTaskMiddleware must be registered"
+                    .to_string(),
+            }
         })?;
 
         // Circuit-breaker scope is needed later for recording success/failure
@@ -304,15 +340,17 @@ where
                     self.guardrails.register_agent_spawn(&agent_unique_id).await;
 
                     // Successfully claimed — publish event and continue to spawn
-                    self.event_bus.publish(crate::services::event_factory::task_event(
-                        crate::services::event_bus::EventSeverity::Info,
-                        None,
-                        task.id,
-                        crate::services::event_bus::EventPayload::TaskClaimed {
-                            task_id: task.id,
-                            agent_type: agent_type.clone(),
-                        },
-                    )).await;
+                    self.event_bus
+                        .publish(crate::services::event_factory::task_event(
+                            crate::services::event_bus::EventSeverity::Info,
+                            None,
+                            task.id,
+                            crate::services::event_bus::EventPayload::TaskClaimed {
+                                task_id: task.id,
+                                agent_type: agent_type.clone(),
+                            },
+                        ))
+                        .await;
 
                     // Workflow stays in Pending state — the Overmind decides
                     // whether to workflow_advance (single subtask) or
@@ -328,20 +366,45 @@ where
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
             // Get agent template for version tracking, capabilities, and tool restrictions
-            let (template_version, capabilities, cli_tools, agent_can_write, is_template_read_only, template_max_turns, template_preferred_model, template_tier) = match self.agent_repo.get_template_by_name(&agent_type).await {
+            let (
+                template_version,
+                capabilities,
+                cli_tools,
+                agent_can_write,
+                is_template_read_only,
+                template_max_turns,
+                template_preferred_model,
+                template_tier,
+            ) = match self.agent_repo.get_template_by_name(&agent_type).await {
                 Ok(Some(template)) => {
-                    let caps: Vec<String> = template.tools.iter()
-                        .map(|t| t.name.clone())
-                        .collect();
+                    let caps: Vec<String> = template.tools.iter().map(|t| t.name.clone()).collect();
                     let tools = map_template_tools_to_cli(&caps);
                     let can_write = caps.iter().any(|c| {
                         let lower = c.to_lowercase();
                         lower == "write" || lower == "edit" || lower == "shell"
                     });
-                    (template.version, caps, tools, can_write, template.read_only, template.max_turns, template.preferred_model.clone(), template.tier)
+                    (
+                        template.version,
+                        caps,
+                        tools,
+                        can_write,
+                        template.read_only,
+                        template.max_turns,
+                        template.preferred_model.clone(),
+                        template.tier,
+                    )
                 }
                 // Default to true when template lookup fails (safer to require commits from unknown agents)
-                _ => (1, vec!["task-execution".to_string()], vec![], true, false, 0, None, AgentTier::Worker),
+                _ => (
+                    1,
+                    vec!["task-execution".to_string()],
+                    vec![],
+                    true,
+                    false,
+                    0,
+                    None,
+                    AgentTier::Worker,
+                ),
             };
 
             // Read-only agent roles never produce commits regardless of tool capabilities.
@@ -360,21 +423,30 @@ where
 
             // Register agent capabilities with A2A gateway if configured
             if self.config.mcp_servers.a2a_gateway.is_some()
-                && let Err(e) = self.register_agent_capabilities(&agent_type, capabilities).await {
-                    tracing::warn!("Failed to register agent '{}' capabilities: {}", agent_type, e);
-                }
+                && let Err(e) = self
+                    .register_agent_capabilities(&agent_type, capabilities)
+                    .await
+            {
+                tracing::warn!(
+                    "Failed to register agent '{}' capabilities: {}",
+                    agent_type,
+                    e
+                );
+            }
 
             // Publish TaskSpawned via EventBus (bridge forwards to event_tx)
-            self.event_bus.publish(crate::services::event_factory::task_event(
-                crate::services::event_bus::EventSeverity::Info,
-                None,
-                task.id,
-                crate::services::event_bus::EventPayload::TaskSpawned {
-                    task_id: task.id,
-                    task_title: task.title.clone(),
-                    agent_type: Some(agent_type.clone()),
-                },
-            )).await;
+            self.event_bus
+                .publish(crate::services::event_factory::task_event(
+                    crate::services::event_bus::EventSeverity::Info,
+                    None,
+                    task.id,
+                    crate::services::event_bus::EventPayload::TaskSpawned {
+                        task_id: task.id,
+                        task_title: task.title.clone(),
+                        agent_type: Some(agent_type.clone()),
+                    },
+                ))
+                .await;
 
             // Resolve workflow template for this task to determine workspace kind and
             // output delivery mode. SwarmConfig.workflow_template is populated at
@@ -434,7 +506,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 if let Err(e) = std::fs::write(&claude_md_path, claude_md_content) {
                     tracing::warn!("Failed to write CLAUDE.md to worktree: {}", e);
                 } else {
-                    tracing::debug!("Wrote CLAUDE.md with tool restrictions to {:?}", claude_md_path);
+                    tracing::debug!(
+                        "Wrote CLAUDE.md with tool restrictions to {:?}",
+                        claude_md_path
+                    );
                 }
 
                 // Bootstrap .claude/settings.json in worktree.
@@ -452,9 +527,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                     }
                 });
                 if let Ok(pretty) = serde_json::to_string_pretty(&settings_content)
-                    && let Err(e) = std::fs::write(claude_dir.join("settings.json"), format!("{pretty}\n")) {
-                        tracing::warn!("Failed to write .claude/settings.json to worktree: {}", e);
-                    }
+                    && let Err(e) =
+                        std::fs::write(claude_dir.join("settings.json"), format!("{pretty}\n"))
+                {
+                    tracing::warn!("Failed to write .claude/settings.json to worktree: {}", e);
+                }
             }
 
             // Load relevant goal context for the task
@@ -462,14 +539,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let goal_context = match goal_context_service.get_goals_for_task(task).await {
                 Ok(goals) if !goals.is_empty() => {
                     let context_text = GoalContextService::<G>::format_goal_context(&goals);
-                    self.audit_log.info(
-                        AuditCategory::Goal,
-                        AuditAction::GoalEvaluated,
-                        format!(
-                            "Task {} received guidance from {} relevant goal(s)",
-                            task.id, goals.len()
-                        ),
-                    ).await;
+                    self.audit_log
+                        .info(
+                            AuditCategory::Goal,
+                            AuditAction::GoalEvaluated,
+                            format!(
+                                "Task {} received guidance from {} relevant goal(s)",
+                                task.id,
+                                goals.len()
+                            ),
+                        )
+                        .await;
                     Some(context_text)
                 }
                 Ok(_) => None,
@@ -484,12 +564,15 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 let memory_service = MemoryService::new(mem_repo.clone());
                 let desc_preview: String = task.description.chars().take(500).collect();
                 let query = format!("{} {}", task.title, desc_preview);
-                match memory_service.load_context_with_budget(
-                    &query,
-                    None,
-                    2000, // 25% of 8000-token context budget
-                    RelevanceWeights::semantic_biased(),
-                ).await {
+                match memory_service
+                    .load_context_with_budget(
+                        &query,
+                        None,
+                        2000, // 25% of 8000-token context budget
+                        RelevanceWeights::semantic_biased(),
+                    )
+                    .await
+                {
                     Ok(memories) if !memories.is_empty() => Some(format_memory_context(&memories)),
                     Ok(_) => None,
                     Err(e) => {
@@ -504,17 +587,25 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             // Build the task description: goal context first, memory context second, task prompt last.
             let task_description = {
                 let mut parts: Vec<&str> = Vec::new();
-                if let Some(ref ctx) = goal_context { parts.push(ctx.as_str()); }
-                if let Some(ref ctx) = memory_context { parts.push(ctx.as_str()); }
+                if let Some(ref ctx) = goal_context {
+                    parts.push(ctx.as_str());
+                }
+                if let Some(ref ctx) = memory_context {
+                    parts.push(ctx.as_str());
+                }
                 // Include intent gap context from a previous attempt if present.
-                let intent_gap_ctx = task.context.custom.get("intent_gap_context")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if let Some(ref gap_ctx) = intent_gap_ctx { parts.push(gap_ctx.as_str()); }
+                let intent_gap_ctx = task.intent_gap_context().map(|s| s.to_string());
+                if let Some(ref gap_ctx) = intent_gap_ctx {
+                    parts.push(gap_ctx.as_str());
+                }
                 if parts.is_empty() {
                     task.description.clone()
                 } else {
-                    format!("{}\n\n---\n\n{}", parts.join("\n\n---\n\n"), task.description)
+                    format!(
+                        "{}\n\n---\n\n{}",
+                        parts.join("\n\n---\n\n"),
+                        task.description
+                    )
                 }
             };
 
@@ -536,7 +627,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                     %agent_type,
                     "Upgrading execution mode Direct -> Convergent (write-capable, non-read-only agent)"
                 );
-                crate::domain::models::ExecutionMode::Convergent { parallel_samples: None }
+                crate::domain::models::ExecutionMode::Convergent {
+                    parallel_samples: None,
+                }
             } else {
                 task.execution_mode.clone()
             };
@@ -578,21 +671,27 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             // typical usage so agents aren't cut short on complex tasks.
             let role_max_turns = {
                 let lower = agent_type.to_lowercase();
-                if lower.contains("researcher") || lower.contains("analyst")
-                    || lower.contains("explorer") || lower.contains("auditor")
+                if lower.contains("researcher")
+                    || lower.contains("analyst")
+                    || lower.contains("explorer")
+                    || lower.contains("auditor")
                 {
-                    51  // Research: typical ~15 turns, ceiling 51
-                } else if lower.contains("planner") || lower.contains("architect")
+                    51 // Research: typical ~15 turns, ceiling 51
+                } else if lower.contains("planner")
+                    || lower.contains("architect")
                     || lower.contains("designer")
-                    || lower.contains("reviewer") || lower.contains("verifier")
+                    || lower.contains("reviewer")
+                    || lower.contains("verifier")
                 {
-                    30  // Planning/Review: typical ~10 turns, ceiling 30
-                } else if lower.contains("implement") || lower.contains("coder")
-                    || lower.contains("builder") || lower.contains("fixer")
+                    30 // Planning/Review: typical ~10 turns, ceiling 30
+                } else if lower.contains("implement")
+                    || lower.contains("coder")
+                    || lower.contains("builder")
+                    || lower.contains("fixer")
                 {
-                    75  // Implementation: typical ~25 turns, ceiling 75
+                    75 // Implementation: typical ~25 turns, ceiling 75
                 } else {
-                    self.config.default_max_turns  // Fallback to config default
+                    self.config.default_max_turns // Fallback to config default
                 }
             };
 
@@ -606,7 +705,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
             // Bump turn budget for tasks retrying after max_turns exhaustion.
             // Increase by 50% per retry, capped to prevent unbounded growth.
-            if task.context.hints.iter().any(|h| h == "retry:max_turns_exceeded") {
+            if task
+                .context
+                .hints
+                .iter()
+                .any(|h| h == "retry:max_turns_exceeded")
+            {
                 let multiplier = 1.5_f64.powi(task.retry_count as i32);
                 max_turns = ((max_turns as f64 * multiplier) as u32).min(100);
             }
@@ -620,10 +724,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let verify_on_completion = self.config.verify_on_completion;
             // Without --dangerously-skip-permissions, disable direct merges to main
             // and force PR-only mode so a human must approve before merging.
-            let use_merge_queue = self.config.use_merge_queue
-                && self.config.dangerously_skip_permissions;
-            let prefer_pull_requests = self.config.prefer_pull_requests
-                || !self.config.dangerously_skip_permissions;
+            let use_merge_queue =
+                self.config.use_merge_queue && self.config.dangerously_skip_permissions;
+            let prefer_pull_requests =
+                self.config.prefer_pull_requests || !self.config.dangerously_skip_permissions;
             let repo_path = self.config.repo_path.clone();
             let default_base_ref = self.config.default_base_ref.clone();
             let fetch_on_sync = self.config.fetch_on_sync;
@@ -644,12 +748,14 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             // Cast the generic IntentVerifierService to the trait object for
             // convergent execution. This erases the <G, T> generics.
             // Intent verification is required for convergent execution.
-            let convergent_intent_verifier: Option<Arc<
-                dyn super::convergent_execution::ConvergentIntentVerifier,
-            >> = self.intent_verifier.as_ref().map(|iv| {
+            let convergent_intent_verifier: Option<
+                Arc<dyn super::convergent_execution::ConvergentIntentVerifier>,
+            > = self.intent_verifier.as_ref().map(|iv| {
                 Arc::clone(iv) as Arc<dyn super::convergent_execution::ConvergentIntentVerifier>
             });
 
+            // Per-task worker: spawned once per task, short-lived. Not a
+            // long-lived daemon, so no supervision wrapper.
             tokio::spawn(async move {
                 let _permit = permit;
                 let output_delivery = output_delivery_for_spawn;
@@ -712,19 +818,21 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             None
                         };
 
-                        audit_log.log(
-                            crate::services::AuditEntry::new(
-                                AuditLevel::Info,
-                                AuditCategory::Execution,
-                                AuditAction::TaskCompleted, // reuse; no dedicated convergence action
-                                AuditActor::System,
-                                format!(
-                                    "Task {} entering convergent execution (mode: {:?})",
-                                    task_id, task_clone.execution_mode
-                                ),
+                        audit_log
+                            .log(
+                                crate::services::AuditEntry::new(
+                                    AuditLevel::Info,
+                                    AuditCategory::Execution,
+                                    AuditAction::TaskCompleted, // reuse; no dedicated convergence action
+                                    AuditActor::System,
+                                    format!(
+                                        "Task {} entering convergent execution (mode: {:?})",
+                                        task_id, task_clone.execution_mode
+                                    ),
+                                )
+                                .with_entity(task_id, "task"),
                             )
-                            .with_entity(task_id, "task"),
-                        ).await;
+                            .await;
 
                         // Create a cancellation token for this convergent execution.
                         // Currently not wired to external cancellation signals, but
@@ -1065,12 +1173,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                             })).collect::<Vec<_>>(),
                                         }),
                                     );
-                                    t.context.custom.insert(
-                                        "intent_gap_context".to_string(),
-                                        serde_json::json!(gap_context),
-                                    );
+                                    t.set_intent_gap_context(gap_context.clone());
 
-                                    let is_workflow_subtask = t.context.custom.contains_key("workflow_phase");
+                                    let is_workflow_subtask = t.is_workflow_phase_subtask();
 
                                     if !t.status.is_terminal() {
                                         let _ = t.transition_to(TaskStatus::Failed);
@@ -1378,7 +1483,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         }
 
                         // Convergent path complete -- skip direct execution below
-                        guardrails.register_agent_end(&agent_unique_id_for_spawn).await;
+                        guardrails
+                            .register_agent_end(&agent_unique_id_for_spawn)
+                            .await;
                         return;
                     } else {
                         // Missing convergence infrastructure -- fall back to direct
@@ -1456,8 +1563,8 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 // Construct MCP stdio server command for agent access to Abathur APIs.
                 // Use absolute path so the MCP server finds the DB regardless of
                 // the agent's working directory (worktrees have a different CWD).
-                let abathur_exe = std::env::current_exe()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("abathur"));
+                let abathur_exe =
+                    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("abathur"));
                 let db_path = std::env::current_dir()
                     .unwrap_or_else(|_| repo_path.clone())
                     .join(".abathur")
@@ -1465,9 +1572,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                 // Build MCP args — overmind gets --workflow-session to block task_submit
                 let mut mcp_args = vec![
-                    "mcp".to_string(), "stdio".to_string(),
-                    "--db-path".to_string(), db_path.to_string_lossy().to_string(),
-                    "--task-id".to_string(), task_id.to_string(),
+                    "mcp".to_string(),
+                    "stdio".to_string(),
+                    "--db-path".to_string(),
+                    db_path.to_string_lossy().to_string(),
+                    "--task-id".to_string(),
+                    task_id.to_string(),
                 ];
                 if agent_type.to_lowercase() == "overmind" {
                     mcp_args.push("--workflow-session".to_string());
@@ -1482,12 +1592,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 });
                 config = config.with_mcp_server(mcp_config.to_string());
 
-                let request = SubstrateRequest::new(
-                    task_id,
-                    &agent_type,
-                    &system_prompt,
-                    &task_description,
-                ).with_config(config);
+                let request =
+                    SubstrateRequest::new(task_id, &agent_type, &system_prompt, &task_description)
+                        .with_config(config);
 
                 let result = substrate.execute(request).await;
 
@@ -1516,9 +1623,13 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 // centralized guard in transition_to_validating() catches
                                 // the CommandBus path, but the fallback paths below bypass
                                 // it, so we also guard here at the decision point.
-                                let target_status = if verify_on_completion && can_safely_auto_complete(&completed_task) {
+                                let target_status = if verify_on_completion
+                                    && can_safely_auto_complete(&completed_task)
+                                {
                                     TaskStatus::Validating
-                                } else if verify_on_completion && !can_safely_auto_complete(&completed_task) {
+                                } else if verify_on_completion
+                                    && !can_safely_auto_complete(&completed_task)
+                                {
                                     tracing::warn!(
                                         task_id = %task_id,
                                         "Skipping Validating transition for task with active workflow — completing directly"
@@ -1536,12 +1647,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         }),
                                     );
                                     if let Err(e) = cb.dispatch(envelope).await {
-                                        tracing::warn!("Failed to complete task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                        tracing::warn!(
+                                            "Failed to complete task {} via CommandBus, using non-atomic fallback: {}",
+                                            task_id,
+                                            e
+                                        );
                                         if let Ok(Some(mut t)) = task_repo.get(task_id).await
-                                            && !t.status.is_terminal() {
-                                                let _ = t.transition_to(target_status);
-                                                let _ = task_repo.update(&t).await;
-                                            }
+                                            && !t.status.is_terminal()
+                                        {
+                                            let _ = t.transition_to(target_status);
+                                            let _ = task_repo.update(&t).await;
+                                        }
                                         // Only emit TaskCompleted when actually completing.
                                         // When target is Validating, the verification workflow
                                         // will emit the event after Validating -> Complete.
@@ -1558,7 +1674,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         }
                                     }
                                 } else {
-                                    tracing::warn!("CommandBus not available for task {} completion, using non-atomic fallback", task_id);
+                                    tracing::warn!(
+                                        "CommandBus not available for task {} completion, using non-atomic fallback",
+                                        task_id
+                                    );
                                     let _ = completed_task.transition_to(target_status);
                                     let _ = task_repo.update(&completed_task).await;
                                     // Only emit TaskCompleted when actually completing.
@@ -1586,41 +1705,52 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 // AdapterLifecycleSyncHandler can close/comment on the
                                 // external issue. The original event was published on the
                                 // MCP session's local bus which has no handlers.
-                                replay_gate_rejection_event(&completed_task, &event_bus, &all_workflows).await;
+                                replay_gate_rejection_event(
+                                    &completed_task,
+                                    &event_bus,
+                                    &all_workflows,
+                                )
+                                .await;
                             }
 
                             // Record success with circuit breaker
                             circuit_breaker.record_success(circuit_scope.clone()).await;
 
                             // Log task completion
-                            audit_log.log(
-                                AuditEntry::new(
-                                    AuditLevel::Info,
-                                    AuditCategory::Task,
-                                    AuditAction::TaskCompleted,
-                                    AuditActor::System,
-                                    format!("Task completed: {} tokens used, {} turns", tokens, turns),
+                            audit_log
+                                .log(
+                                    AuditEntry::new(
+                                        AuditLevel::Info,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskCompleted,
+                                        AuditActor::System,
+                                        format!(
+                                            "Task completed: {} tokens used, {} turns",
+                                            tokens, turns
+                                        ),
+                                    )
+                                    .with_entity(task_id, "task"),
                                 )
-                                .with_entity(task_id, "task"),
-                            ).await;
+                                .await;
 
                             // Mark worktree as completed and create artifact reference
                             if worktree_path.is_some()
-                                && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                                    wt.complete();
-                                    let _ = worktree_repo.update(&wt).await;
+                                && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await
+                            {
+                                wt.complete();
+                                let _ = worktree_repo.update(&wt).await;
 
-                                    if let Ok(Some(mut task)) = task_repo.get(task_id).await {
-                                        let artifact = crate::domain::models::ArtifactRef {
-                                            uri: format!("worktree://{}/{}", task_id, wt.branch),
-                                            artifact_type: crate::domain::models::ArtifactType::Code,
-                                            checksum: wt.merge_commit.clone(),
-                                        };
-                                        task.artifacts.push(artifact);
-                                        task.worktree_path = Some(wt.path.clone());
-                                        let _ = task_repo.update(&task).await;
-                                    }
+                                if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                                    let artifact = crate::domain::models::ArtifactRef {
+                                        uri: format!("worktree://{}/{}", task_id, wt.branch),
+                                        artifact_type: crate::domain::models::ArtifactType::Code,
+                                        checksum: wt.merge_commit.clone(),
+                                    };
+                                    task.artifacts.push(artifact);
+                                    task.worktree_path = Some(wt.path.clone());
+                                    let _ = task_repo.update(&task).await;
                                 }
+                            }
 
                             // (Bridge forwards EventBus→event_tx automatically)
 
@@ -1645,7 +1775,8 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     merge_request_repo.clone(),
                                     fetch_on_sync,
                                     post_completion_chain.clone(),
-                                ).await;
+                                )
+                                .await;
 
                                 if let Err(e) = workflow_result {
                                     audit_log.log(
@@ -1664,15 +1795,16 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             // Record execution in evolution loop AFTER verification
                             // so we capture the true outcome (success vs verification failure)
                             if track_evolution {
-                                let outcome = if let Ok(Some(post_task)) = task_repo.get(task_id).await {
-                                    if post_task.status == TaskStatus::Failed {
-                                        TaskOutcome::Failure
+                                let outcome =
+                                    if let Ok(Some(post_task)) = task_repo.get(task_id).await {
+                                        if post_task.status == TaskStatus::Failed {
+                                            TaskOutcome::Failure
+                                        } else {
+                                            TaskOutcome::Success
+                                        }
                                     } else {
-                                        TaskOutcome::Success
-                                    }
-                                } else {
-                                    TaskOutcome::Success // fallback if we can't read task
-                                };
+                                        TaskOutcome::Success // fallback if we can't read task
+                                    };
                                 let execution = TaskExecution {
                                     task_id,
                                     template_name: agent_type_for_evolution.clone(),
@@ -1696,7 +1828,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             let turns = session.turns_completed;
                             total_tokens.fetch_add(tokens, Ordering::Relaxed);
 
-                            let error_msg = session.error.clone().unwrap_or_else(|| "Unknown error".to_string());
+                            let error_msg = session
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "Unknown error".to_string());
 
                             // Check if the agent already completed the task via MCP
                             // before attempting failure transition.
@@ -1707,7 +1842,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     error = %error_msg,
                                     "Skipping task failure — already terminal (completed via MCP)"
                                 );
-                                replay_gate_rejection_event(&completed_task, &event_bus, &all_workflows).await;
+                                replay_gate_rejection_event(
+                                    &completed_task,
+                                    &event_bus,
+                                    &all_workflows,
+                                )
+                                .await;
                                 false
                             } else if is_max_turns_auto_completable(&error_msg) {
                                 // Agent exhausted max_turns but its last output says "completed".
@@ -1724,33 +1864,38 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     );
                                     false
                                 } else {
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    error = %error_msg,
-                                    "Auto-completing task — agent exhausted turns but reported completion"
-                                );
-                                let target_status = if verify_on_completion {
-                                    TaskStatus::Validating
-                                } else {
-                                    TaskStatus::Complete
-                                };
-                                if let Some(ref cb) = command_bus {
-                                    let envelope = CommandEnvelope::new(
-                                        CommandSource::System,
-                                        DomainCommand::Task(TaskCommand::Transition {
-                                            task_id,
-                                            new_status: target_status,
-                                        }),
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        error = %error_msg,
+                                        "Auto-completing task — agent exhausted turns but reported completion"
                                     );
-                                    if let Err(e) = cb.dispatch(envelope).await {
-                                        tracing::warn!("Failed to auto-complete task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
-                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await
-                                            && !t.status.is_terminal() {
+                                    let target_status = if verify_on_completion {
+                                        TaskStatus::Validating
+                                    } else {
+                                        TaskStatus::Complete
+                                    };
+                                    if let Some(ref cb) = command_bus {
+                                        let envelope = CommandEnvelope::new(
+                                            CommandSource::System,
+                                            DomainCommand::Task(TaskCommand::Transition {
+                                                task_id,
+                                                new_status: target_status,
+                                            }),
+                                        );
+                                        if let Err(e) = cb.dispatch(envelope).await {
+                                            tracing::warn!(
+                                                "Failed to auto-complete task {} via CommandBus, using non-atomic fallback: {}",
+                                                task_id,
+                                                e
+                                            );
+                                            if let Ok(Some(mut t)) = task_repo.get(task_id).await
+                                                && !t.status.is_terminal()
+                                            {
                                                 let _ = t.transition_to(target_status);
                                                 let _ = task_repo.update(&t).await;
                                             }
-                                        if target_status == TaskStatus::Complete {
-                                            event_bus.publish(crate::services::event_factory::task_event(
+                                            if target_status == TaskStatus::Complete {
+                                                event_bus.publish(crate::services::event_factory::task_event(
                                                 crate::services::event_bus::EventSeverity::Info,
                                                 None,
                                                 task_id,
@@ -1759,14 +1904,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                                     tokens_used: tokens,
                                                 },
                                             )).await;
+                                            }
                                         }
-                                    }
-                                } else {
-                                    tracing::warn!("CommandBus not available for task {} auto-completion, using non-atomic fallback", task_id);
-                                    let _ = completed_task.transition_to(target_status);
-                                    let _ = task_repo.update(&completed_task).await;
-                                    if target_status == TaskStatus::Complete {
-                                        event_bus.publish(crate::services::event_factory::task_event(
+                                    } else {
+                                        tracing::warn!(
+                                            "CommandBus not available for task {} auto-completion, using non-atomic fallback",
+                                            task_id
+                                        );
+                                        let _ = completed_task.transition_to(target_status);
+                                        let _ = task_repo.update(&completed_task).await;
+                                        if target_status == TaskStatus::Complete {
+                                            event_bus.publish(crate::services::event_factory::task_event(
                                             crate::services::event_bus::EventSeverity::Info,
                                             None,
                                             task_id,
@@ -1775,9 +1923,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                                 tokens_used: tokens,
                                             },
                                         )).await;
+                                        }
                                     }
-                                }
-                                true
+                                    true
                                 } // end else (can_safely_auto_complete)
                             } else {
                                 // Fail task via CommandBus (transitions + journals event)
@@ -1790,12 +1938,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         }),
                                     );
                                     if let Err(e) = cb.dispatch(envelope).await {
-                                        tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                        tracing::warn!(
+                                            "Failed to fail task {} via CommandBus, using non-atomic fallback: {}",
+                                            task_id,
+                                            e
+                                        );
                                         if let Ok(Some(mut t)) = task_repo.get(task_id).await
-                                            && !t.status.is_terminal() {
-                                                let _ = t.transition_to(TaskStatus::Failed);
-                                                let _ = task_repo.update(&t).await;
-                                            }
+                                            && !t.status.is_terminal()
+                                        {
+                                            let _ = t.transition_to(TaskStatus::Failed);
+                                            let _ = task_repo.update(&t).await;
+                                        }
                                         event_bus.publish(crate::services::event_factory::task_event(
                                             crate::services::event_bus::EventSeverity::Warning,
                                             None,
@@ -1808,29 +1961,33 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         )).await;
                                     }
                                 } else {
-                                    tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
+                                    tracing::warn!(
+                                        "CommandBus not available for task {} failure, using non-atomic fallback",
+                                        task_id
+                                    );
                                     let _ = completed_task.transition_to(TaskStatus::Failed);
                                     let _ = task_repo.update(&completed_task).await;
-                                    event_bus.publish(crate::services::event_factory::task_event(
-                                        crate::services::event_bus::EventSeverity::Warning,
-                                        None,
-                                        task_id,
-                                        crate::services::event_bus::EventPayload::TaskFailed {
+                                    event_bus
+                                        .publish(crate::services::event_factory::task_event(
+                                            crate::services::event_bus::EventSeverity::Warning,
+                                            None,
                                             task_id,
-                                            error: error_msg.clone(),
-                                            retry_count: completed_task.retry_count,
-                                        },
-                                    )).await;
+                                            crate::services::event_bus::EventPayload::TaskFailed {
+                                                task_id,
+                                                error: error_msg.clone(),
+                                                retry_count: completed_task.retry_count,
+                                            },
+                                        ))
+                                        .await;
                                 }
                                 false
                             };
 
                             if !auto_completed {
                                 // Record failure with circuit breaker
-                                circuit_breaker.record_failure(
-                                    circuit_scope.clone(),
-                                    &error_msg,
-                                ).await;
+                                circuit_breaker
+                                    .record_failure(circuit_scope.clone(), &error_msg)
+                                    .await;
                             }
 
                             // Record execution in evolution loop for template improvement
@@ -1839,7 +1996,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     task_id,
                                     template_name: agent_type_for_evolution.clone(),
                                     template_version: template_version_for_evolution,
-                                    outcome: if auto_completed { TaskOutcome::Success } else { TaskOutcome::Failure },
+                                    outcome: if auto_completed {
+                                        TaskOutcome::Success
+                                    } else {
+                                        TaskOutcome::Failure
+                                    },
                                     executed_at: chrono::Utc::now(),
                                     turns_used: turns,
                                     tokens_used: tokens,
@@ -1866,13 +2027,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                                 // Mark worktree as completed for auto-completed tasks
                                 if worktree_path.is_some()
-                                    && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                                        wt.complete();
-                                        let _ = worktree_repo.update(&wt).await;
-                                    }
+                                    && let Ok(Some(mut wt)) =
+                                        worktree_repo.get_by_task(task_id).await
+                                {
+                                    wt.complete();
+                                    let _ = worktree_repo.update(&wt).await;
+                                }
                             } else {
                                 // Log task failure with retry state for debugging
-                                let consecutive_budget = completed_task.context.custom
+                                let consecutive_budget = completed_task
+                                    .context
+                                    .custom
                                     .get("consecutive_budget_failures")
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0);
@@ -1895,10 +2060,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                                 // Mark worktree as failed
                                 if worktree_path.is_some()
-                                    && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                                        wt.fail(error_msg.clone());
-                                        let _ = worktree_repo.update(&wt).await;
-                                    }
+                                    && let Ok(Some(mut wt)) =
+                                        worktree_repo.get_by_task(task_id).await
+                                {
+                                    wt.fail(error_msg.clone());
+                                    let _ = worktree_repo.update(&wt).await;
+                                }
                             }
 
                             // (Bridge forwards EventBus→event_tx automatically)
@@ -1915,7 +2082,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     error = %error_msg,
                                     "Skipping task failure — already terminal (completed via MCP)"
                                 );
-                                replay_gate_rejection_event(&completed_task, &event_bus, &all_workflows).await;
+                                replay_gate_rejection_event(
+                                    &completed_task,
+                                    &event_bus,
+                                    &all_workflows,
+                                )
+                                .await;
                             } else {
                                 // Fail task via CommandBus (transitions + journals event)
                                 if let Some(ref cb) = command_bus {
@@ -1927,12 +2099,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         }),
                                     );
                                     if let Err(e) = cb.dispatch(envelope).await {
-                                        tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                        tracing::warn!(
+                                            "Failed to fail task {} via CommandBus, using non-atomic fallback: {}",
+                                            task_id,
+                                            e
+                                        );
                                         if let Ok(Some(mut t)) = task_repo.get(task_id).await
-                                            && !t.status.is_terminal() {
-                                                let _ = t.transition_to(TaskStatus::Failed);
-                                                let _ = task_repo.update(&t).await;
-                                            }
+                                            && !t.status.is_terminal()
+                                        {
+                                            let _ = t.transition_to(TaskStatus::Failed);
+                                            let _ = task_repo.update(&t).await;
+                                        }
                                         event_bus.publish(crate::services::event_factory::task_event(
                                             crate::services::event_bus::EventSeverity::Warning,
                                             None,
@@ -1945,27 +2122,31 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         )).await;
                                     }
                                 } else {
-                                    tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
+                                    tracing::warn!(
+                                        "CommandBus not available for task {} failure, using non-atomic fallback",
+                                        task_id
+                                    );
                                     let _ = completed_task.transition_to(TaskStatus::Failed);
                                     let _ = task_repo.update(&completed_task).await;
-                                    event_bus.publish(crate::services::event_factory::task_event(
-                                        crate::services::event_bus::EventSeverity::Warning,
-                                        None,
-                                        task_id,
-                                        crate::services::event_bus::EventPayload::TaskFailed {
+                                    event_bus
+                                        .publish(crate::services::event_factory::task_event(
+                                            crate::services::event_bus::EventSeverity::Warning,
+                                            None,
                                             task_id,
-                                            error: error_msg.clone(),
-                                            retry_count: completed_task.retry_count,
-                                        },
-                                    )).await;
+                                            crate::services::event_bus::EventPayload::TaskFailed {
+                                                task_id,
+                                                error: error_msg.clone(),
+                                                retry_count: completed_task.retry_count,
+                                            },
+                                        ))
+                                        .await;
                                 }
                             }
 
                             // Record failure with circuit breaker
-                            circuit_breaker.record_failure(
-                                circuit_scope.clone(),
-                                &error_msg,
-                            ).await;
+                            circuit_breaker
+                                .record_failure(circuit_scope.clone(), &error_msg)
+                                .await;
 
                             // Record failure in evolution loop for template improvement
                             if track_evolution {
@@ -1983,23 +2164,26 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             }
 
                             // Log task failure
-                            audit_log.log(
-                                AuditEntry::new(
-                                    AuditLevel::Error,
-                                    AuditCategory::Task,
-                                    AuditAction::TaskFailed,
-                                    AuditActor::System,
-                                    format!("Task execution error: {}", error_msg),
+                            audit_log
+                                .log(
+                                    AuditEntry::new(
+                                        AuditLevel::Error,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskFailed,
+                                        AuditActor::System,
+                                        format!("Task execution error: {}", error_msg),
+                                    )
+                                    .with_entity(task_id, "task"),
                                 )
-                                .with_entity(task_id, "task"),
-                            ).await;
+                                .await;
 
                             // Mark worktree as failed
                             if worktree_path.is_some()
-                                && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                                    wt.fail(error_msg.clone());
-                                    let _ = worktree_repo.update(&wt).await;
-                                }
+                                && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await
+                            {
+                                wt.fail(error_msg.clone());
+                                let _ = worktree_repo.update(&wt).await;
+                            }
 
                             // (Bridge forwards EventBus→event_tx automatically)
                         }
@@ -2007,13 +2191,14 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 }
 
                 // Unregister agent from guardrails on ALL direct execution exit paths
-                guardrails.register_agent_end(&agent_unique_id_for_spawn).await;
+                guardrails
+                    .register_agent_end(&agent_unique_id_for_spawn)
+                    .await;
             });
         }
 
         Ok(())
     }
-
 }
 
 /// Checks whether a task can safely be auto-completed (to Validating or Complete).
@@ -2022,11 +2207,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 /// because auto-completing a workflow parent mid-workflow (e.g. while PhaseReady)
 /// can create an illegal Validating+PhaseReady combination that causes a deadlock.
 pub(crate) fn can_safely_auto_complete(task: &Task) -> bool {
-    if let Some(ws_val) = task.context.custom.get("workflow_state")
-        && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_val.clone())
-            && !ws.is_terminal() {
-                return false;
-            }
+    if let Some(ws) = task.workflow_state()
+        && !ws.is_terminal()
+    {
+        return false;
+    }
     true
 }
 
@@ -2058,7 +2243,9 @@ pub(crate) fn is_max_turns_auto_completable(error_msg: &str) -> bool {
             "marking complete",
             "task_update_status",
         ];
-        COMPLETION_SIGNALS.iter().any(|signal| trimmed.contains(signal))
+        COMPLETION_SIGNALS
+            .iter()
+            .any(|signal| trimmed.contains(signal))
     } else {
         false
     }
@@ -2093,14 +2280,23 @@ mod tests {
     #[test]
     fn test_format_memory_context_single_entry() {
         let entry = scored(
-            Memory::semantic("rust-patterns", "Use iterators and closures for idiomatic Rust."),
+            Memory::semantic(
+                "rust-patterns",
+                "Use iterators and closures for idiomatic Rust.",
+            ),
             0.85,
         );
         let output = format_memory_context(&[entry]);
 
-        assert!(output.contains("rust-patterns"), "Key should appear in output");
+        assert!(
+            output.contains("rust-patterns"),
+            "Key should appear in output"
+        );
         assert!(output.contains("0.85"), "Score should appear in output");
-        assert!(output.contains("Use iterators and closures"), "Content should appear in output");
+        assert!(
+            output.contains("Use iterators and closures"),
+            "Content should appear in output"
+        );
         assert!(output.contains("semantic"), "Tier should appear in output");
     }
 
@@ -2111,9 +2307,15 @@ mod tests {
         let output = format_memory_context(&[first, second]);
 
         assert!(output.contains("key-alpha"), "First key should appear");
-        assert!(output.contains("First memory content."), "First content should appear");
+        assert!(
+            output.contains("First memory content."),
+            "First content should appear"
+        );
         assert!(output.contains("key-beta"), "Second key should appear");
-        assert!(output.contains("Second memory content."), "Second content should appear");
+        assert!(
+            output.contains("Second memory content."),
+            "Second content should appear"
+        );
         assert!(output.contains("0.90"), "First score should appear");
         assert!(output.contains("0.70"), "Second score should appear");
     }
@@ -2129,7 +2331,10 @@ mod tests {
         } else {
             role_max_turns
         };
-        assert_eq!(max_turns, 50, "role floor should override lower template value");
+        assert_eq!(
+            max_turns, 50,
+            "role floor should override lower template value"
+        );
 
         // When template is higher than role default, template should win
         let template_high: u32 = 75;
@@ -2138,7 +2343,10 @@ mod tests {
         } else {
             role_max_turns
         };
-        assert_eq!(max_turns_high, 75, "template should win when higher than role floor");
+        assert_eq!(
+            max_turns_high, 75,
+            "template should win when higher than role floor"
+        );
 
         // When template is zero (unset), role default should be used
         let template_zero: u32 = 0;
@@ -2147,20 +2355,25 @@ mod tests {
         } else {
             role_max_turns
         };
-        assert_eq!(max_turns_zero, 50, "role default should be used when template is zero");
+        assert_eq!(
+            max_turns_zero, 50,
+            "role default should be used when template is zero"
+        );
     }
 
     // -- is_max_turns_auto_completable tests ---------------------------------
 
     #[test]
     fn test_auto_completable_typical_message() {
-        let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: completed";
+        let msg =
+            "error_max_turns: agent exhausted 31 turns without completing. Last output: completed";
         assert!(is_max_turns_auto_completable(msg));
     }
 
     #[test]
     fn test_auto_completable_with_complete_variant() {
-        let msg = "error_max_turns: Agent exhausted turns without completing. Last output: complete";
+        let msg =
+            "error_max_turns: Agent exhausted turns without completing. Last output: complete";
         assert!(is_max_turns_auto_completable(msg));
     }
 
@@ -2190,7 +2403,8 @@ mod tests {
 
     #[test]
     fn test_auto_completable_finished() {
-        let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: finished";
+        let msg =
+            "error_max_turns: agent exhausted 31 turns without completing. Last output: finished";
         assert!(is_max_turns_auto_completable(msg));
     }
 
@@ -2229,10 +2443,7 @@ mod tests {
         let ws = WorkflowState::Completed {
             workflow_name: "code".to_string(),
         };
-        task.context.custom.insert(
-            "workflow_state".to_string(),
-            serde_json::to_value(&ws).unwrap(),
-        );
+        task.set_workflow_state(&ws).unwrap();
         assert!(
             can_safely_auto_complete(&task),
             "Task with terminal workflow state should be safely auto-completable"
@@ -2247,10 +2458,7 @@ mod tests {
             phase_index: 1,
             phase_name: "implement".to_string(),
         };
-        task.context.custom.insert(
-            "workflow_state".to_string(),
-            serde_json::to_value(&ws).unwrap(),
-        );
+        task.set_workflow_state(&ws).unwrap();
         assert!(
             !can_safely_auto_complete(&task),
             "Task with non-terminal workflow state should NOT be safely auto-completable"

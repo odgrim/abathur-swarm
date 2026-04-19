@@ -4,19 +4,19 @@
 //! following the A2A protocol specification.
 
 use axum::{
+    Router,
     extract::{Path, State},
     http::StatusCode,
     response::{
-        sse::{Event, KeepAlive, Sse},
         Json,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Router,
 };
 use chrono::{DateTime, Utc};
 use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -454,7 +454,10 @@ pub struct InMemoryTask {
 impl InMemoryTask {
     /// Create a new task from send parameters.
     fn from_params(params: &TaskSendParams) -> Self {
-        let task_id = params.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        let task_id = params
+            .id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let session_id = params
             .session_id
             .clone()
@@ -536,8 +539,9 @@ pub struct A2AState {
     /// Optional federation service for inter-swarm communication.
     pub federation_service: Option<Arc<crate::services::federation::FederationService>>,
     /// Handle for the convergence publisher daemon (lazily spawned).
-    pub convergence_publisher_handle:
-        RwLock<Option<crate::services::federation::convergence_publisher::ConvergencePublisherHandle>>,
+    pub convergence_publisher_handle: RwLock<
+        Option<crate::services::federation::convergence_publisher::ConvergencePublisherHandle>,
+    >,
 }
 
 impl A2AState {
@@ -555,7 +559,10 @@ impl A2AState {
     }
 
     /// Create state with a federation service attached.
-    pub fn with_federation(mut self, service: Arc<crate::services::federation::FederationService>) -> Self {
+    pub fn with_federation(
+        mut self,
+        service: Arc<crate::services::federation::FederationService>,
+    ) -> Self {
         self.federation_service = Some(service);
         self
     }
@@ -619,7 +626,10 @@ impl A2AHttpGateway {
             // Delegation endpoints (for orchestrator integration)
             .route("/api/v1/delegations", post(create_delegation))
             .route("/api/v1/delegations/pending", get(list_pending_delegations))
-            .route("/api/v1/delegations/{delegation_id}/ack", post(acknowledge_delegation))
+            .route(
+                "/api/v1/delegations/{delegation_id}/ack",
+                post(acknowledge_delegation),
+            )
             .with_state(state.clone());
 
         // Apply JWT middleware for federation endpoint authentication
@@ -909,9 +919,7 @@ async fn handle_well_known_agent_card(
         skills: vec![A2ASkill {
             id: "task-execution".to_string(),
             name: "Task Execution".to_string(),
-            description: Some(
-                "Execute delegated tasks via AI agent orchestration".to_string(),
-            ),
+            description: Some("Execute delegated tasks via AI agent orchestration".to_string()),
             tags: vec!["orchestration".to_string(), "delegation".to_string()],
             examples: vec![],
         }],
@@ -1061,10 +1069,7 @@ async fn handle_jsonrpc(
     }
 }
 
-async fn handle_tasks_send(
-    state: Arc<A2AState>,
-    request: JsonRpcRequest,
-) -> Json<JsonRpcResponse> {
+async fn handle_tasks_send(state: Arc<A2AState>, request: JsonRpcRequest) -> Json<JsonRpcResponse> {
     let params: TaskSendParams = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,
         Err(e) => {
@@ -1072,7 +1077,7 @@ async fn handle_tasks_send(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -1080,18 +1085,13 @@ async fn handle_tasks_send(
     // FederationService instead of creating a local task.
     if let Some(ref metadata) = params.metadata
         && let Some(federation_val) = metadata.get("abathur:federation")
-            && let Some(result) = handle_federation_routing(
-                &state,
-                &request.id,
-                federation_val,
-                &params,
-            )
-            .await
-            {
-                return result;
-            }
-            // If handle_federation_routing returns None, fall through to
-            // normal task handling (e.g. unknown intent or no federation service).
+        && let Some(result) =
+            handle_federation_routing(&state, &request.id, federation_val, &params).await
+    {
+        return result;
+    }
+    // If handle_federation_routing returns None, fall through to
+    // normal task handling (e.g. unknown intent or no federation service).
 
     // Check if task exists (continue existing task) or create new.
     // Note: session tracking is intentionally omitted here — the sessions map
@@ -1159,7 +1159,9 @@ async fn handle_federation_routing(
                     return Some(Json(JsonRpcResponse::error(
                         request_id.clone(),
                         A2AErrorCode::InvalidParams,
-                        Some(json!({"message": "Missing or invalid 'task_id' in federation metadata"})),
+                        Some(
+                            json!({"message": "Missing or invalid 'task_id' in federation metadata"}),
+                        ),
                     )));
                 }
             };
@@ -1179,7 +1181,9 @@ async fn handle_federation_routing(
                     return Some(Json(JsonRpcResponse::error(
                         request_id.clone(),
                         A2AErrorCode::InvalidParams,
-                        Some(json!({"message": "Missing or invalid 'correlation_id' in federation metadata"})),
+                        Some(
+                            json!({"message": "Missing or invalid 'correlation_id' in federation metadata"}),
+                        ),
                     )));
                 }
             };
@@ -1214,10 +1218,7 @@ async fn handle_federation_routing(
                             message: Some(A2AProtocolMessage {
                                 role: "agent".to_string(),
                                 parts: vec![MessagePart::Text {
-                                    text: format!(
-                                        "Task delegated to cerebrate {}",
-                                        cerebrate_id
-                                    ),
+                                    text: format!("Task delegated to cerebrate {}", cerebrate_id),
                                 }],
                             }),
                             timestamp: Some(Utc::now().to_rfc3339()),
@@ -1443,10 +1444,7 @@ async fn handle_federation_routing(
                     message: Some(A2AProtocolMessage {
                         role: "agent".to_string(),
                         parts: vec![MessagePart::Text {
-                            text: format!(
-                                "Accepted delegated goal '{}' — now working",
-                                goal_name
-                            ),
+                            text: format!("Accepted delegated goal '{}' — now working", goal_name),
                         }],
                     }),
                     timestamp: Some(now.to_rfc3339()),
@@ -1471,7 +1469,10 @@ async fn handle_federation_routing(
 /// Prefers structured `title` and `description` fields from the federation
 /// metadata (set by `From<&FederationTaskEnvelope> for TaskSendParams`).
 /// Falls back to parsing message text if metadata doesn't have them.
-fn extract_title_description(federation_val: &Value, message: &A2AProtocolMessage) -> (String, String) {
+fn extract_title_description(
+    federation_val: &Value,
+    message: &A2AProtocolMessage,
+) -> (String, String) {
     // 1. Try federation metadata first (most reliable source).
     let meta_title = federation_val.get("title").and_then(|v| v.as_str());
     let meta_desc = federation_val.get("description").and_then(|v| v.as_str());
@@ -1488,13 +1489,15 @@ fn extract_title_description(federation_val: &Value, message: &A2AProtocolMessag
         match part {
             MessagePart::Data { data, .. } => {
                 if title.is_empty()
-                    && let Some(t) = data.get("title").and_then(|v| v.as_str()) {
-                        title = t.to_string();
-                    }
+                    && let Some(t) = data.get("title").and_then(|v| v.as_str())
+                {
+                    title = t.to_string();
+                }
                 if description.is_empty()
-                    && let Some(d) = data.get("description").and_then(|v| v.as_str()) {
-                        description = d.to_string();
-                    }
+                    && let Some(d) = data.get("description").and_then(|v| v.as_str())
+                {
+                    description = d.to_string();
+                }
             }
             MessagePart::Text { text } => {
                 if title.is_empty() {
@@ -1574,58 +1577,55 @@ async fn handle_tasks_send_subscribe(
     // If federation, attempt to delegate and track progress
     if is_federation
         && let Some(ref federation_service) = state.federation_service
-            && let Some(federation_val) = params
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get("abathur:federation"))
-            {
-                let (title, description) =
-                    extract_title_description(federation_val, &params.message);
+        && let Some(federation_val) = params
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("abathur:federation"))
+    {
+        let (title, description) = extract_title_description(federation_val, &params.message);
 
-                let fed_task_id = federation_val
-                    .get("task_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                    .unwrap_or_else(Uuid::new_v4);
+        let fed_task_id = federation_val
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .unwrap_or_else(Uuid::new_v4);
 
-                let envelope =
-                    FederationTaskEnvelope::new(fed_task_id, title, description);
+        let envelope = FederationTaskEnvelope::new(fed_task_id, title, description);
 
-                // Fire and forget the delegation
-                let fed_svc = Arc::clone(federation_service);
-                let task_id_for_spawn = task_id.clone();
-                let state_for_spawn = Arc::clone(&state);
-                tokio::spawn(async move {
-                    match fed_svc.delegate(envelope).await {
-                        Ok(cerebrate_id) => {
-                            let mut tasks = state_for_spawn.tasks.write().await;
-                            if let Some(t) = tasks.get_mut(&task_id_for_spawn) {
-                                t.state = A2ATaskState::Working;
-                                t.metadata = Some(json!({
-                                    "abathur:federation": {
-                                        "delegated_to": cerebrate_id,
-                                        "task_id": fed_task_id.to_string(),
-                                    }
-                                }));
-                                t.updated_at = Utc::now();
+        // Fire and forget the delegation
+        let fed_svc = Arc::clone(federation_service);
+        let task_id_for_spawn = task_id.clone();
+        let state_for_spawn = Arc::clone(&state);
+        tokio::spawn(async move {
+            match fed_svc.delegate(envelope).await {
+                Ok(cerebrate_id) => {
+                    let mut tasks = state_for_spawn.tasks.write().await;
+                    if let Some(t) = tasks.get_mut(&task_id_for_spawn) {
+                        t.state = A2ATaskState::Working;
+                        t.metadata = Some(json!({
+                            "abathur:federation": {
+                                "delegated_to": cerebrate_id,
+                                "task_id": fed_task_id.to_string(),
                             }
-                        }
-                        Err(e) => {
-                            let mut tasks = state_for_spawn.tasks.write().await;
-                            if let Some(t) = tasks.get_mut(&task_id_for_spawn) {
-                                t.state = A2ATaskState::Failed;
-                                t.metadata = Some(json!({
-                                    "error": format!("Federation delegation failed: {}", e),
-                                }));
-                                t.updated_at = Utc::now();
-                            }
-                        }
+                        }));
+                        t.updated_at = Utc::now();
                     }
-                });
+                }
+                Err(e) => {
+                    let mut tasks = state_for_spawn.tasks.write().await;
+                    if let Some(t) = tasks.get_mut(&task_id_for_spawn) {
+                        t.state = A2ATaskState::Failed;
+                        t.metadata = Some(json!({
+                            "error": format!("Federation delegation failed: {}", e),
+                        }));
+                        t.updated_at = Utc::now();
+                    }
+                }
             }
+        });
+    }
 
-    let heartbeat_interval =
-        Duration::from_millis(state.config.heartbeat_interval_ms);
+    let heartbeat_interval = Duration::from_millis(state.config.heartbeat_interval_ms);
     let state_clone = Arc::clone(&state);
     let task_id_clone = task_id.clone();
 
@@ -1660,9 +1660,7 @@ async fn handle_tasks_send_subscribe(
 
                     let is_terminal = matches!(
                         task.state,
-                        A2ATaskState::Completed
-                            | A2ATaskState::Failed
-                            | A2ATaskState::Canceled
+                        A2ATaskState::Completed | A2ATaskState::Failed | A2ATaskState::Canceled
                     );
 
                     if is_terminal {
@@ -1683,9 +1681,7 @@ async fn handle_tasks_send_subscribe(
                 if last_state.is_some_and(|s| {
                     matches!(
                         s,
-                        A2ATaskState::Completed
-                            | A2ATaskState::Failed
-                            | A2ATaskState::Canceled
+                        A2ATaskState::Completed | A2ATaskState::Failed | A2ATaskState::Canceled
                     )
                 }) {
                     return None;
@@ -1705,10 +1701,7 @@ async fn handle_tasks_send_subscribe(
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(heartbeat_interval)))
 }
 
-async fn handle_tasks_get(
-    state: Arc<A2AState>,
-    request: JsonRpcRequest,
-) -> Json<JsonRpcResponse> {
+async fn handle_tasks_get(state: Arc<A2AState>, request: JsonRpcRequest) -> Json<JsonRpcResponse> {
     let params: TaskGetParams = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,
         Err(e) => {
@@ -1716,7 +1709,7 @@ async fn handle_tasks_get(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -1728,7 +1721,7 @@ async fn handle_tasks_get(
                 request.id,
                 A2AErrorCode::TaskNotFound,
                 Some(json!({"taskId": params.id})),
-            ))
+            ));
         }
     };
 
@@ -1773,7 +1766,7 @@ async fn handle_tasks_cancel(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -1785,7 +1778,7 @@ async fn handle_tasks_cancel(
                 request.id,
                 A2AErrorCode::TaskNotFound,
                 Some(json!({"taskId": params.id})),
-            ))
+            ));
         }
     };
 
@@ -1799,7 +1792,7 @@ async fn handle_tasks_cancel(
                     "taskId": params.id,
                     "currentState": task.state.to_string()
                 })),
-            ))
+            ));
         }
         _ => {}
     }
@@ -1846,7 +1839,7 @@ async fn handle_push_notification_config(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -1858,7 +1851,7 @@ async fn handle_push_notification_config(
                 request.id,
                 A2AErrorCode::TaskNotFound,
                 Some(json!({"taskId": params.id})),
-            ))
+            ));
         }
     };
 
@@ -1870,10 +1863,7 @@ async fn handle_push_notification_config(
     ))
 }
 
-async fn handle_agent_card(
-    state: Arc<A2AState>,
-    request: JsonRpcRequest,
-) -> Json<JsonRpcResponse> {
+async fn handle_agent_card(state: Arc<A2AState>, request: JsonRpcRequest) -> Json<JsonRpcResponse> {
     // Get agent_id from params if provided
     let agent_id: Option<String> = serde_json::from_value(request.params.clone())
         .ok()
@@ -2062,7 +2052,7 @@ async fn cancel_task(
                     error: format!("Task {} not found", task_id),
                     code: "TASK_NOT_FOUND".to_string(),
                 }),
-            ))
+            ));
         }
     };
 
@@ -2071,10 +2061,13 @@ async fn cancel_task(
             return Err((
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {
-                    error: format!("Task {} cannot be canceled in state {}", task_id, task.state),
+                    error: format!(
+                        "Task {} cannot be canceled in state {}",
+                        task_id, task.state
+                    ),
                     code: "TASK_NOT_CANCELABLE".to_string(),
                 }),
-            ))
+            ));
         }
         _ => {}
     }
@@ -2100,8 +2093,7 @@ async fn cancel_task(
 async fn stream_task(
     State(state): State<Arc<A2AState>>,
     Path(task_id): Path<String>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<ErrorResponse>)>
-{
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<ErrorResponse>)> {
     if !state.config.enable_streaming {
         return Err((
             StatusCode::NOT_IMPLEMENTED,
@@ -2257,7 +2249,7 @@ async fn handle_federation_register(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -2299,7 +2291,7 @@ async fn handle_federation_disconnect(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -2335,7 +2327,7 @@ async fn handle_federation_delegate(
                     request.id,
                     A2AErrorCode::InvalidParams,
                     Some(json!({"message": e.to_string()})),
-                ))
+                ));
             }
         };
 
@@ -2375,7 +2367,7 @@ async fn handle_federation_accept(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -2411,7 +2403,7 @@ async fn handle_federation_reject(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -2456,7 +2448,7 @@ async fn handle_federation_progress(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -2493,7 +2485,7 @@ async fn handle_federation_result(
                     request.id,
                     A2AErrorCode::InvalidParams,
                     Some(json!({"message": e.to_string()})),
-                ))
+                ));
             }
         };
 
@@ -2533,7 +2525,7 @@ async fn handle_federation_heartbeat(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -2569,7 +2561,7 @@ async fn handle_federation_reconcile(
                 request.id,
                 A2AErrorCode::InvalidParams,
                 Some(json!({"message": e.to_string()})),
-            ))
+            ));
         }
     };
 
@@ -2629,7 +2621,9 @@ impl FederationClient {
 
     /// List available trusted peers that are active.
     pub fn list_available_peers(&self) -> Vec<&TrustedSwarmConfig> {
-        self.config.trusted_swarms.iter()
+        self.config
+            .trusted_swarms
+            .iter()
             .filter(|s| s.active)
             .collect()
     }
@@ -2638,39 +2632,48 @@ impl FederationClient {
     pub async fn get_peer_capabilities(&self, peer_id: &str) -> Result<A2AAgentCard, String> {
         let peer = self.find_peer(peer_id)?;
 
-        let url = format!("{}/.well-known/agent.json", peer.endpoint.trim_end_matches('/'));
+        let url = format!(
+            "{}/.well-known/agent.json",
+            peer.endpoint.trim_end_matches('/')
+        );
 
         let mut request = self.http_client.get(&url);
         if let Some(ref token) = peer.auth_token {
             request = request.header("Authorization", format!("Bearer {}", token));
         }
 
-        let response = request.send().await
+        let response = request
+            .send()
+            .await
             .map_err(|e| format!("Failed to reach peer {}: {}", peer_id, e))?;
 
         if !response.status().is_success() {
-            return Err(format!("Peer {} returned status {}", peer_id, response.status()));
+            return Err(format!(
+                "Peer {} returned status {}",
+                peer_id,
+                response.status()
+            ));
         }
 
-        let card: A2AAgentCard = response.json().await
+        let card: A2AAgentCard = response
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse peer {} agent card: {}", peer_id, e))?;
 
         Ok(card)
     }
 
     /// Delegate a task to a trusted peer swarm.
-    pub async fn delegate_task(
-        &self,
-        peer_id: &str,
-        message: &str,
-    ) -> Result<A2ATask, String> {
+    pub async fn delegate_task(&self, peer_id: &str, message: &str) -> Result<A2ATask, String> {
         let peer = self.find_peer(peer_id)?;
 
         // Rate limiting
         {
             let mut counts = self.request_counts.write().await;
             let count = counts.entry(peer_id.to_string()).or_insert(0);
-            let limit = peer.rate_limit_override.unwrap_or(self.config.rate_limit_per_swarm);
+            let limit = peer
+                .rate_limit_override
+                .unwrap_or(self.config.rate_limit_per_swarm);
             if *count >= limit {
                 return Err(format!("Rate limit exceeded for peer {}", peer_id));
             }
@@ -2701,7 +2704,9 @@ impl FederationClient {
 
         let url = format!("{}/a2a", peer.endpoint.trim_end_matches('/'));
 
-        let mut request = self.http_client.post(&url)
+        let mut request = self
+            .http_client
+            .post(&url)
             .header("Content-Type", "application/json")
             .json(&json_rpc);
 
@@ -2709,21 +2714,33 @@ impl FederationClient {
             request = request.header("Authorization", format!("Bearer {}", token));
         }
 
-        let response = request.send().await
+        let response = request
+            .send()
+            .await
             .map_err(|e| format!("Failed to send task to peer {}: {}", peer_id, e))?;
 
         if !response.status().is_success() {
-            return Err(format!("Peer {} returned status {}", peer_id, response.status()));
+            return Err(format!(
+                "Peer {} returned status {}",
+                peer_id,
+                response.status()
+            ));
         }
 
-        let rpc_response: JsonRpcResponse = response.json().await
+        let rpc_response: JsonRpcResponse = response
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse response from peer {}: {}", peer_id, e))?;
 
         if let Some(error) = rpc_response.error {
-            return Err(format!("Peer {} error: {} ({})", peer_id, error.message, error.code));
+            return Err(format!(
+                "Peer {} error: {} ({})",
+                peer_id, error.message, error.code
+            ));
         }
 
-        let result = rpc_response.result
+        let result = rpc_response
+            .result
             .ok_or_else(|| format!("Peer {} returned no result", peer_id))?;
 
         let task: A2ATask = serde_json::from_value(result)
@@ -2738,7 +2755,9 @@ impl FederationClient {
     }
 
     fn find_peer(&self, peer_id: &str) -> Result<&TrustedSwarmConfig, String> {
-        self.config.trusted_swarms.iter()
+        self.config
+            .trusted_swarms
+            .iter()
             .find(|s| s.id == peer_id && s.active)
             .ok_or_else(|| format!("Peer {} not found or inactive", peer_id))
     }
@@ -2848,11 +2867,7 @@ mod tests {
             push_config: None,
         };
 
-        state
-            .tasks
-            .write()
-            .await
-            .insert("task-1".to_string(), task);
+        state.tasks.write().await.insert("task-1".to_string(), task);
 
         let tasks = state.tasks.read().await;
         assert!(tasks.contains_key("task-1"));

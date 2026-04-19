@@ -11,15 +11,20 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-use crate::domain::models::{AccessorId, ExecutionMode, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus, TaskType};
-use crate::domain::ports::{AgentFilter, GoalFilter, GoalRepository, MemoryRepository, TaskRepository};
+use crate::domain::models::{
+    AccessorId, ExecutionMode, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource,
+    TaskStatus, TaskType,
+};
+use crate::domain::ports::AgentRepository;
+use crate::domain::ports::{
+    AgentFilter, GoalFilter, GoalRepository, MemoryRepository, TaskRepository,
+};
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
     TaskCommand,
 };
 use crate::services::event_bus::EventBus;
 use crate::services::{AgentService, MemoryService, TaskService};
-use crate::domain::ports::AgentRepository;
 
 /// MCP stdio server that exposes Abathur APIs as native tools.
 pub struct StdioServer<T, A, M, G>
@@ -132,12 +137,15 @@ where
             }
         };
 
-        let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
-        let method = request
-            .get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
-        let params = request.get("params").cloned().unwrap_or(serde_json::json!({}));
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let params = request
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
 
         match method {
             "initialize" => self.handle_initialize(id),
@@ -267,10 +275,7 @@ where
     }
 
     async fn handle_tools_call(&self, id: serde_json::Value, params: &serde_json::Value) -> String {
-        let tool_name = params
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("");
+        let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
         let arguments = params
             .get("arguments")
             .cloned()
@@ -340,8 +345,14 @@ where
             .ok_or("Missing required field: description")?
             .to_string();
 
-        let title = args.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
-        let agent_type = args.get("agent_type").and_then(|a| a.as_str()).map(|s| s.to_string());
+        let title = args
+            .get("title")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string());
+        let agent_type = args
+            .get("agent_type")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string());
         let priority = args
             .get("priority")
             .and_then(|p| p.as_str())
@@ -376,16 +387,34 @@ where
 
             // Normalize the title: lowercase, strip punctuation, take first 6
             // significant words so minor rephrasing still matches.
-            let normalized_title: String = title.as_deref()
+            let normalized_title: String = title
+                .as_deref()
                 .or(Some(&description))
                 .unwrap_or("")
                 .to_lowercase()
                 .split_whitespace()
                 .filter(|w| {
                     // Drop common stop words that LLMs shuffle
-                    !matches!(*w, "a" | "an" | "the" | "and" | "or" | "for" | "to"
-                        | "in" | "of" | "on" | "all" | "across" | "with" | "that"
-                        | "this" | "from" | "into" | "by")
+                    !matches!(
+                        *w,
+                        "a" | "an"
+                            | "the"
+                            | "and"
+                            | "or"
+                            | "for"
+                            | "to"
+                            | "in"
+                            | "of"
+                            | "on"
+                            | "all"
+                            | "across"
+                            | "with"
+                            | "that"
+                            | "this"
+                            | "from"
+                            | "into"
+                            | "by"
+                    )
                 })
                 .take(6)
                 .collect::<Vec<_>>()
@@ -403,7 +432,9 @@ where
             .get("execution_mode")
             .and_then(|m| m.as_str())
             .map(|s| match s.to_lowercase().as_str() {
-                "convergent" => ExecutionMode::Convergent { parallel_samples: None },
+                "convergent" => ExecutionMode::Convergent {
+                    parallel_samples: None,
+                },
                 _ => ExecutionMode::Direct,
             });
 
@@ -439,10 +470,7 @@ where
     }
 
     async fn tool_task_list(&self, args: &serde_json::Value) -> Result<String, String> {
-        let limit = args
-            .get("limit")
-            .and_then(|l| l.as_u64())
-            .unwrap_or(50) as usize;
+        let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
 
         let status_filter = args.get("status").and_then(|s| s.as_str());
         let task_type_filter = args.get("task_type").and_then(|t| t.as_str());
@@ -451,18 +479,24 @@ where
 
         let tasks = if has_any_filter {
             let status = match status_filter {
-                Some(s) => Some(TaskStatus::from_str(s)
-                    .ok_or_else(|| format!("Invalid status: {}", s))?),
+                Some(s) => {
+                    Some(TaskStatus::from_str(s).ok_or_else(|| format!("Invalid status: {}", s))?)
+                }
                 None => None,
             };
             let task_type = match task_type_filter {
-                Some(t) => Some(TaskType::from_str(t)
-                    .ok_or_else(|| format!("Invalid task_type: {}", t))?),
+                Some(t) => {
+                    Some(TaskType::from_str(t).ok_or_else(|| format!("Invalid task_type: {}", t))?)
+                }
                 None => None,
             };
             use crate::domain::ports::TaskFilter;
             self.task_service
-                .list_tasks(TaskFilter { status, task_type, ..Default::default() })
+                .list_tasks(TaskFilter {
+                    status,
+                    task_type,
+                    ..Default::default()
+                })
                 .await
                 .map_err(|e| format!("Failed to list tasks: {}", e))?
         } else {
@@ -522,12 +556,12 @@ where
         // Include verification-specific details when applicable
         if task.task_type.is_verification() {
             response["verification"] = serde_json::json!({
-                "satisfaction": task.context.custom.get("satisfaction"),
-                "confidence": task.context.custom.get("confidence"),
-                "iteration": task.context.custom.get("iteration"),
-                "gaps_count": task.context.custom.get("gaps_count"),
-                "gaps": task.context.custom.get("gaps"),
-                "accomplishment_summary": task.context.custom.get("accomplishment_summary"),
+                "satisfaction": task.satisfaction_value(),
+                "confidence": task.confidence_value(),
+                "iteration": task.iteration_value(),
+                "gaps_count": task.gaps_count_value(),
+                "gaps": task.gaps_value(),
+                "accomplishment_summary": task.accomplishment_summary_value(),
             });
         }
 
@@ -552,13 +586,18 @@ where
                 tokens_used: 0,
             }),
             "failed" | "fail" => {
-                let error = args.get("error").and_then(|e| e.as_str()).map(|s| s.to_string());
-                DomainCommand::Task(TaskCommand::Fail {
-                    task_id: id,
-                    error,
-                })
+                let error = args
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .map(|s| s.to_string());
+                DomainCommand::Task(TaskCommand::Fail { task_id: id, error })
             }
-            _ => return Err(format!("Invalid status '{}'. Use 'complete' or 'failed'.", status)),
+            _ => {
+                return Err(format!(
+                    "Invalid status '{}'. Use 'complete' or 'failed'.",
+                    status
+                ));
+            }
         };
         let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
 
@@ -580,8 +619,7 @@ where
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: task_id")?;
-        let task_id = Uuid::parse_str(task_id_str)
-            .map_err(|e| format!("Invalid UUID: {}", e))?;
+        let task_id = Uuid::parse_str(task_id_str).map_err(|e| format!("Invalid UUID: {}", e))?;
         let agent_type = args
             .get("agent_type")
             .and_then(|a| a.as_str())
@@ -629,7 +667,10 @@ where
             .ok_or("Missing required field: system_prompt")?
             .to_string();
 
-        let tier_str = args.get("tier").and_then(|t| t.as_str()).unwrap_or("worker");
+        let tier_str = args
+            .get("tier")
+            .and_then(|t| t.as_str())
+            .unwrap_or("worker");
         let tier = crate::domain::models::agent::AgentTier::parse_str(tier_str)
             .unwrap_or(crate::domain::models::agent::AgentTier::Worker);
 
@@ -642,7 +683,8 @@ where
                         let name = v.get("name")?.as_str()?;
                         let desc = v.get("description")?.as_str()?;
                         let required = v.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
-                        let mut tool = crate::domain::models::agent::ToolCapability::new(name, desc);
+                        let mut tool =
+                            crate::domain::models::agent::ToolCapability::new(name, desc);
                         if required {
                             tool = tool.required();
                         }
@@ -660,14 +702,22 @@ where
                     .filter_map(|v| {
                         let name = v.get("name")?.as_str()?;
                         let desc = v.get("description")?.as_str()?;
-                        Some(crate::domain::models::agent::AgentConstraint::new(name, desc))
+                        Some(crate::domain::models::agent::AgentConstraint::new(
+                            name, desc,
+                        ))
                     })
                     .collect()
             })
             .unwrap_or_default();
 
-        let max_turns = args.get("max_turns").and_then(|m| m.as_u64()).map(|m| m as u32);
-        let read_only = args.get("read_only").and_then(|r| r.as_bool()).unwrap_or(false);
+        let max_turns = args
+            .get("max_turns")
+            .and_then(|m| m.as_u64())
+            .map(|m| m as u32);
+        let read_only = args
+            .get("read_only")
+            .and_then(|r| r.as_bool())
+            .unwrap_or(false);
         let preferred_model = args
             .get("preferred_model")
             .and_then(|m| m.as_str())
@@ -675,7 +725,17 @@ where
 
         let template = self
             .agent_service
-            .register_template(name, description, tier, system_prompt, tools, constraints, max_turns, read_only, preferred_model)
+            .register_template(
+                name,
+                description,
+                tier,
+                system_prompt,
+                tools,
+                constraints,
+                max_turns,
+                read_only,
+                preferred_model,
+            )
             .await
             .map_err(|e| format!("Failed to create agent: {}", e))?;
 
@@ -861,8 +921,7 @@ where
             }
         }
 
-        let memory = memory_opt
-            .ok_or_else(|| format!("Memory {} not found", id))?;
+        let memory = memory_opt.ok_or_else(|| format!("Memory {} not found", id))?;
 
         let response = serde_json::json!({
             "id": memory.id.to_string(),
@@ -928,14 +987,17 @@ where
         if let Some(ids_arr) = args.get("ids").and_then(|i| i.as_array()) {
             for v in ids_arr {
                 if let Some(id_str) = v.as_str() {
-                    let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID '{}': {}", id_str, e))?;
+                    let id = Uuid::parse_str(id_str)
+                        .map_err(|e| format!("Invalid UUID '{}': {}", id_str, e))?;
                     task_ids.push(id);
                 }
             }
         }
 
         if task_ids.is_empty() {
-            return Err("Must provide either 'id' (single UUID) or 'ids' (array of UUIDs)".to_string());
+            return Err(
+                "Must provide either 'id' (single UUID) or 'ids' (array of UUIDs)".to_string(),
+            );
         }
 
         let timeout_secs = args
@@ -1052,9 +1114,7 @@ where
             .and_then(|a| a.as_str())
             .ok_or("Missing required field: adapter")?;
 
-        let action_value = args
-            .get("action")
-            .ok_or("Missing required field: action")?;
+        let action_value = args.get("action").ok_or("Missing required field: action")?;
 
         let adapter = registry
             .get_egress(adapter_name)
@@ -1088,8 +1148,8 @@ where
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: task_id")?;
-        let task_id = uuid::Uuid::parse_str(task_id_str)
-            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let task_id =
+            uuid::Uuid::parse_str(task_id_str).map_err(|e| format!("Invalid task_id: {}", e))?;
 
         let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_service.repo().clone(),
@@ -1101,7 +1161,10 @@ where
             }),
             false, // MCP tools don't drive verification; the handler does
         );
-        let result = engine.advance(task_id).await.map_err(|e| format!("{}", e))?;
+        let result = engine
+            .advance(task_id)
+            .await
+            .map_err(|e| format!("{}", e))?;
 
         let response = match result {
             crate::services::workflow_engine::AdvanceResult::PhaseReady {
@@ -1126,8 +1189,8 @@ where
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: task_id")?;
-        let task_id = uuid::Uuid::parse_str(task_id_str)
-            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let task_id =
+            uuid::Uuid::parse_str(task_id_str).map_err(|e| format!("Invalid task_id: {}", e))?;
 
         let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_service.repo().clone(),
@@ -1139,7 +1202,10 @@ where
             }),
             false, // MCP tools don't drive verification; the handler does
         );
-        let status = engine.get_state(task_id).await.map_err(|e| format!("{}", e))?;
+        let status = engine
+            .get_state(task_id)
+            .await
+            .map_err(|e| format!("{}", e))?;
 
         // Enrich states with action_required guidance
         let mut json = serde_json::to_value(&status).map_err(|e| e.to_string())?;
@@ -1154,7 +1220,9 @@ where
                 "phase_ready" => {
                     json.as_object_mut().unwrap().insert(
                         "action_required".to_string(),
-                        serde_json::json!("Call workflow_fan_out to create subtasks for this phase"),
+                        serde_json::json!(
+                            "Call workflow_fan_out to create subtasks for this phase"
+                        ),
                     );
                 }
                 _ => {}
@@ -1169,8 +1237,8 @@ where
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: task_id")?;
-        let task_id = uuid::Uuid::parse_str(task_id_str)
-            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let task_id =
+            uuid::Uuid::parse_str(task_id_str).map_err(|e| format!("Invalid task_id: {}", e))?;
         let verdict_str = args
             .get("verdict")
             .and_then(|v| v.as_str())
@@ -1178,10 +1246,7 @@ where
         let verdict: crate::domain::models::workflow_state::GateVerdict =
             serde_json::from_value(serde_json::Value::String(verdict_str.to_string()))
                 .map_err(|e| format!("Invalid verdict '{}': {}", verdict_str, e))?;
-        let reason = args
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("");
 
         let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_service.repo().clone(),
@@ -1193,12 +1258,15 @@ where
             }),
             false, // MCP tools don't drive verification; the handler does
         );
-        let result = engine.provide_verdict(task_id, verdict, reason).await
+        let result = engine
+            .provide_verdict(task_id, verdict, reason)
+            .await
             .map_err(|e| format!("{}", e))?;
 
         let response = match result {
             Some(crate::services::workflow_engine::AdvanceResult::PhaseReady {
-                phase_index, phase_name,
+                phase_index,
+                phase_name,
             }) => serde_json::json!({
                 "status": "approved_phase_ready",
                 "task_id": task_id.to_string(),
@@ -1227,12 +1295,10 @@ where
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: task_id")?;
-        let task_id = uuid::Uuid::parse_str(task_id_str)
-            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let task_id =
+            uuid::Uuid::parse_str(task_id_str).map_err(|e| format!("Invalid task_id: {}", e))?;
 
-        let slices_value = args
-            .get("slices")
-            .ok_or("Missing required field: slices")?;
+        let slices_value = args.get("slices").ok_or("Missing required field: slices")?;
         let slices: Vec<crate::domain::models::workflow_state::FanOutSlice> =
             serde_json::from_value(slices_value.clone())
                 .map_err(|e| format!("Invalid slices: {}", e))?;
@@ -1247,7 +1313,10 @@ where
             }),
             false, // MCP tools don't drive verification; the handler does
         );
-        let result = engine.fan_out(task_id, slices).await.map_err(|e| format!("{}", e))?;
+        let result = engine
+            .fan_out(task_id, slices)
+            .await
+            .map_err(|e| format!("{}", e))?;
 
         let response = serde_json::json!({
             "subtask_ids": result.subtask_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
@@ -1263,21 +1332,29 @@ where
 
         let mut workflows = Vec::new();
         // Check active tasks (non-terminal)
-        for status in &[TaskStatus::Pending, TaskStatus::Ready, TaskStatus::Running, TaskStatus::Blocked] {
-            let tasks = self.task_service.repo().list_by_status(*status).await
+        for status in &[
+            TaskStatus::Pending,
+            TaskStatus::Ready,
+            TaskStatus::Running,
+            TaskStatus::Blocked,
+        ] {
+            let tasks = self
+                .task_service
+                .repo()
+                .list_by_status(*status)
+                .await
                 .map_err(|e| format!("Failed to list tasks: {}", e))?;
             for task in tasks {
-                if let Some(ws_value) = task.context.custom.get("workflow_state")
-                    && let Ok(ws) = serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(ws_value.clone()) {
-                        workflows.push(serde_json::json!({
-                            "task_id": task.id.to_string(),
-                            "task_title": task.title,
-                            "workflow_name": ws.workflow_name(),
-                            "phase_index": ws.phase_index(),
-                            "is_terminal": ws.is_terminal(),
-                            "state": serde_json::to_value(&ws).unwrap_or_default(),
-                        }));
-                    }
+                if let Some(ws) = task.workflow_state() {
+                    workflows.push(serde_json::json!({
+                        "task_id": task.id.to_string(),
+                        "task_title": task.title,
+                        "workflow_name": ws.workflow_name(),
+                        "phase_index": ws.phase_index(),
+                        "is_terminal": ws.is_terminal(),
+                        "state": serde_json::to_value(&ws).unwrap_or_default(),
+                    }));
+                }
             }
         }
 
@@ -1297,8 +1374,8 @@ where
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: task_id")?;
-        let task_id = Uuid::parse_str(task_id_str)
-            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let task_id =
+            Uuid::parse_str(task_id_str).map_err(|e| format!("Invalid task_id: {}", e))?;
         let workflow_name = args
             .get("workflow_name")
             .and_then(|v| v.as_str())
@@ -1314,7 +1391,9 @@ where
             }),
             false,
         );
-        let status = engine.select_workflow(task_id, workflow_name).await
+        let status = engine
+            .select_workflow(task_id, workflow_name)
+            .await
             .map_err(|e| format!("{}", e))?;
 
         let response = serde_json::to_value(&status).map_err(|e| e.to_string())?;
@@ -1326,8 +1405,8 @@ where
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: task_id")?;
-        let task_id = Uuid::parse_str(task_id_str)
-            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let task_id =
+            Uuid::parse_str(task_id_str).map_err(|e| format!("Invalid task_id: {}", e))?;
         let reason = args
             .get("reason")
             .and_then(|v| v.as_str())
@@ -1369,8 +1448,8 @@ where
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: task_id")?;
-        let task_id = Uuid::parse_str(task_id_str)
-            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let task_id =
+            Uuid::parse_str(task_id_str).map_err(|e| format!("Invalid task_id: {}", e))?;
 
         let mut task = self
             .task_service
@@ -1428,4 +1507,3 @@ where
         .to_string()
     }
 }
-

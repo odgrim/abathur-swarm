@@ -754,13 +754,8 @@ mod tests {
     fn test_trajectory_new() {
         let task_id = Uuid::new_v4();
         let goal_id = Some(Uuid::new_v4());
-        let trajectory = Trajectory::new(
-            task_id,
-            goal_id,
-            test_spec(),
-            test_budget(),
-            test_policy(),
-        );
+        let trajectory =
+            Trajectory::new(task_id, goal_id, test_spec(), test_budget(), test_policy());
 
         assert_eq!(trajectory.task_id, task_id);
         assert_eq!(trajectory.goal_id, goal_id);
@@ -829,12 +824,9 @@ mod tests {
             15_000,
             false,
         ));
-        trajectory.strategy_log.push(StrategyEntry::new(
-            StrategyKind::Reframe,
-            3,
-            40_000,
-            false,
-        ));
+        trajectory
+            .strategy_log
+            .push(StrategyEntry::new(StrategyKind::Reframe, 3, 40_000, false));
 
         let seq = trajectory.effective_strategy_sequence();
         assert_eq!(seq.len(), 3);
@@ -889,8 +881,8 @@ mod tests {
         let obs1 = test_observation(0, StrategyKind::RetryWithFeedback)
             .with_metrics(metrics_with(0.1, 0.3));
 
-        let obs2 = test_observation(1, StrategyKind::FocusedRepair)
-            .with_metrics(metrics_with(0.2, 0.7));
+        let obs2 =
+            test_observation(1, StrategyKind::FocusedRepair).with_metrics(metrics_with(0.2, 0.7));
 
         let obs3 = test_observation(2, StrategyKind::RetryWithFeedback)
             .with_metrics(metrics_with(-0.1, 0.5));
@@ -938,8 +930,8 @@ mod tests {
         assert_eq!(trajectory.latest_convergence_delta(), 0.0);
 
         // Add observation with metrics
-        let obs = test_observation(1, StrategyKind::FocusedRepair)
-            .with_metrics(metrics_with(0.42, 0.6));
+        let obs =
+            test_observation(1, StrategyKind::FocusedRepair).with_metrics(metrics_with(0.42, 0.6));
         trajectory.observations.push(obs);
 
         assert!((trajectory.latest_convergence_delta() - 0.42).abs() < f64::EPSILON);
@@ -956,12 +948,10 @@ mod tests {
         let gap_b = IntentGap::new("No unit tests", GapSeverity::Moderate);
         let gap_c = IntentGap::new("Missing error handling", GapSeverity::Major);
 
-        let obs1 = test_observation(0, StrategyKind::RetryWithFeedback).with_verification(
-            VerificationResult::new("partial", 0.5, vec![gap_a, gap_b]),
-        );
-        let obs2 = test_observation(1, StrategyKind::FocusedRepair).with_verification(
-            VerificationResult::new("partial", 0.6, vec![gap_c]),
-        );
+        let obs1 = test_observation(0, StrategyKind::RetryWithFeedback)
+            .with_verification(VerificationResult::new("partial", 0.5, vec![gap_a, gap_b]));
+        let obs2 = test_observation(1, StrategyKind::FocusedRepair)
+            .with_verification(VerificationResult::new("partial", 0.6, vec![gap_c]));
 
         trajectory.observations.push(obs1);
         trajectory.observations.push(obs2);
@@ -1025,8 +1015,8 @@ mod tests {
 
     #[test]
     fn test_strategy_entry_with_delta() {
-        let entry = StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false)
-            .with_delta(0.15);
+        let entry =
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false).with_delta(0.15);
 
         assert_eq!(entry.strategy_kind.kind_name(), "retry_with_feedback");
         assert_eq!(entry.observation_sequence, 0);
@@ -1057,8 +1047,7 @@ mod tests {
     #[test]
     fn test_decisive_overseer_changes_empty() {
         let task_id = Uuid::new_v4();
-        let trajectory =
-            Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
+        let trajectory = Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
 
         // No observations, no changes
         assert!(trajectory.decisive_overseer_changes().is_empty());
@@ -1067,8 +1056,7 @@ mod tests {
     #[test]
     fn test_attractor_path_empty() {
         let task_id = Uuid::new_v4();
-        let trajectory =
-            Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
+        let trajectory = Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
 
         assert!(trajectory.attractor_path().is_empty());
     }
@@ -1079,21 +1067,16 @@ mod tests {
         let mut trajectory =
             Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
 
-        trajectory
-            .observations
-            .push(test_observation(0, StrategyKind::RetryWithFeedback).with_metrics(
-                metrics_with(0.15, 0.3),
-            ));
-        trajectory
-            .observations
-            .push(test_observation(1, StrategyKind::FocusedRepair).with_metrics(
-                metrics_with(-0.1, 0.25),
-            ));
-        trajectory
-            .observations
-            .push(test_observation(2, StrategyKind::Reframe).with_metrics(
-                metrics_with(0.01, 0.26),
-            ));
+        trajectory.observations.push(
+            test_observation(0, StrategyKind::RetryWithFeedback)
+                .with_metrics(metrics_with(0.15, 0.3)),
+        );
+        trajectory.observations.push(
+            test_observation(1, StrategyKind::FocusedRepair).with_metrics(metrics_with(-0.1, 0.25)),
+        );
+        trajectory.observations.push(
+            test_observation(2, StrategyKind::Reframe).with_metrics(metrics_with(0.01, 0.26)),
+        );
 
         let path = trajectory.attractor_path();
         assert_eq!(path.len(), 3);
@@ -1191,8 +1174,7 @@ mod tests {
             first_retained
         );
         assert_eq!(
-            trajectory.strategy_log[Trajectory::MAX_STRATEGY_LOG_ENTRIES - 1]
-                .observation_sequence,
+            trajectory.strategy_log[Trajectory::MAX_STRATEGY_LOG_ENTRIES - 1].observation_sequence,
             (total - 1) as u32
         );
     }

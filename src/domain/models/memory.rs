@@ -338,8 +338,8 @@ impl Memory {
 
         // Half-life depends on tier
         let half_life_hours = match self.tier {
-            MemoryTier::Working => 0.5,   // 30 minutes
-            MemoryTier::Episodic => 24.0, // 1 day
+            MemoryTier::Working => 0.5,    // 30 minutes
+            MemoryTier::Episodic => 24.0,  // 1 day
             MemoryTier::Semantic => 168.0, // 1 week (but never expires)
         };
 
@@ -472,23 +472,30 @@ impl Memory {
         // 1. Jaccard similarity (baseline)
         let intersection = set_a.intersection(&set_b).count() as f32;
         let union = set_a.union(&set_b).count() as f32;
-        let jaccard = if union > 0.0 { intersection / union } else { 0.0 };
+        let jaccard = if union > 0.0 {
+            intersection / union
+        } else {
+            0.0
+        };
 
         // 2. Term-frequency weighted overlap: shared words that are rarer score higher
         // Words appearing in both get a boost inversely proportional to their frequency
         let total_words = (words_a.len() + words_b.len()) as f32;
         let mut freq_a: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
         let mut freq_b: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
-        for &w in &words_a { *freq_a.entry(w).or_default() += 1.0; }
-        for &w in &words_b { *freq_b.entry(w).or_default() += 1.0; }
+        for &w in &words_a {
+            *freq_a.entry(w).or_default() += 1.0;
+        }
+        for &w in &words_b {
+            *freq_b.entry(w).or_default() += 1.0;
+        }
 
         // Common stop words get reduced weight
         const STOP_WORDS: &[&str] = &[
-            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-            "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-            "should", "may", "might", "must", "can", "could", "of", "in", "to",
-            "for", "with", "on", "at", "from", "by", "and", "or", "but", "not",
-            "this", "that", "it", "its", "as", "if", "then", "than", "so",
+            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+            "had", "do", "does", "did", "will", "would", "shall", "should", "may", "might", "must",
+            "can", "could", "of", "in", "to", "for", "with", "on", "at", "from", "by", "and", "or",
+            "but", "not", "this", "that", "it", "its", "as", "if", "then", "than", "so",
         ];
 
         let mut weighted_overlap = 0.0f32;
@@ -509,13 +516,19 @@ impl Memory {
             let stop_penalty = if STOP_WORDS.contains(word) { 0.1 } else { 1.0 };
             weight_sum += idf_proxy * stop_penalty;
         }
-        let tf_idf_score = if weight_sum > 0.0 { weighted_overlap / weight_sum } else { 0.0 };
+        let tf_idf_score = if weight_sum > 0.0 {
+            weighted_overlap / weight_sum
+        } else {
+            0.0
+        };
 
         // 3. Bigram overlap for phrase-level matching
-        let bigrams_a: std::collections::HashSet<String> = words_a.windows(2)
+        let bigrams_a: std::collections::HashSet<String> = words_a
+            .windows(2)
             .map(|w| format!("{} {}", w[0], w[1]))
             .collect();
-        let bigrams_b: std::collections::HashSet<String> = words_b.windows(2)
+        let bigrams_b: std::collections::HashSet<String> = words_b
+            .windows(2)
             .map(|w| format!("{} {}", w[0], w[1]))
             .collect();
         let bigram_score = if bigrams_a.is_empty() && bigrams_b.is_empty() {
@@ -523,7 +536,11 @@ impl Memory {
         } else {
             let bi_intersection = bigrams_a.intersection(&bigrams_b).count() as f32;
             let bi_union = bigrams_a.union(&bigrams_b).count() as f32;
-            if bi_union > 0.0 { bi_intersection / bi_union } else { 0.0 }
+            if bi_union > 0.0 {
+                bi_intersection / bi_union
+            } else {
+                0.0
+            }
         };
 
         // Combine: 30% Jaccard + 50% TF-IDF weighted + 20% bigram
@@ -538,7 +555,11 @@ impl Memory {
         if embedding.len() != query_vector.len() || embedding.is_empty() {
             return None;
         }
-        let dot: f32 = embedding.iter().zip(query_vector.iter()).map(|(a, b)| a * b).sum();
+        let dot: f32 = embedding
+            .iter()
+            .zip(query_vector.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let norm_a: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         let norm_b: f32 = query_vector.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm_a == 0.0 || norm_b == 0.0 {
@@ -823,20 +844,29 @@ mod tests {
         }
 
         let score_after = mem.importance_score();
-        assert!(score_after > score_before, "Importance should increase with access count");
+        assert!(
+            score_after > score_before,
+            "Importance should increase with access count"
+        );
     }
 
     #[test]
     fn test_relevance_score_with_matching_query() {
-        let mem = Memory::working("rust_patterns", "Common patterns in Rust programming include iterators and closures");
+        let mem = Memory::working(
+            "rust_patterns",
+            "Common patterns in Rust programming include iterators and closures",
+        );
         let weights = RelevanceWeights::semantic_biased();
 
         let scored = mem.relevance_score("Rust patterns iterators", &weights);
         let scored_unrelated = mem.relevance_score("python database migrations", &weights);
 
-        assert!(scored.score > scored_unrelated.score,
+        assert!(
+            scored.score > scored_unrelated.score,
             "Matching query should score higher: {} vs {}",
-            scored.score, scored_unrelated.score);
+            scored.score,
+            scored_unrelated.score
+        );
     }
 
     #[test]
@@ -847,9 +877,17 @@ mod tests {
         let scored = mem.relevance_score("test content", &weights);
 
         // All breakdown components should be between 0 and 1
-        assert!(scored.score_breakdown.semantic_score >= 0.0 && scored.score_breakdown.semantic_score <= 1.0);
-        assert!(scored.score_breakdown.decay_score >= 0.0 && scored.score_breakdown.decay_score <= 1.0);
-        assert!(scored.score_breakdown.importance_score >= 0.0 && scored.score_breakdown.importance_score <= 1.0);
+        assert!(
+            scored.score_breakdown.semantic_score >= 0.0
+                && scored.score_breakdown.semantic_score <= 1.0
+        );
+        assert!(
+            scored.score_breakdown.decay_score >= 0.0 && scored.score_breakdown.decay_score <= 1.0
+        );
+        assert!(
+            scored.score_breakdown.importance_score >= 0.0
+                && scored.score_breakdown.importance_score <= 1.0
+        );
 
         // Composite score should be between 0 and 1
         assert!(scored.score >= 0.0 && scored.score <= 1.0);
@@ -863,29 +901,50 @@ mod tests {
             importance_weight: 1.0,
         };
         let normalized = weights.normalized();
-        let sum = normalized.semantic_weight + normalized.decay_weight + normalized.importance_weight;
-        assert!((sum - 1.0).abs() < 0.001, "Normalized weights should sum to 1.0, got {}", sum);
+        let sum =
+            normalized.semantic_weight + normalized.decay_weight + normalized.importance_weight;
+        assert!(
+            (sum - 1.0).abs() < 0.001,
+            "Normalized weights should sum to 1.0, got {}",
+            sum
+        );
     }
 
     #[test]
     fn test_estimated_tokens() {
-        let mem = Memory::working("key", "This is a test memory with some content for estimation.");
+        let mem = Memory::working(
+            "key",
+            "This is a test memory with some content for estimation.",
+        );
         let tokens = mem.estimated_tokens();
         assert!(tokens > 0);
         // ~56 chars / 4 = ~14 tokens
-        assert!(tokens > 10 && tokens < 20, "Expected ~14 tokens, got {}", tokens);
+        assert!(
+            tokens > 10 && tokens < 20,
+            "Expected ~14 tokens, got {}",
+            tokens
+        );
     }
 
     #[test]
     fn test_text_similarity() {
         let sim = Memory::text_similarity("hello world", "hello world");
-        assert!((sim - 1.0).abs() < 0.001, "Identical strings should have similarity 1.0");
+        assert!(
+            (sim - 1.0).abs() < 0.001,
+            "Identical strings should have similarity 1.0"
+        );
 
         let sim = Memory::text_similarity("hello world", "goodbye universe");
-        assert!(sim < 0.1, "Completely different strings should have low similarity");
+        assert!(
+            sim < 0.1,
+            "Completely different strings should have low similarity"
+        );
 
         let sim = Memory::text_similarity("rust programming patterns", "rust patterns iterators");
-        assert!(sim > 0.3, "Partially overlapping strings should have moderate similarity");
+        assert!(
+            sim > 0.3,
+            "Partially overlapping strings should have moderate similarity"
+        );
     }
 
     #[test]
@@ -904,20 +963,24 @@ mod tests {
 
     #[test]
     fn test_cosine_similarity_identical() {
-        let mem = Memory::working("key", "content")
-            .with_embedding(vec![1.0, 0.0, 0.0]);
+        let mem = Memory::working("key", "content").with_embedding(vec![1.0, 0.0, 0.0]);
         let query = vec![1.0, 0.0, 0.0];
         let sim = mem.cosine_similarity(&query).unwrap();
-        assert!((sim - 1.0).abs() < 0.001, "Identical vectors should have similarity 1.0");
+        assert!(
+            (sim - 1.0).abs() < 0.001,
+            "Identical vectors should have similarity 1.0"
+        );
     }
 
     #[test]
     fn test_cosine_similarity_orthogonal() {
-        let mem = Memory::working("key", "content")
-            .with_embedding(vec![1.0, 0.0, 0.0]);
+        let mem = Memory::working("key", "content").with_embedding(vec![1.0, 0.0, 0.0]);
         let query = vec![0.0, 1.0, 0.0];
         let sim = mem.cosine_similarity(&query).unwrap();
-        assert!(sim.abs() < 0.001, "Orthogonal vectors should have similarity ~0.0");
+        assert!(
+            sim.abs() < 0.001,
+            "Orthogonal vectors should have similarity ~0.0"
+        );
     }
 
     #[test]
@@ -929,16 +992,14 @@ mod tests {
 
     #[test]
     fn test_cosine_similarity_dimension_mismatch() {
-        let mem = Memory::working("key", "content")
-            .with_embedding(vec![1.0, 0.0]);
+        let mem = Memory::working("key", "content").with_embedding(vec![1.0, 0.0]);
         let query = vec![1.0, 0.0, 0.0];
         assert!(mem.cosine_similarity(&query).is_none());
     }
 
     #[test]
     fn test_with_embedding() {
-        let mem = Memory::working("key", "content")
-            .with_embedding(vec![0.1, 0.2, 0.3]);
+        let mem = Memory::working("key", "content").with_embedding(vec![0.1, 0.2, 0.3]);
         assert!(mem.embedding.is_some());
         assert_eq!(mem.embedding.unwrap().len(), 3);
     }

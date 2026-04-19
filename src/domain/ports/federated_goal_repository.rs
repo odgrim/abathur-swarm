@@ -28,7 +28,11 @@ pub trait FederatedGoalRepository: Send + Sync {
     async fn update_state(&self, id: Uuid, state: FederatedGoalState) -> DomainResult<()>;
 
     /// Update the convergence signals snapshot for a federated goal.
-    async fn update_signals(&self, id: Uuid, signals: ConvergenceSignalSnapshot) -> DomainResult<()>;
+    async fn update_signals(
+        &self,
+        id: Uuid,
+        signals: ConvergenceSignalSnapshot,
+    ) -> DomainResult<()>;
 
     /// Delete a federated goal by ID.
     async fn delete(&self, id: Uuid) -> DomainResult<()>;

@@ -6,18 +6,18 @@ use clap::{Args, Subcommand};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::adapters::sqlite::{initialize_default_database, SqliteTriggerRuleRepository};
-use crate::cli::id_resolver::resolve_trigger_rule_id;
+use crate::adapters::sqlite::{SqliteTriggerRuleRepository, initialize_default_database};
 use crate::cli::display::{
-    action_failure, action_success, list_table, output, render_list, short_id, truncate_ellipsis,
-    CommandOutput, DetailView, relative_time_str,
+    CommandOutput, DetailView, action_failure, action_success, list_table, output,
+    relative_time_str, render_list, short_id, truncate_ellipsis,
 };
+use crate::cli::id_resolver::resolve_trigger_rule_id;
 use crate::domain::ports::TriggerRuleRepository;
-use crate::services::trigger_rules::{
-    TriggerRule, TriggerCondition, TriggerAction, SerializableDomainCommand,
-    SerializableEventFilter, validate_cron_expression, normalize_cron_expression,
-};
 use crate::services::event_bus::EventCategory;
+use crate::services::trigger_rules::{
+    SerializableDomainCommand, SerializableEventFilter, TriggerAction, TriggerCondition,
+    TriggerRule, normalize_cron_expression, validate_cron_expression,
+};
 
 #[derive(Args, Debug)]
 pub struct TriggerArgs {
@@ -176,17 +176,31 @@ impl CommandOutput for TriggerListOutput {
             return "No trigger rules found.".to_string();
         }
 
-        let mut table = list_table(&["ID", "Name", "Type", "Enabled", "Next Fire", "Fires", "Description"]);
+        let mut table = list_table(&[
+            "ID",
+            "Name",
+            "Type",
+            "Enabled",
+            "Next Fire",
+            "Fires",
+            "Description",
+        ]);
 
         for rule in &self.rules {
-            let next_fire = rule.next_fire_at.as_deref()
+            let next_fire = rule
+                .next_fire_at
+                .as_deref()
                 .map(relative_time_str)
                 .unwrap_or_else(|| "-".to_string());
             table.add_row(vec![
                 short_id(&rule.id).to_string(),
                 truncate_ellipsis(&rule.name, 28),
                 truncate_ellipsis(&rule.condition_type, 20),
-                if rule.enabled { "yes".to_string() } else { "no".to_string() },
+                if rule.enabled {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                },
                 next_fire,
                 rule.fire_count.to_string(),
                 truncate_ellipsis(&rule.description, 35),
@@ -230,7 +244,8 @@ impl CommandOutput for TriggerDetailOutput {
             view = view.field("Cooldown", &format!("{}s", cooldown));
         }
 
-        view = view.section("Configuration")
+        view = view
+            .section("Configuration")
             .field("Filter", &self.filter)
             .field("Condition", &self.condition)
             .field("Action", &self.action);
@@ -285,8 +300,7 @@ pub async fn execute(args: TriggerArgs, json_mode: bool) -> Result<()> {
         } => {
             // Validate and normalize cron expression if provided
             let cron = if let Some(expr) = cron {
-                validate_cron_expression(&expr)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                validate_cron_expression(&expr).map_err(|e| anyhow::anyhow!(e))?;
                 Some(normalize_cron_expression(&expr))
             } else {
                 None
@@ -316,7 +330,9 @@ pub async fn execute(args: TriggerArgs, json_mode: bool) -> Result<()> {
 
             // Build the condition
             let condition = if let Some(ref expr) = cron {
-                TriggerCondition::Cron { expression: expr.to_string() }
+                TriggerCondition::Cron {
+                    expression: expr.to_string(),
+                }
             } else {
                 TriggerCondition::Always
             };
@@ -411,17 +427,23 @@ pub async fn execute(args: TriggerArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        TriggerCommands::Update { id_or_name, description, cron, cooldown } => {
+        TriggerCommands::Update {
+            id_or_name,
+            description,
+            cron,
+            cooldown,
+        } => {
             let mut rule = find_rule(&repo, &pool, &id_or_name).await?;
 
             if let Some(desc) = description {
                 rule.description = desc;
             }
             if let Some(expr) = cron {
-                validate_cron_expression(&expr)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                validate_cron_expression(&expr).map_err(|e| anyhow::anyhow!(e))?;
                 let normalized = normalize_cron_expression(&expr);
-                rule.condition = TriggerCondition::Cron { expression: normalized };
+                rule.condition = TriggerCondition::Cron {
+                    expression: normalized,
+                };
                 rule.filter = TriggerRule::cron_event_filter();
             }
             if let Some(cd) = cooldown {
@@ -487,7 +509,10 @@ fn parse_event_category(s: &str) -> Result<EventCategory> {
         "workflow" => Ok(EventCategory::Workflow),
         "adapter" => Ok(EventCategory::Adapter),
         "budget" => Ok(EventCategory::Budget),
-        other => anyhow::bail!("Invalid event category: '{}'. Valid categories: orchestrator, goal, task, execution, agent, verification, escalation, memory, scheduler, convergence, workflow, adapter, budget", other),
+        other => anyhow::bail!(
+            "Invalid event category: '{}'. Valid categories: orchestrator, goal, task, execution, agent, verification, escalation, memory, scheduler, convergence, workflow, adapter, budget",
+            other
+        ),
     }
 }
 
@@ -503,9 +528,10 @@ async fn find_rule(
 
     // Try by UUID (prefix match)
     if let Ok(uuid) = resolve_trigger_rule_id(pool, id_or_name).await
-        && let Some(rule) = repo.get(uuid).await? {
-            return Ok(rule);
-        }
+        && let Some(rule) = repo.get(uuid).await?
+    {
+        return Ok(rule);
+    }
 
     anyhow::bail!("Trigger rule not found: {}", id_or_name)
 }

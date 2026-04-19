@@ -96,7 +96,6 @@ impl Default for Config {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LimitsConfig {
@@ -636,7 +635,10 @@ impl Config {
 
     fn apply_env_overrides(&mut self) {
         if let Ok(val) = std::env::var("ABATHUR_LIMITS_MAX_DEPTH")
-            && let Ok(v) = val.parse() { self.limits.max_depth = v; }
+            && let Ok(v) = val.parse()
+        {
+            self.limits.max_depth = v;
+        }
         if let Ok(val) = std::env::var("ABATHUR_DATABASE_PATH") {
             self.database.path = val;
         }
@@ -685,7 +687,10 @@ impl Config {
 
         // Verify default_workflow references a known workflow (inline or YAML).
         let yaml_workflows = self.load_yaml_workflows();
-        if !self.workflows.iter().any(|wf| wf.name == self.default_workflow)
+        if !self
+            .workflows
+            .iter()
+            .any(|wf| wf.name == self.default_workflow)
             && !yaml_workflows.contains_key(&self.default_workflow)
         {
             let known = {
@@ -739,8 +744,8 @@ impl Config {
     /// Returns the default workflow template, or an error explaining how to
     /// install one when `default_workflow` cannot be resolved.
     pub fn default_workflow_template(&self) -> Result<WorkflowTemplate, ConfigError> {
-        self.resolve_workflow(&self.default_workflow).ok_or_else(|| {
-            ConfigError::ValidationError {
+        self.resolve_workflow(&self.default_workflow)
+            .ok_or_else(|| ConfigError::ValidationError {
                 field: "default_workflow".to_string(),
                 reason: format!(
                     "default workflow '{}' could not be resolved from inline \
@@ -749,8 +754,7 @@ impl Config {
                      in abathur.toml to point at an existing workflow directory.",
                     self.default_workflow, self.workflows_dir,
                 ),
-            }
-        })
+            })
     }
 
     /// Returns available workflows as (name, description, phase_count, is_default).

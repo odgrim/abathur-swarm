@@ -2,9 +2,9 @@
 //!
 //! Supports delegating goals to child swarms and tracking their convergence.
 
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// State of a federated goal as tracked by the overmind.
@@ -95,22 +95,13 @@ pub enum ContractSignal {
     /// CI build must be passing.
     BuildPassing,
     /// Tests must pass at or above the given rate (0.0 - 1.0).
-    TestsPassing {
-        min_pass_rate: f64,
-    },
+    TestsPassing { min_pass_rate: f64 },
     /// Overall convergence level must meet or exceed the threshold.
-    ConvergenceLevel {
-        min_level: f64,
-    },
+    ConvergenceLevel { min_level: f64 },
     /// At least this many tasks must be completed.
-    TaskCompletionThreshold {
-        min_completed: u32,
-    },
+    TaskCompletionThreshold { min_completed: u32 },
     /// A custom signal evaluated by name and predicate expression.
-    Custom {
-        name: String,
-        predicate: String,
-    },
+    Custom { name: String, predicate: String },
 }
 
 /// A contract defining what signals must be satisfied for a federated goal
@@ -154,16 +145,16 @@ impl ConvergenceContract {
 
         self.required_signals.iter().all(|signal| {
             match signal {
-                ContractSignal::BuildPassing => {
-                    snapshot.signals.get("build_passing")
-                        .map(|v| *v >= 1.0)
-                        .unwrap_or(false)
-                }
-                ContractSignal::TestsPassing { min_pass_rate } => {
-                    snapshot.signals.get("test_pass_rate")
-                        .map(|v| *v >= *min_pass_rate)
-                        .unwrap_or(false)
-                }
+                ContractSignal::BuildPassing => snapshot
+                    .signals
+                    .get("build_passing")
+                    .map(|v| *v >= 1.0)
+                    .unwrap_or(false),
+                ContractSignal::TestsPassing { min_pass_rate } => snapshot
+                    .signals
+                    .get("test_pass_rate")
+                    .map(|v| *v >= *min_pass_rate)
+                    .unwrap_or(false),
                 ContractSignal::ConvergenceLevel { min_level } => {
                     snapshot.convergence_level >= *min_level
                 }
@@ -172,7 +163,9 @@ impl ConvergenceContract {
                 }
                 ContractSignal::Custom { name, .. } => {
                     // Custom signals are satisfied if the named signal >= 1.0
-                    snapshot.signals.get(name)
+                    snapshot
+                        .signals
+                        .get(name)
                         .map(|v| *v >= 1.0)
                         .unwrap_or(false)
                 }
@@ -380,17 +373,13 @@ mod tests {
     #[test]
     fn test_convergence_contract_build_failing() {
         let contract = ConvergenceContract {
-            required_signals: vec![
-                ContractSignal::BuildPassing,
-            ],
+            required_signals: vec![ContractSignal::BuildPassing],
             poll_interval_secs: 60,
         };
 
         let snapshot = ConvergenceSignalSnapshot {
             timestamp: Utc::now(),
-            signals: HashMap::from([
-                ("build_passing".to_string(), 0.0),
-            ]),
+            signals: HashMap::from([("build_passing".to_string(), 0.0)]),
             convergence_level: 0.5,
             task_summary: TaskStatusSummary::default(),
         };
@@ -401,9 +390,7 @@ mod tests {
     #[test]
     fn test_convergence_contract_missing_signal() {
         let contract = ConvergenceContract {
-            required_signals: vec![
-                ContractSignal::BuildPassing,
-            ],
+            required_signals: vec![ContractSignal::BuildPassing],
             poll_interval_secs: 60,
         };
 
@@ -421,17 +408,15 @@ mod tests {
     #[test]
     fn test_convergence_contract_tests_below_threshold() {
         let contract = ConvergenceContract {
-            required_signals: vec![
-                ContractSignal::TestsPassing { min_pass_rate: 0.95 },
-            ],
+            required_signals: vec![ContractSignal::TestsPassing {
+                min_pass_rate: 0.95,
+            }],
             poll_interval_secs: 60,
         };
 
         let snapshot = ConvergenceSignalSnapshot {
             timestamp: Utc::now(),
-            signals: HashMap::from([
-                ("test_pass_rate".to_string(), 0.80),
-            ]),
+            signals: HashMap::from([("test_pass_rate".to_string(), 0.80)]),
             convergence_level: 0.5,
             task_summary: TaskStatusSummary::default(),
         };
@@ -442,12 +427,10 @@ mod tests {
     #[test]
     fn test_convergence_contract_custom_signal() {
         let contract = ConvergenceContract {
-            required_signals: vec![
-                ContractSignal::Custom {
-                    name: "lint_clean".to_string(),
-                    predicate: "lint_warnings == 0".to_string(),
-                },
-            ],
+            required_signals: vec![ContractSignal::Custom {
+                name: "lint_clean".to_string(),
+                predicate: "lint_warnings == 0".to_string(),
+            }],
             poll_interval_secs: 60,
         };
 
@@ -460,7 +443,9 @@ mod tests {
 
         assert!(contract.is_satisfied(&satisfied_snapshot));
 
-        satisfied_snapshot.signals.insert("lint_clean".to_string(), 0.0);
+        satisfied_snapshot
+            .signals
+            .insert("lint_clean".to_string(), 0.0);
         assert!(!contract.is_satisfied(&satisfied_snapshot));
     }
 
@@ -479,20 +464,16 @@ mod tests {
 
     #[test]
     fn test_federated_goal_serde_roundtrip() {
-        let goal = FederatedGoal::new(
-            Uuid::new_v4(),
-            "cerebrate-alpha",
-            "Implement feature X",
-        )
-        .with_constraint("Must not break CI")
-        .with_constraint("Follow coding standards")
-        .with_convergence_contract(ConvergenceContract {
-            required_signals: vec![
-                ContractSignal::BuildPassing,
-                ContractSignal::TestsPassing { min_pass_rate: 0.9 },
-            ],
-            poll_interval_secs: 30,
-        });
+        let goal = FederatedGoal::new(Uuid::new_v4(), "cerebrate-alpha", "Implement feature X")
+            .with_constraint("Must not break CI")
+            .with_constraint("Follow coding standards")
+            .with_convergence_contract(ConvergenceContract {
+                required_signals: vec![
+                    ContractSignal::BuildPassing,
+                    ContractSignal::TestsPassing { min_pass_rate: 0.9 },
+                ],
+                poll_interval_secs: 30,
+            });
 
         let json = serde_json::to_string(&goal).unwrap();
         let roundtrip: FederatedGoal = serde_json::from_str(&json).unwrap();
@@ -520,8 +501,14 @@ mod tests {
 
     #[test]
     fn test_federated_goal_state_from_str() {
-        assert_eq!(FederatedGoalState::from_str("pending"), Some(FederatedGoalState::Pending));
-        assert_eq!(FederatedGoalState::from_str("ACTIVE"), Some(FederatedGoalState::Active));
+        assert_eq!(
+            FederatedGoalState::from_str("pending"),
+            Some(FederatedGoalState::Pending)
+        );
+        assert_eq!(
+            FederatedGoalState::from_str("ACTIVE"),
+            Some(FederatedGoalState::Active)
+        );
         assert_eq!(FederatedGoalState::from_str("invalid"), None);
     }
 }

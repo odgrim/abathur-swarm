@@ -382,7 +382,9 @@ impl Default for SwarmConfig {
             polling: PollingConfig::default(),
             event_retention_days: 30,
             convergence_enabled: true,
-            default_execution_mode: Some(crate::domain::models::ExecutionMode::Convergent { parallel_samples: None }),
+            default_execution_mode: Some(crate::domain::models::ExecutionMode::Convergent {
+                parallel_samples: None,
+            }),
             workflow_template: None,
             all_workflows: vec![],
             dangerously_skip_permissions: false,
@@ -418,41 +420,82 @@ pub enum SwarmEvent {
     /// Goal decomposed into tasks.
     GoalDecomposed { goal_id: Uuid, task_count: usize },
     /// Task submitted (created and added to the system).
-    TaskSubmitted { task_id: Uuid, task_title: String, goal_id: Option<Uuid> },
+    TaskSubmitted {
+        task_id: Uuid,
+        task_title: String,
+        goal_id: Option<Uuid>,
+    },
     /// Task readiness updated.
     TaskReady { task_id: Uuid, task_title: String },
     /// Task spawned.
-    TaskSpawned { task_id: Uuid, task_title: String, agent_type: Option<String> },
+    TaskSpawned {
+        task_id: Uuid,
+        task_title: String,
+        agent_type: Option<String>,
+    },
     /// Worktree created for task.
     WorktreeCreated { task_id: Uuid, path: String },
     /// Task completed.
     TaskCompleted { task_id: Uuid, tokens_used: u64 },
     /// Task failed.
-    TaskFailed { task_id: Uuid, error: String, retry_count: u32 },
+    TaskFailed {
+        task_id: Uuid,
+        error: String,
+        retry_count: u32,
+    },
     /// Task retrying.
-    TaskRetrying { task_id: Uuid, attempt: u32, max_attempts: u32 },
+    TaskRetrying {
+        task_id: Uuid,
+        attempt: u32,
+        max_attempts: u32,
+    },
     /// Task verified.
-    TaskVerified { task_id: Uuid, passed: bool, checks_passed: usize, checks_total: usize, failures_summary: Option<String> },
+    TaskVerified {
+        task_id: Uuid,
+        passed: bool,
+        checks_passed: usize,
+        checks_total: usize,
+        failures_summary: Option<String>,
+    },
     /// Task queued for merge.
     TaskQueuedForMerge { task_id: Uuid, stage: String },
     /// Pull request created for completed task.
-    PullRequestCreated { task_id: Uuid, pr_url: String, branch: String },
+    PullRequestCreated {
+        task_id: Uuid,
+        pr_url: String,
+        branch: String,
+    },
     /// Task claimed by an agent.
     TaskClaimed { task_id: Uuid, agent_type: String },
     /// Task merged successfully.
     TaskMerged { task_id: Uuid, commit_sha: String },
     /// Agent instance completed.
-    AgentInstanceCompleted { instance_id: Uuid, task_id: Uuid, tokens_used: u64 },
+    AgentInstanceCompleted {
+        instance_id: Uuid,
+        task_id: Uuid,
+        tokens_used: u64,
+    },
     /// Reconciliation completed.
     ReconciliationCompleted { corrections_made: u32 },
     /// Evolution event triggered.
-    EvolutionTriggered { template_name: String, trigger: String },
+    EvolutionTriggered {
+        template_name: String,
+        trigger: String,
+    },
     /// Specialist agent spawned for special handling.
-    SpecialistSpawned { specialist_type: String, trigger: String, task_id: Option<Uuid> },
+    SpecialistSpawned {
+        specialist_type: String,
+        trigger: String,
+        task_id: Option<Uuid>,
+    },
     /// Agent dynamically created through capability-driven genesis.
     AgentCreated { agent_type: String, tier: String },
     /// Goal alignment evaluated.
-    GoalAlignmentEvaluated { task_id: Uuid, overall_score: f64, passes: bool },
+    GoalAlignmentEvaluated {
+        task_id: Uuid,
+        overall_score: f64,
+        passes: bool,
+    },
     /// DAG restructure triggered for a permanently failed task.
     RestructureTriggered { task_id: Uuid, decision: String },
     /// Spawn limit exceeded, specialist evaluation requested.
@@ -466,7 +509,10 @@ pub enum SwarmEvent {
     ///
     /// Goals are never "completed" - they are convergent attractors.
     /// This event indicates a successful iteration of work toward the goal.
-    GoalIterationCompleted { goal_id: Uuid, tasks_completed: usize },
+    GoalIterationCompleted {
+        goal_id: Uuid,
+        tasks_completed: usize,
+    },
     /// Goal paused (human-initiated).
     GoalPaused { goal_id: Uuid, reason: String },
     /// Intent verification started.
@@ -514,7 +560,10 @@ pub enum SwarmEvent {
         gaps_count: usize,
     },
     /// Subtask branch merged into feature branch.
-    SubtaskMergedToFeature { task_id: Uuid, feature_branch: String },
+    SubtaskMergedToFeature {
+        task_id: Uuid,
+        feature_branch: String,
+    },
     /// Semantic drift detected in convergence loop.
     SemanticDriftDetected {
         goal_id: Uuid,
@@ -532,27 +581,64 @@ pub enum SwarmEvent {
 
     // Federation events
     /// A cerebrate connected to the federation.
-    FederationCerebrateConnected { cerebrate_id: String, capabilities: Vec<String> },
+    FederationCerebrateConnected {
+        cerebrate_id: String,
+        capabilities: Vec<String>,
+    },
     /// A cerebrate disconnected from the federation.
-    FederationCerebrateDisconnected { cerebrate_id: String, reason: String },
+    FederationCerebrateDisconnected {
+        cerebrate_id: String,
+        reason: String,
+    },
     /// A task was delegated to a cerebrate.
     FederationTaskDelegated { task_id: Uuid, cerebrate_id: String },
     /// A cerebrate accepted a delegated task.
     FederationTaskAccepted { task_id: Uuid, cerebrate_id: String },
     /// A cerebrate rejected a delegated task.
-    FederationTaskRejected { task_id: Uuid, cerebrate_id: String, reason: String },
+    FederationTaskRejected {
+        task_id: Uuid,
+        cerebrate_id: String,
+        reason: String,
+    },
     /// Progress received from a cerebrate.
-    FederationProgressReceived { task_id: Uuid, cerebrate_id: String, phase: String, progress_pct: f64, summary: String },
+    FederationProgressReceived {
+        task_id: Uuid,
+        cerebrate_id: String,
+        phase: String,
+        progress_pct: f64,
+        summary: String,
+    },
     /// Result received from a cerebrate.
-    FederationResultReceived { task_id: Uuid, cerebrate_id: String, status: String, summary: String, artifacts: Vec<crate::domain::models::a2a::Artifact> },
+    FederationResultReceived {
+        task_id: Uuid,
+        cerebrate_id: String,
+        status: String,
+        summary: String,
+        artifacts: Vec<crate::domain::models::a2a::Artifact>,
+    },
     /// A cerebrate missed heartbeats.
-    FederationHeartbeatMissed { cerebrate_id: String, missed_count: u32 },
+    FederationHeartbeatMissed {
+        cerebrate_id: String,
+        missed_count: u32,
+    },
     /// A cerebrate became unreachable.
-    FederationCerebrateUnreachable { cerebrate_id: String, in_flight_tasks: Vec<Uuid> },
+    FederationCerebrateUnreachable {
+        cerebrate_id: String,
+        in_flight_tasks: Vec<Uuid>,
+    },
     /// Stall detected: no progress from cerebrate within threshold.
-    FederationStallDetected { task_id: Uuid, cerebrate_id: String, stall_duration_secs: u64 },
+    FederationStallDetected {
+        task_id: Uuid,
+        cerebrate_id: String,
+        stall_duration_secs: u64,
+    },
     /// A federation reaction was emitted by the result processor.
-    FederationReactionEmitted { reaction_type: String, description: String, goal_id: Option<Uuid>, task_id: Option<Uuid> },
+    FederationReactionEmitted {
+        reaction_type: String,
+        description: String,
+        goal_id: Option<Uuid>,
+        task_id: Option<Uuid>,
+    },
 }
 
 /// Statistics about the swarm.
@@ -585,11 +671,17 @@ impl SwarmEvent {
                 goal_id: *goal_id,
                 goal_name: goal_name.clone(),
             }),
-            EventPayload::GoalDecomposed { goal_id, task_count } => Some(SwarmEvent::GoalDecomposed {
+            EventPayload::GoalDecomposed {
+                goal_id,
+                task_count,
+            } => Some(SwarmEvent::GoalDecomposed {
                 goal_id: *goal_id,
                 task_count: *task_count,
             }),
-            EventPayload::GoalIterationCompleted { goal_id, tasks_completed } => Some(SwarmEvent::GoalIterationCompleted {
+            EventPayload::GoalIterationCompleted {
+                goal_id,
+                tasks_completed,
+            } => Some(SwarmEvent::GoalIterationCompleted {
                 goal_id: *goal_id,
                 tasks_completed: *tasks_completed,
             }),
@@ -597,62 +689,108 @@ impl SwarmEvent {
                 goal_id: *goal_id,
                 reason: reason.clone(),
             }),
-            EventPayload::ConvergenceCompleted { goal_id, converged, iterations, final_satisfaction } => Some(SwarmEvent::ConvergenceCompleted {
+            EventPayload::ConvergenceCompleted {
+                goal_id,
+                converged,
+                iterations,
+                final_satisfaction,
+            } => Some(SwarmEvent::ConvergenceCompleted {
                 goal_id: *goal_id,
                 converged: *converged,
                 iterations: *iterations,
                 final_satisfaction: final_satisfaction.clone(),
             }),
-            EventPayload::SemanticDriftDetected { goal_id, recurring_gaps, iterations } => Some(SwarmEvent::SemanticDriftDetected {
+            EventPayload::SemanticDriftDetected {
+                goal_id,
+                recurring_gaps,
+                iterations,
+            } => Some(SwarmEvent::SemanticDriftDetected {
                 goal_id: *goal_id,
                 recurring_gaps: recurring_gaps.clone(),
                 iterations: *iterations,
             }),
-            EventPayload::TaskSubmitted { task_id, task_title, goal_id } => Some(SwarmEvent::TaskSubmitted {
+            EventPayload::TaskSubmitted {
+                task_id,
+                task_title,
+                goal_id,
+            } => Some(SwarmEvent::TaskSubmitted {
                 task_id: *task_id,
                 task_title: task_title.clone(),
                 goal_id: *goal_id,
             }),
-            EventPayload::TaskReady { task_id, task_title } => Some(SwarmEvent::TaskReady {
+            EventPayload::TaskReady {
+                task_id,
+                task_title,
+            } => Some(SwarmEvent::TaskReady {
                 task_id: *task_id,
                 task_title: task_title.clone(),
             }),
-            EventPayload::TaskSpawned { task_id, task_title, agent_type } => Some(SwarmEvent::TaskSpawned {
+            EventPayload::TaskSpawned {
+                task_id,
+                task_title,
+                agent_type,
+            } => Some(SwarmEvent::TaskSpawned {
                 task_id: *task_id,
                 task_title: task_title.clone(),
                 agent_type: agent_type.clone(),
             }),
-            EventPayload::TaskCompleted { task_id, tokens_used } => Some(SwarmEvent::TaskCompleted {
+            EventPayload::TaskCompleted {
+                task_id,
+                tokens_used,
+            } => Some(SwarmEvent::TaskCompleted {
                 task_id: *task_id,
                 tokens_used: *tokens_used,
             }),
-            EventPayload::TaskFailed { task_id, error, retry_count } => Some(SwarmEvent::TaskFailed {
+            EventPayload::TaskFailed {
+                task_id,
+                error,
+                retry_count,
+            } => Some(SwarmEvent::TaskFailed {
                 task_id: *task_id,
                 error: error.clone(),
                 retry_count: *retry_count,
             }),
-            EventPayload::TaskRetrying { task_id, attempt, max_attempts } => Some(SwarmEvent::TaskRetrying {
+            EventPayload::TaskRetrying {
+                task_id,
+                attempt,
+                max_attempts,
+            } => Some(SwarmEvent::TaskRetrying {
                 task_id: *task_id,
                 attempt: *attempt,
                 max_attempts: *max_attempts,
             }),
-            EventPayload::TaskVerified { task_id, passed, checks_passed, checks_total, failures_summary } => Some(SwarmEvent::TaskVerified {
+            EventPayload::TaskVerified {
+                task_id,
+                passed,
+                checks_passed,
+                checks_total,
+                failures_summary,
+            } => Some(SwarmEvent::TaskVerified {
                 task_id: *task_id,
                 passed: *passed,
                 checks_passed: *checks_passed,
                 checks_total: *checks_total,
                 failures_summary: failures_summary.clone(),
             }),
-            EventPayload::TaskQueuedForMerge { task_id, stage } => Some(SwarmEvent::TaskQueuedForMerge {
-                task_id: *task_id,
-                stage: stage.clone(),
-            }),
-            EventPayload::PullRequestCreated { task_id, pr_url, branch } => Some(SwarmEvent::PullRequestCreated {
+            EventPayload::TaskQueuedForMerge { task_id, stage } => {
+                Some(SwarmEvent::TaskQueuedForMerge {
+                    task_id: *task_id,
+                    stage: stage.clone(),
+                })
+            }
+            EventPayload::PullRequestCreated {
+                task_id,
+                pr_url,
+                branch,
+            } => Some(SwarmEvent::PullRequestCreated {
                 task_id: *task_id,
                 pr_url: pr_url.clone(),
                 branch: branch.clone(),
             }),
-            EventPayload::TaskMerged { task_id, commit_sha } => Some(SwarmEvent::TaskMerged {
+            EventPayload::TaskMerged {
+                task_id,
+                commit_sha,
+            } => Some(SwarmEvent::TaskMerged {
                 task_id: *task_id,
                 commit_sha: commit_sha.clone(),
             }),
@@ -660,23 +798,39 @@ impl SwarmEvent {
                 task_id: *task_id,
                 path: path.clone(),
             }),
-            EventPayload::TaskClaimed { task_id, agent_type } => Some(SwarmEvent::TaskClaimed {
+            EventPayload::TaskClaimed {
+                task_id,
+                agent_type,
+            } => Some(SwarmEvent::TaskClaimed {
                 task_id: *task_id,
                 agent_type: agent_type.clone(),
             }),
-            EventPayload::AgentInstanceCompleted { instance_id, task_id, tokens_used } => Some(SwarmEvent::AgentInstanceCompleted {
+            EventPayload::AgentInstanceCompleted {
+                instance_id,
+                task_id,
+                tokens_used,
+            } => Some(SwarmEvent::AgentInstanceCompleted {
                 instance_id: *instance_id,
                 task_id: *task_id,
                 tokens_used: *tokens_used,
             }),
-            EventPayload::ReconciliationCompleted { corrections_made } => Some(SwarmEvent::ReconciliationCompleted {
-                corrections_made: *corrections_made,
-            }),
-            EventPayload::EvolutionTriggered { template_name, trigger } => Some(SwarmEvent::EvolutionTriggered {
+            EventPayload::ReconciliationCompleted { corrections_made } => {
+                Some(SwarmEvent::ReconciliationCompleted {
+                    corrections_made: *corrections_made,
+                })
+            }
+            EventPayload::EvolutionTriggered {
+                template_name,
+                trigger,
+            } => Some(SwarmEvent::EvolutionTriggered {
                 template_name: template_name.clone(),
                 trigger: trigger.clone(),
             }),
-            EventPayload::SpecialistSpawned { specialist_type, trigger, task_id } => Some(SwarmEvent::SpecialistSpawned {
+            EventPayload::SpecialistSpawned {
+                specialist_type,
+                trigger,
+                task_id,
+            } => Some(SwarmEvent::SpecialistSpawned {
                 specialist_type: specialist_type.clone(),
                 trigger: trigger.clone(),
                 task_id: *task_id,
@@ -685,109 +839,181 @@ impl SwarmEvent {
                 agent_type: agent_type.clone(),
                 tier: tier.clone(),
             }),
-            EventPayload::GoalAlignmentEvaluated { task_id, overall_score, passes } => Some(SwarmEvent::GoalAlignmentEvaluated {
+            EventPayload::GoalAlignmentEvaluated {
+                task_id,
+                overall_score,
+                passes,
+            } => Some(SwarmEvent::GoalAlignmentEvaluated {
                 task_id: *task_id,
                 overall_score: *overall_score,
                 passes: *passes,
             }),
-            EventPayload::RestructureTriggered { task_id, decision } => Some(SwarmEvent::RestructureTriggered {
-                task_id: *task_id,
-                decision: decision.clone(),
-            }),
-            EventPayload::SpawnLimitExceeded { parent_task_id, limit_type, current_value, limit_value } => Some(SwarmEvent::SpawnLimitExceeded {
+            EventPayload::RestructureTriggered { task_id, decision } => {
+                Some(SwarmEvent::RestructureTriggered {
+                    task_id: *task_id,
+                    decision: decision.clone(),
+                })
+            }
+            EventPayload::SpawnLimitExceeded {
+                parent_task_id,
+                limit_type,
+                current_value,
+                limit_value,
+            } => Some(SwarmEvent::SpawnLimitExceeded {
                 parent_task_id: *parent_task_id,
                 limit_type: limit_type.clone(),
                 current_value: *current_value,
                 limit_value: *limit_value,
             }),
-            EventPayload::SubtaskMergedToFeature { task_id, feature_branch } => Some(SwarmEvent::SubtaskMergedToFeature {
+            EventPayload::SubtaskMergedToFeature {
+                task_id,
+                feature_branch,
+            } => Some(SwarmEvent::SubtaskMergedToFeature {
                 task_id: *task_id,
                 feature_branch: feature_branch.clone(),
             }),
-            EventPayload::HumanEscalationRequired { goal_id, task_id, reason, urgency, questions, is_blocking } => Some(SwarmEvent::HumanEscalationRequired {
-                goal_id: *goal_id,
-                task_id: *task_id,
-                reason: reason.clone(),
-                urgency: urgency.clone(),
-                questions: questions.clone(),
-                is_blocking: *is_blocking,
+            EventPayload::HumanEscalationRequired(p) => Some(SwarmEvent::HumanEscalationRequired {
+                goal_id: p.goal_id,
+                task_id: p.task_id,
+                reason: p.reason.clone(),
+                urgency: p.urgency.clone(),
+                questions: p.questions.clone(),
+                is_blocking: p.is_blocking,
             }),
-            EventPayload::HumanResponseReceived { escalation_id, decision, allows_continuation } => Some(SwarmEvent::HumanResponseReceived {
+            EventPayload::HumanResponseReceived {
+                escalation_id,
+                decision,
+                allows_continuation,
+            } => Some(SwarmEvent::HumanResponseReceived {
                 escalation_id: *escalation_id,
                 decision: decision.clone(),
                 allows_continuation: *allows_continuation,
             }),
-            EventPayload::IntentVerificationStarted { goal_id, iteration } => Some(SwarmEvent::IntentVerificationStarted {
-                goal_id: *goal_id,
-                iteration: *iteration,
-            }),
-            EventPayload::IntentVerificationCompleted { goal_id, satisfaction, confidence, gaps_count, iteration, will_retry } => Some(SwarmEvent::IntentVerificationCompleted {
-                goal_id: *goal_id,
-                satisfaction: satisfaction.clone(),
-                confidence: *confidence,
-                gaps_count: *gaps_count,
-                iteration: *iteration,
-                will_retry: *will_retry,
-            }),
-            EventPayload::BranchVerificationStarted { branch_task_ids, waiting_task_ids } => Some(SwarmEvent::BranchVerificationStarted {
+            EventPayload::IntentVerificationStarted { goal_id, iteration } => {
+                Some(SwarmEvent::IntentVerificationStarted {
+                    goal_id: *goal_id,
+                    iteration: *iteration,
+                })
+            }
+            EventPayload::IntentVerificationCompleted(p) => {
+                Some(SwarmEvent::IntentVerificationCompleted {
+                    goal_id: p.goal_id,
+                    satisfaction: p.satisfaction.clone(),
+                    confidence: p.confidence,
+                    gaps_count: p.gaps_count,
+                    iteration: p.iteration,
+                    will_retry: p.will_retry,
+                })
+            }
+            EventPayload::BranchVerificationStarted {
+                branch_task_ids,
+                waiting_task_ids,
+            } => Some(SwarmEvent::BranchVerificationStarted {
                 branch_task_ids: branch_task_ids.clone(),
                 waiting_task_ids: waiting_task_ids.clone(),
             }),
-            EventPayload::BranchVerificationCompleted { branch_satisfied, dependents_can_proceed, gaps_count } => Some(SwarmEvent::BranchVerificationCompleted {
+            EventPayload::BranchVerificationCompleted {
+                branch_satisfied,
+                dependents_can_proceed,
+                gaps_count,
+            } => Some(SwarmEvent::BranchVerificationCompleted {
                 branch_satisfied: *branch_satisfied,
                 dependents_can_proceed: *dependents_can_proceed,
                 gaps_count: *gaps_count,
             }),
             // Federation events
-            EventPayload::FederationCerebrateConnected { cerebrate_id, capabilities } => Some(SwarmEvent::FederationCerebrateConnected {
+            EventPayload::FederationCerebrateConnected {
+                cerebrate_id,
+                capabilities,
+            } => Some(SwarmEvent::FederationCerebrateConnected {
                 cerebrate_id: cerebrate_id.clone(),
                 capabilities: capabilities.clone(),
             }),
-            EventPayload::FederationCerebrateDisconnected { cerebrate_id, reason } => Some(SwarmEvent::FederationCerebrateDisconnected {
+            EventPayload::FederationCerebrateDisconnected {
+                cerebrate_id,
+                reason,
+            } => Some(SwarmEvent::FederationCerebrateDisconnected {
                 cerebrate_id: cerebrate_id.clone(),
                 reason: reason.clone(),
             }),
-            EventPayload::FederationTaskDelegated { task_id, cerebrate_id } => Some(SwarmEvent::FederationTaskDelegated {
+            EventPayload::FederationTaskDelegated {
+                task_id,
+                cerebrate_id,
+            } => Some(SwarmEvent::FederationTaskDelegated {
                 task_id: *task_id,
                 cerebrate_id: cerebrate_id.clone(),
             }),
-            EventPayload::FederationTaskAccepted { task_id, cerebrate_id } => Some(SwarmEvent::FederationTaskAccepted {
+            EventPayload::FederationTaskAccepted {
+                task_id,
+                cerebrate_id,
+            } => Some(SwarmEvent::FederationTaskAccepted {
                 task_id: *task_id,
                 cerebrate_id: cerebrate_id.clone(),
             }),
-            EventPayload::FederationTaskRejected { task_id, cerebrate_id, reason } => Some(SwarmEvent::FederationTaskRejected {
+            EventPayload::FederationTaskRejected {
+                task_id,
+                cerebrate_id,
+                reason,
+            } => Some(SwarmEvent::FederationTaskRejected {
                 task_id: *task_id,
                 cerebrate_id: cerebrate_id.clone(),
                 reason: reason.clone(),
             }),
-            EventPayload::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary } => Some(SwarmEvent::FederationProgressReceived {
+            EventPayload::FederationProgressReceived {
+                task_id,
+                cerebrate_id,
+                phase,
+                progress_pct,
+                summary,
+            } => Some(SwarmEvent::FederationProgressReceived {
                 task_id: *task_id,
                 cerebrate_id: cerebrate_id.clone(),
                 phase: phase.clone(),
                 progress_pct: *progress_pct,
                 summary: summary.clone(),
             }),
-            EventPayload::FederationResultReceived { task_id, cerebrate_id, status, summary, artifacts } => Some(SwarmEvent::FederationResultReceived {
+            EventPayload::FederationResultReceived {
+                task_id,
+                cerebrate_id,
+                status,
+                summary,
+                artifacts,
+            } => Some(SwarmEvent::FederationResultReceived {
                 task_id: *task_id,
                 cerebrate_id: cerebrate_id.clone(),
                 status: status.clone(),
                 summary: summary.clone(),
                 artifacts: artifacts.clone(),
             }),
-            EventPayload::FederationHeartbeatMissed { cerebrate_id, missed_count } => Some(SwarmEvent::FederationHeartbeatMissed {
+            EventPayload::FederationHeartbeatMissed {
+                cerebrate_id,
+                missed_count,
+            } => Some(SwarmEvent::FederationHeartbeatMissed {
                 cerebrate_id: cerebrate_id.clone(),
                 missed_count: *missed_count,
             }),
-            EventPayload::FederationCerebrateUnreachable { cerebrate_id, in_flight_tasks } => Some(SwarmEvent::FederationCerebrateUnreachable {
+            EventPayload::FederationCerebrateUnreachable {
+                cerebrate_id,
+                in_flight_tasks,
+            } => Some(SwarmEvent::FederationCerebrateUnreachable {
                 cerebrate_id: cerebrate_id.clone(),
                 in_flight_tasks: in_flight_tasks.clone(),
             }),
-            EventPayload::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs } => Some(SwarmEvent::FederationStallDetected {
+            EventPayload::FederationStallDetected {
+                task_id,
+                cerebrate_id,
+                stall_duration_secs,
+            } => Some(SwarmEvent::FederationStallDetected {
                 task_id: *task_id,
                 cerebrate_id: cerebrate_id.clone(),
                 stall_duration_secs: *stall_duration_secs,
             }),
-            EventPayload::FederationReactionEmitted { reaction_type, description, goal_id, task_id } => Some(SwarmEvent::FederationReactionEmitted {
+            EventPayload::FederationReactionEmitted {
+                reaction_type,
+                description,
+                goal_id,
+                task_id,
+            } => Some(SwarmEvent::FederationReactionEmitted {
                 reaction_type: reaction_type.clone(),
                 description: description.clone(),
                 goal_id: *goal_id,

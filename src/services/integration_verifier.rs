@@ -125,7 +125,10 @@ where
 
     /// Verify a task is ready for merge.
     pub async fn verify_task(&self, task_id: Uuid) -> DomainResult<VerificationResult> {
-        let task = self.task_repo.get(task_id).await?
+        let task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         let mut checks = Vec::new();
@@ -135,10 +138,7 @@ where
         checks.push(deps_check);
 
         // 2. Verify goal constraints if the task has a goal_id
-        let goal_id = task.context.custom.get("goal_id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok());
-        if let Some(goal_id) = goal_id {
+        if let Some(goal_id) = task.goal_id() {
             let constraints_check = self.verify_goal_constraints(&task, goal_id).await?;
             checks.push(constraints_check);
         }
@@ -305,7 +305,10 @@ where
                         VerificationCheck {
                             name: "has_commits".to_string(),
                             passed: false,
-                            message: format!("No commits ahead of {} — agent produced no changes", base_ref),
+                            message: format!(
+                                "No commits ahead of {} — agent produced no changes",
+                                base_ref
+                            ),
                             details: Some(serde_json::json!({
                                 "commits_ahead": 0,
                                 "base_ref": base_ref
@@ -404,7 +407,11 @@ where
     /// Checks the task's title, description, and context against the constraint's
     /// description to detect potential violations. This is a text-based heuristic —
     /// not a semantic guarantee — but provides useful signal for invariant/boundary checks.
-    fn evaluate_constraint(&self, task: &Task, constraint: &GoalConstraint) -> (bool, Option<String>) {
+    fn evaluate_constraint(
+        &self,
+        task: &Task,
+        constraint: &GoalConstraint,
+    ) -> (bool, Option<String>) {
         // Build a searchable text corpus from the task
         let task_text = format!(
             "{} {} {} {}",
@@ -419,14 +426,11 @@ where
         // Extract key terms from the constraint description (words > 3 chars,
         // excluding common stop words)
         let stop_words = [
-            "must", "should", "shall", "will", "with", "from",
-            "that", "this", "have", "been", "were", "they",
-            "their", "about", "which", "when", "make", "than",
-            "each", "does", "into", "over", "such", "after",
-            "before", "only", "also", "more", "some", "your",
-            "them", "then", "what", "very", "just", "like",
-            "under", "using", "used", "every", "need", "needs",
-            "cannot", "without",
+            "must", "should", "shall", "will", "with", "from", "that", "this", "have", "been",
+            "were", "they", "their", "about", "which", "when", "make", "than", "each", "does",
+            "into", "over", "such", "after", "before", "only", "also", "more", "some", "your",
+            "them", "then", "what", "very", "just", "like", "under", "using", "used", "every",
+            "need", "needs", "cannot", "without",
         ];
         let key_terms: Vec<&str> = constraint_desc
             .split_whitespace()
@@ -450,10 +454,15 @@ where
                 // Invariants are strict: flag if the task touches the domain
                 // but doesn't address the constraint
                 if coverage < 0.3 && key_terms.len() > 2 {
-                    (false, Some(format!(
-                        "Invariant '{}' may not be satisfied: only {}/{} key terms found in task output",
-                        constraint.name, matched_count, key_terms.len()
-                    )))
+                    (
+                        false,
+                        Some(format!(
+                            "Invariant '{}' may not be satisfied: only {}/{} key terms found in task output",
+                            constraint.name,
+                            matched_count,
+                            key_terms.len()
+                        )),
+                    )
                 } else {
                     (true, None)
                 }
@@ -461,10 +470,13 @@ where
             ConstraintType::Boundary => {
                 // Boundaries define limits — check if at least some key terms are addressed
                 if coverage < 0.2 && key_terms.len() > 2 {
-                    (false, Some(format!(
-                        "Boundary '{}' may be violated: constraint terms not found in task output",
-                        constraint.name
-                    )))
+                    (
+                        false,
+                        Some(format!(
+                            "Boundary '{}' may be violated: constraint terms not found in task output",
+                            constraint.name
+                        )),
+                    )
                 } else {
                     (true, None)
                 }
@@ -472,10 +484,13 @@ where
             ConstraintType::Preference => {
                 // Preferences are soft — always pass, but note if not addressed
                 if coverage < 0.2 && key_terms.len() > 2 {
-                    (true, Some(format!(
-                        "Preference '{}' may not be addressed (advisory only)",
-                        constraint.name
-                    )))
+                    (
+                        true,
+                        Some(format!(
+                            "Preference '{}' may not be addressed (advisory only)",
+                            constraint.name
+                        )),
+                    )
                 } else {
                     (true, None)
                 }
@@ -673,7 +688,11 @@ where
 
     /// Verify a task can be merged (no conflicts).
     #[instrument(skip(self), fields(%task_id, %base_branch))]
-    pub async fn verify_mergeable(&self, task_id: Uuid, base_branch: &str) -> DomainResult<VerificationCheck> {
+    pub async fn verify_mergeable(
+        &self,
+        task_id: Uuid,
+        base_branch: &str,
+    ) -> DomainResult<VerificationCheck> {
         let worktree = self.worktree_repo.get_by_task(task_id).await?;
 
         let Some(wt) = worktree else {
@@ -728,7 +747,7 @@ where
             }
         })
         .await
-        .map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))?
+        .map_err(|e| DomainError::ExecutionFailed(format!("spawn_blocking panicked: {}", e)))?
     }
 }
 
@@ -744,10 +763,15 @@ fn parse_test_output(stdout: &str, stderr: &str) -> TestResult {
 
     // Count tests from "running X tests" lines
     for line in stdout.lines() {
-        if line.contains("running") && line.contains("test")
-            && let Some(count) = line.split_whitespace().nth(1).and_then(|s| s.parse::<usize>().ok()) {
-                total += count;
-            }
+        if line.contains("running")
+            && line.contains("test")
+            && let Some(count) = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<usize>().ok())
+        {
+            total += count;
+        }
         if line.contains("... ok") {
             passed += 1;
         } else if line.contains("... FAILED") {

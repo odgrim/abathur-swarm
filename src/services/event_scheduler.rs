@@ -5,8 +5,8 @@
 //! escalation checks, stats updates, etc.
 
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -17,6 +17,7 @@ use uuid::Uuid;
 use super::event_bus::{
     EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
 };
+use super::supervise_with_handle;
 
 /// Type of schedule.
 #[derive(Debug, Clone)]
@@ -44,9 +45,15 @@ enum ScheduleData {
 impl From<&ScheduleType> for ScheduleData {
     fn from(st: &ScheduleType) -> Self {
         match st {
-            ScheduleType::Once { at } => ScheduleData::Once { at: at.to_rfc3339() },
-            ScheduleType::Interval { every } => ScheduleData::Interval { every_secs: every.as_secs() },
-            ScheduleType::Cron { expression } => ScheduleData::Cron { cron: expression.clone() },
+            ScheduleType::Once { at } => ScheduleData::Once {
+                at: at.to_rfc3339(),
+            },
+            ScheduleType::Interval { every } => ScheduleData::Interval {
+                every_secs: every.as_secs(),
+            },
+            ScheduleType::Cron { expression } => ScheduleData::Cron {
+                cron: expression.clone(),
+            },
         }
     }
 }
@@ -55,12 +62,18 @@ impl ScheduleData {
     fn to_schedule_type(&self) -> Option<ScheduleType> {
         match self {
             ScheduleData::Once { at } => {
-                DateTime::parse_from_rfc3339(at).ok().map(|dt| ScheduleType::Once { at: dt.with_timezone(&Utc) })
+                DateTime::parse_from_rfc3339(at)
+                    .ok()
+                    .map(|dt| ScheduleType::Once {
+                        at: dt.with_timezone(&Utc),
+                    })
             }
-            ScheduleData::Interval { every_secs } => {
-                Some(ScheduleType::Interval { every: Duration::from_secs(*every_secs) })
-            }
-            ScheduleData::Cron { cron } => Some(ScheduleType::Cron { expression: cron.clone() }),
+            ScheduleData::Interval { every_secs } => Some(ScheduleType::Interval {
+                every: Duration::from_secs(*every_secs),
+            }),
+            ScheduleData::Cron { cron } => Some(ScheduleType::Cron {
+                expression: cron.clone(),
+            }),
         }
     }
 }
@@ -154,7 +167,7 @@ impl EventScheduler {
         let rows = match sqlx::query_as::<_, ScheduleRow>(
             "SELECT id, name, schedule_type, schedule_data, payload, category, severity,
                     goal_id, task_id, active, created_at, last_fired, fire_count
-             FROM scheduled_events WHERE active = 1"
+             FROM scheduled_events WHERE active = 1",
         )
         .fetch_all(pool)
         .await
@@ -190,8 +203,8 @@ impl EventScheduler {
             None => return,
         };
 
-        let schedule_data = serde_json::to_string(&ScheduleData::from(&sched.schedule))
-            .unwrap_or_default();
+        let schedule_data =
+            serde_json::to_string(&ScheduleData::from(&sched.schedule)).unwrap_or_default();
         // payload column kept for DB schema compatibility; the scheduler always
         // fires ScheduledEventFired events directly, so the stored value is unused.
         let payload_json = "\"ScheduledEventFired\"";
@@ -208,7 +221,7 @@ impl EventScheduler {
             "INSERT OR REPLACE INTO scheduled_events
              (id, name, schedule_type, schedule_data, payload, category, severity,
               goal_id, task_id, active, created_at, last_fired, fire_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(&id)
         .bind(&sched.name)
@@ -244,7 +257,10 @@ impl EventScheduler {
         }
 
         if schedules.len() >= self.config.max_schedules {
-            tracing::warn!("EventScheduler: max schedules ({}) reached, rejecting", self.config.max_schedules);
+            tracing::warn!(
+                "EventScheduler: max schedules ({}) reached, rejecting",
+                self.config.max_schedules
+            );
             return None;
         }
         let id = schedule.id;
@@ -332,7 +348,7 @@ impl EventScheduler {
         let fire_state_dirty = self.fire_state_dirty.clone();
         let pool = self.pool.clone();
 
-        tokio::spawn(async move {
+        supervise_with_handle("event_scheduler", async move {
             let mut tick_count: u64 = 0;
 
             while running.load(Ordering::SeqCst) {
@@ -356,14 +372,20 @@ impl EventScheduler {
                                     None => true, // Never fired, fire now
                                     Some(last) => {
                                         let elapsed = now.signed_duration_since(last);
-                                        elapsed >= chrono::Duration::from_std(*every).unwrap_or(chrono::TimeDelta::MAX)
+                                        elapsed
+                                            >= chrono::Duration::from_std(*every)
+                                                .unwrap_or(chrono::TimeDelta::MAX)
                                     }
                                 }
                             }
                             ScheduleType::Cron { expression } => {
                                 if let Ok(schedule) = cron::Schedule::from_str(expression) {
-                                    let reference_time = sched.last_fired.unwrap_or(sched.created_at);
-                                    schedule.after(&reference_time).next().is_some_and(|next| now >= next)
+                                    let reference_time =
+                                        sched.last_fired.unwrap_or(sched.created_at);
+                                    schedule
+                                        .after(&reference_time)
+                                        .next()
+                                        .is_some_and(|next| now >= next)
                                 } else {
                                     false
                                 }
@@ -416,13 +438,15 @@ impl EventScheduler {
 
                 // Batch-flush fire state to DB every 10 ticks
                 if let Some(pool_ref) = pool.as_ref()
-                    && tick_count.is_multiple_of(10) && fire_state_dirty.load(Ordering::Acquire) > 0 {
-                        let scheds = schedules.read().await;
-                        for sched in scheds.iter() {
-                            if let Some(last_fired) = sched.last_fired {
-                                let id = sched.id.to_string();
-                                let last_fired_str = last_fired.to_rfc3339();
-                                let _ = sqlx::query(
+                    && tick_count.is_multiple_of(10)
+                    && fire_state_dirty.load(Ordering::Acquire) > 0
+                {
+                    let scheds = schedules.read().await;
+                    for sched in scheds.iter() {
+                        if let Some(last_fired) = sched.last_fired {
+                            let id = sched.id.to_string();
+                            let last_fired_str = last_fired.to_rfc3339();
+                            let _ = sqlx::query(
                                     "UPDATE scheduled_events SET last_fired = ?1, fire_count = ?2, active = ?3 WHERE id = ?4"
                                 )
                                 .bind(&last_fired_str)
@@ -431,10 +455,10 @@ impl EventScheduler {
                                 .bind(&id)
                                 .execute(pool_ref)
                                 .await;
-                            }
                         }
-                        fire_state_dirty.store(0, Ordering::Release);
                     }
+                    fire_state_dirty.store(0, Ordering::Release);
+                }
             }
         })
     }
@@ -524,7 +548,9 @@ impl ScheduleRow {
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
         let last_fired = self.last_fired.as_ref().and_then(|s| {
-            DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
+            DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
         });
 
         Some(ScheduledEvent {
@@ -553,7 +579,12 @@ mod tests {
         let bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let scheduler = EventScheduler::new(bus, SchedulerConfig::default());
 
-        let sched = interval_schedule("test", Duration::from_secs(60), EventCategory::Scheduler, EventSeverity::Debug);
+        let sched = interval_schedule(
+            "test",
+            Duration::from_secs(60),
+            EventCategory::Scheduler,
+            EventSeverity::Debug,
+        );
         let id = scheduler.register(sched).await;
         assert!(id.is_some());
 
@@ -567,7 +598,12 @@ mod tests {
         let bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let scheduler = EventScheduler::new(bus, SchedulerConfig::default());
 
-        let sched = interval_schedule("cancel-me", Duration::from_secs(60), EventCategory::Scheduler, EventSeverity::Debug);
+        let sched = interval_schedule(
+            "cancel-me",
+            Duration::from_secs(60),
+            EventCategory::Scheduler,
+            EventSeverity::Debug,
+        );
         let id = scheduler.register(sched).await.unwrap();
 
         assert!(scheduler.cancel(id).await);
@@ -626,9 +662,24 @@ mod tests {
         };
         let scheduler = EventScheduler::new(bus, config);
 
-        let s1 = interval_schedule("s1", Duration::from_secs(60), EventCategory::Scheduler, EventSeverity::Debug);
-        let s2 = interval_schedule("s2", Duration::from_secs(60), EventCategory::Scheduler, EventSeverity::Debug);
-        let s3 = interval_schedule("s3", Duration::from_secs(60), EventCategory::Scheduler, EventSeverity::Debug);
+        let s1 = interval_schedule(
+            "s1",
+            Duration::from_secs(60),
+            EventCategory::Scheduler,
+            EventSeverity::Debug,
+        );
+        let s2 = interval_schedule(
+            "s2",
+            Duration::from_secs(60),
+            EventCategory::Scheduler,
+            EventSeverity::Debug,
+        );
+        let s3 = interval_schedule(
+            "s3",
+            Duration::from_secs(60),
+            EventCategory::Scheduler,
+            EventSeverity::Debug,
+        );
 
         assert!(scheduler.register(s1).await.is_some());
         assert!(scheduler.register(s2).await.is_some());

@@ -6,15 +6,15 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{goal_repository::SqliteGoalRepository, initialize_default_database};
 use crate::cli::command_dispatcher::CliCommandDispatcher;
-use crate::cli::id_resolver::resolve_goal_id;
 use crate::cli::display::{
-    action_success, colorize_priority, colorize_status, list_table, output, render_list,
-    short_id, relative_time_str, truncate_ellipsis, CommandOutput, DetailView,
+    CommandOutput, DetailView, action_success, colorize_priority, colorize_status, list_table,
+    output, relative_time_str, render_list, short_id, truncate_ellipsis,
 };
+use crate::cli::id_resolver::resolve_goal_id;
 use crate::domain::models::{Goal, GoalConstraint, GoalPriority, GoalStatus};
 use crate::domain::ports::GoalFilter;
-use crate::services::command_bus::{CommandResult, DomainCommand, GoalCommand};
 use crate::services::GoalService;
+use crate::services::command_bus::{CommandResult, DomainCommand, GoalCommand};
 
 #[derive(Args, Debug)]
 pub struct GoalArgs {
@@ -183,27 +183,52 @@ impl CommandOutput for GoalDetailOutput {
         let mut view = DetailView::new(&self.goal.name)
             .field("ID", &self.goal.id)
             .field("Status", &colorize_status(&self.goal.status).to_string())
-            .field("Priority", &colorize_priority(&self.goal.priority).to_string())
+            .field(
+                "Priority",
+                &colorize_priority(&self.goal.priority).to_string(),
+            )
             .field_opt("Parent", self.goal.parent_id.as_deref())
             .section("Description")
-            .item(if self.goal.description.is_empty() { "(none)" } else { &self.goal.description });
+            .item(if self.goal.description.is_empty() {
+                "(none)"
+            } else {
+                &self.goal.description
+            });
 
         if !self.constraints.is_empty() {
             view = view.section(&format!("Constraints ({})", self.constraints.len()));
             for c in &self.constraints {
-                view = view.item(&format!("[{}] {}: {}", c.constraint_type, c.name, c.description));
+                view = view.item(&format!(
+                    "[{}] {}: {}",
+                    c.constraint_type, c.name, c.description
+                ));
             }
         }
 
         if !self.goal.domains.is_empty() {
-            view = view.section("Domains")
-                .item(&self.goal.domains.join(", "));
+            view = view.section("Domains").item(&self.goal.domains.join(", "));
         }
 
-        view = view.section("Timing")
-            .field("Created", &format!("{} ({})", relative_time_str(&self.goal.created_at), &self.goal.created_at))
+        view = view
+            .section("Timing")
+            .field(
+                "Created",
+                &format!(
+                    "{} ({})",
+                    relative_time_str(&self.goal.created_at),
+                    &self.goal.created_at
+                ),
+            )
             .field("Updated", &relative_time_str(&self.goal.updated_at))
-            .field("Last Check", &self.goal.last_check.as_deref().map(|s| format!("{} ({})", relative_time_str(s), s)).unwrap_or_else(|| "-".to_string()));
+            .field(
+                "Last Check",
+                &self
+                    .goal
+                    .last_check
+                    .as_deref()
+                    .map(|s| format!("{} ({})", relative_time_str(s), s))
+                    .unwrap_or_else(|| "-".to_string()),
+            );
 
         view.render()
     }
@@ -245,7 +270,13 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
     let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {
-        GoalCommands::Create { name, description, priority, parent, constraint } => {
+        GoalCommands::Create {
+            name,
+            description,
+            priority,
+            parent,
+            constraint,
+        } => {
             let priority = GoalPriority::from_str(&priority)
                 .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
 
@@ -275,7 +306,9 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 domains: vec![],
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let goal = match result {
@@ -291,7 +324,11 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        GoalCommands::List { status, priority, tree: _ } => {
+        GoalCommands::List {
+            status,
+            priority,
+            tree: _,
+        } => {
             let filter = GoalFilter {
                 status: status.as_ref().and_then(|s| GoalStatus::from_str(s)),
                 priority: priority.as_ref().and_then(|p| GoalPriority::from_str(p)),
@@ -308,10 +345,14 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
 
         GoalCommands::Show { id } => {
             let uuid = resolve_goal_id(&pool, &id).await?;
-            let goal = service.get_goal(uuid).await?
+            let goal = service
+                .get_goal(uuid)
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("Goal not found: {}", id))?;
 
-            let constraints = goal.constraints.iter()
+            let constraints = goal
+                .constraints
+                .iter()
                 .map(|c| ConstraintDisplay {
                     name: c.name.clone(),
                     description: c.description.clone(),
@@ -326,11 +367,20 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        GoalCommands::Update { id, name, description, priority, domain, constraint } => {
+        GoalCommands::Update {
+            id,
+            name,
+            description,
+            priority,
+            domain,
+            constraint,
+        } => {
             let uuid = resolve_goal_id(&pool, &id).await?;
             let priority = priority
-                .map(|p| GoalPriority::from_str(&p)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", p)))
+                .map(|p| {
+                    GoalPriority::from_str(&p)
+                        .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", p))
+                })
                 .transpose()?;
 
             let constraints: Vec<GoalConstraint> = constraint
@@ -345,7 +395,11 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 })
                 .collect();
 
-            let domains = if domain.is_empty() { None } else { Some(domain) };
+            let domains = if domain.is_empty() {
+                None
+            } else {
+                Some(domain)
+            };
 
             let cmd = DomainCommand::Goal(GoalCommand::Update {
                 goal_id: uuid,
@@ -356,7 +410,9 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 domains,
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let goal = match result {
@@ -377,7 +433,9 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
 
             let cmd = DomainCommand::Goal(GoalCommand::Delete { goal_id: uuid });
 
-            dispatcher.dispatch(cmd).await
+            dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let out = GoalActionOutput {
@@ -396,7 +454,9 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 new_status: GoalStatus::Paused,
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let goal = match result {
@@ -420,7 +480,9 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 new_status: GoalStatus::Active,
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let goal = match result {
@@ -444,7 +506,9 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 new_status: GoalStatus::Retired,
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let goal = match result {
@@ -463,4 +527,3 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
 
     Ok(())
 }
-

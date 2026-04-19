@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{SqliteMemoryRepository, initialize_default_database};
 use crate::cli::command_dispatcher::CliCommandDispatcher;
-use crate::cli::id_resolver::resolve_memory_id;
 use crate::cli::display::{
-    action_success, colorize_memory_tier, list_table, output, render_list,
-    short_id, relative_time_str, truncate_ellipsis, CommandOutput, DetailView,
+    CommandOutput, DetailView, action_success, colorize_memory_tier, list_table, output,
+    relative_time_str, render_list, short_id, truncate_ellipsis,
 };
+use crate::cli::id_resolver::resolve_memory_id;
 use crate::domain::models::{AccessorId, Memory, MemoryQuery, MemoryTier, MemoryType};
-use crate::services::command_bus::{CommandResult, DomainCommand, MemoryCommand};
 use crate::services::MemoryService;
+use crate::services::command_bus::{CommandResult, DomainCommand, MemoryCommand};
 
 #[derive(Args, Debug)]
 pub struct MemoryArgs {
@@ -187,14 +187,35 @@ impl CommandOutput for MemoryDetailOutput {
             .item(&self.content);
 
         if !self.tags.is_empty() {
-            view = view.section("Tags")
-                .item(&self.tags.join(", "));
+            view = view.section("Tags").item(&self.tags.join(", "));
         }
 
-        view = view.section("Timing")
-            .field("Created", &format!("{} ({})", relative_time_str(&self.created_at), &self.created_at))
-            .field("Accessed", &format!("{} ({})", relative_time_str(&self.last_accessed), &self.last_accessed))
-            .field("Expires", &self.expires_at.as_deref().map(|s| format!("{} ({})", relative_time_str(s), s)).unwrap_or_else(|| "-".to_string()));
+        view = view
+            .section("Timing")
+            .field(
+                "Created",
+                &format!(
+                    "{} ({})",
+                    relative_time_str(&self.created_at),
+                    &self.created_at
+                ),
+            )
+            .field(
+                "Accessed",
+                &format!(
+                    "{} ({})",
+                    relative_time_str(&self.last_accessed),
+                    &self.last_accessed
+                ),
+            )
+            .field(
+                "Expires",
+                &self
+                    .expires_at
+                    .as_deref()
+                    .map(|s| format!("{} ({})", relative_time_str(s), s))
+                    .unwrap_or_else(|| "-".to_string()),
+            );
 
         view.render()
     }
@@ -237,9 +258,18 @@ impl CommandOutput for MemoryStatsOutput {
     fn to_human(&self) -> String {
         use colored::Colorize;
         DetailView::new("Memory Statistics")
-            .field(&colorize_memory_tier("Working").to_string(), &self.working.to_string())
-            .field(&colorize_memory_tier("Episodic").to_string(), &self.episodic.to_string())
-            .field(&colorize_memory_tier("Semantic").to_string(), &self.semantic.to_string())
+            .field(
+                &colorize_memory_tier("Working").to_string(),
+                &self.working.to_string(),
+            )
+            .field(
+                &colorize_memory_tier("Episodic").to_string(),
+                &self.episodic.to_string(),
+            )
+            .field(
+                &colorize_memory_tier("Semantic").to_string(),
+                &self.semantic.to_string(),
+            )
             .field("Total", &self.total.to_string().bold().to_string())
             .render()
     }
@@ -281,7 +311,13 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
     let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {
-        MemoryCommands::Create { key, content, namespace, tier, memory_type } => {
+        MemoryCommands::Create {
+            key,
+            content,
+            namespace,
+            tier,
+            memory_type,
+        } => {
             let tier = MemoryTier::from_str(&tier)
                 .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", tier))?;
             let mtype = MemoryType::from_str(&memory_type)
@@ -296,7 +332,9 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
                 metadata: None,
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let memory = match result {
@@ -306,21 +344,37 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
 
             let out = MemoryActionOutput {
                 success: true,
-                message: format!("Memory created: {} (tier: {})", memory.id, memory.tier.as_str()),
+                message: format!(
+                    "Memory created: {} (tier: {})",
+                    memory.id,
+                    memory.tier.as_str()
+                ),
                 memory: Some(MemoryOutput::from(&memory)),
             };
             output(&out, json_mode);
         }
 
-        MemoryCommands::Show { id_or_key, namespace } => {
+        MemoryCommands::Show {
+            id_or_key,
+            namespace,
+        } => {
             let cmd = if let Ok(uuid) = resolve_memory_id(&pool, &id_or_key).await {
-                DomainCommand::Memory(MemoryCommand::Recall { id: uuid, accessor: AccessorId::system("cli") })
+                DomainCommand::Memory(MemoryCommand::Recall {
+                    id: uuid,
+                    accessor: AccessorId::system("cli"),
+                })
             } else {
                 let ns = namespace.unwrap_or_else(|| "default".to_string());
-                DomainCommand::Memory(MemoryCommand::RecallByKey { key: id_or_key.clone(), namespace: ns, accessor: AccessorId::system("cli") })
+                DomainCommand::Memory(MemoryCommand::RecallByKey {
+                    key: id_or_key.clone(),
+                    namespace: ns,
+                    accessor: AccessorId::system("cli"),
+                })
             };
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             match result {
@@ -347,7 +401,11 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Search { query, namespace, limit } => {
+        MemoryCommands::Search {
+            query,
+            namespace,
+            limit,
+        } => {
             let memories = service.search(&query, namespace.as_deref(), limit).await?;
 
             let out = MemoryListOutput {
@@ -357,7 +415,12 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        MemoryCommands::List { namespace, tier, memory_type, limit } => {
+        MemoryCommands::List {
+            namespace,
+            tier,
+            memory_type,
+            limit,
+        } => {
             let query = MemoryQuery {
                 namespace,
                 tier: tier.as_ref().and_then(|t| MemoryTier::from_str(t)),
@@ -375,11 +438,17 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        MemoryCommands::Update { id, content, namespace, tier } => {
+        MemoryCommands::Update {
+            id,
+            content,
+            namespace,
+            tier,
+        } => {
             let uuid = resolve_memory_id(&pool, &id).await?;
             let tier = tier
-                .map(|t| MemoryTier::from_str(&t)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", t)))
+                .map(|t| {
+                    MemoryTier::from_str(&t).ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", t))
+                })
                 .transpose()?;
 
             let cmd = DomainCommand::Memory(MemoryCommand::Update {
@@ -389,7 +458,9 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
                 tier,
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let memory = match result {
@@ -410,7 +481,9 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
 
             let cmd = DomainCommand::Memory(MemoryCommand::Forget { id: uuid });
 
-            dispatcher.dispatch(cmd).await
+            dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let out = MemoryActionOutput {
@@ -428,7 +501,9 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
                 DomainCommand::Memory(MemoryCommand::RunMaintenance)
             };
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let report = match result {
@@ -504,14 +579,24 @@ mod tests {
     #[test]
     fn parse_list_with_all_filters() {
         let cli = Cli::parse_from([
-            "memory", "list",
-            "--namespace", "test-ns",
-            "--tier", "semantic",
-            "--type", "error",
-            "--limit", "5",
+            "memory",
+            "list",
+            "--namespace",
+            "test-ns",
+            "--tier",
+            "semantic",
+            "--type",
+            "error",
+            "--limit",
+            "5",
         ]);
         match cli.command {
-            MemoryCommands::List { namespace, tier, memory_type, limit } => {
+            MemoryCommands::List {
+                namespace,
+                tier,
+                memory_type,
+                limit,
+            } => {
                 assert_eq!(namespace.as_deref(), Some("test-ns"));
                 assert_eq!(tier.as_deref(), Some("semantic"));
                 assert_eq!(memory_type.as_deref(), Some("error"));
@@ -521,4 +606,3 @@ mod tests {
         }
     }
 }
-

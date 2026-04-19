@@ -2,23 +2,24 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock, Semaphore};
-use tokio::time::{timeout, Duration};
+use tokio::sync::{RwLock, Semaphore, mpsc};
+use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    Goal, ConstraintType, SessionStatus, SubstrateConfig, SubstrateRequest, SubstrateSession, TaskDag, TaskStatus,
+    ConstraintType, Goal, SessionStatus, SubstrateConfig, SubstrateRequest, SubstrateSession,
+    TaskDag, TaskStatus,
 };
 use crate::domain::ports::{AgentRepository, GoalRepository, Substrate, TaskRepository};
-use crate::services::context_truncation::{TruncationConfig, truncate_section};
-use crate::services::context_window::{ContextWindowGuard, ContextWindowCheck};
-use crate::services::cost_tracker;
-use crate::services::model_router::ModelRouter;
-use crate::services::guardrails::{GuardrailResult, Guardrails};
 use crate::services::circuit_breaker::{CircuitBreakerService, CircuitScope};
+use crate::services::context_truncation::{TruncationConfig, truncate_section};
+use crate::services::context_window::{ContextWindowCheck, ContextWindowGuard};
+use crate::services::cost_tracker;
 use crate::services::dag_restructure::DagRestructureService;
 use crate::services::event_bus::EventBus;
+use crate::services::guardrails::{GuardrailResult, Guardrails};
+use crate::services::model_router::ModelRouter;
 
 /// Configuration for the DAG executor.
 #[derive(Debug, Clone)]
@@ -98,21 +99,42 @@ pub struct TaskResult {
 #[allow(clippy::large_enum_variant)]
 pub enum ExecutionEvent {
     /// Execution started.
-    Started { total_tasks: usize, wave_count: usize },
+    Started {
+        total_tasks: usize,
+        wave_count: usize,
+    },
     /// Wave started.
-    WaveStarted { wave_number: usize, task_count: usize },
+    WaveStarted {
+        wave_number: usize,
+        task_count: usize,
+    },
     /// Task started.
     TaskStarted { task_id: Uuid, task_title: String },
     /// Task completed.
     TaskCompleted { task_id: Uuid, result: TaskResult },
     /// Task failed.
-    TaskFailed { task_id: Uuid, error: String, retry_count: u32 },
+    TaskFailed {
+        task_id: Uuid,
+        error: String,
+        retry_count: u32,
+    },
     /// Task retrying.
-    TaskRetrying { task_id: Uuid, attempt: u32, max_attempts: u32 },
+    TaskRetrying {
+        task_id: Uuid,
+        attempt: u32,
+        max_attempts: u32,
+    },
     /// Wave completed.
-    WaveCompleted { wave_number: usize, succeeded: usize, failed: usize },
+    WaveCompleted {
+        wave_number: usize,
+        succeeded: usize,
+        failed: usize,
+    },
     /// Execution completed.
-    Completed { status: ExecutionStatus, results: ExecutionResults },
+    Completed {
+        status: ExecutionStatus,
+        results: ExecutionResults,
+    },
     /// DAG restructure decision made for a permanently failed task.
     RestructureDecision { task_id: Uuid, decision: String },
     /// Intent verification requested (emitted when DAG completes for orchestrator to handle).
@@ -265,7 +287,10 @@ where
     }
 
     /// Add restructure service to the executor for failure recovery.
-    pub fn with_restructure_service(mut self, restructure_service: Arc<DagRestructureService>) -> Self {
+    pub fn with_restructure_service(
+        mut self,
+        restructure_service: Arc<DagRestructureService>,
+    ) -> Self {
         self.restructure_service = Some(restructure_service);
         self
     }
@@ -279,8 +304,8 @@ where
     /// Refresh the active goals cache for constraint injection.
     async fn refresh_active_goals_cache(&self) -> DomainResult<()> {
         if let Some(ref goal_repo) = self.goal_repo {
-            use crate::domain::ports::GoalFilter;
             use crate::domain::models::GoalStatus;
+            use crate::domain::ports::GoalFilter;
 
             let filter = GoalFilter {
                 status: Some(GoalStatus::Active),
@@ -309,7 +334,8 @@ where
         self.refresh_active_goals_cache().await?;
 
         // Validate and get execution waves
-        let waves = dag.execution_waves()
+        let waves = dag
+            .execution_waves()
             .map_err(|e| DomainError::ValidationFailed(e.to_string()))?;
 
         let start_time = std::time::Instant::now();
@@ -327,10 +353,12 @@ where
         }
 
         // Send started event
-        let _ = event_tx.send(ExecutionEvent::Started {
-            total_tasks: dag.nodes.len(),
-            wave_count: waves.len(),
-        }).await;
+        let _ = event_tx
+            .send(ExecutionEvent::Started {
+                total_tasks: dag.nodes.len(),
+                wave_count: waves.len(),
+            })
+            .await;
 
         // Track completed and failed tasks
         let completed: Arc<RwLock<HashSet<Uuid>>> = Arc::new(RwLock::new(HashSet::new()));
@@ -339,10 +367,12 @@ where
 
         // Execute waves sequentially
         for (wave_idx, wave) in waves.iter().enumerate() {
-            let _ = event_tx.send(ExecutionEvent::WaveStarted {
-                wave_number: wave_idx + 1,
-                task_count: wave.len(),
-            }).await;
+            let _ = event_tx
+                .send(ExecutionEvent::WaveStarted {
+                    wave_number: wave_idx + 1,
+                    task_count: wave.len(),
+                })
+                .await;
 
             // Check for fail-fast abort
             if self.config.fail_fast {
@@ -353,7 +383,16 @@ where
             }
 
             // Execute wave tasks in parallel with concurrency limit
-            let wave_results = self.execute_wave(wave, dag, &event_tx, &total_tokens, &self.guardrails, &self.event_bus).await?;
+            let wave_results = self
+                .execute_wave(
+                    wave,
+                    dag,
+                    &event_tx,
+                    &total_tokens,
+                    &self.guardrails,
+                    &self.event_bus,
+                )
+                .await?;
 
             // Process wave results
             let mut wave_succeeded = 0;
@@ -378,64 +417,80 @@ where
                 }
             }
 
-            let _ = event_tx.send(ExecutionEvent::WaveCompleted {
-                wave_number: wave_idx + 1,
-                succeeded: wave_succeeded,
-                failed: wave_failed,
-            }).await;
+            let _ = event_tx
+                .send(ExecutionEvent::WaveCompleted {
+                    wave_number: wave_idx + 1,
+                    succeeded: wave_succeeded,
+                    failed: wave_failed,
+                })
+                .await;
 
             // Emit wave verification request if enabled
             if self.config.enable_wave_verification && wave_succeeded > 0 {
                 let wave_completed_ids: Vec<Uuid> = {
                     let results = self.results.read().await;
-                    results.task_results.iter()
+                    results
+                        .task_results
+                        .iter()
                         .filter(|r| r.status == TaskStatus::Complete && wave.contains(&r.task_id))
                         .map(|r| r.task_id)
                         .collect()
                 };
 
-                let _ = event_tx.send(ExecutionEvent::WaveVerificationRequested {
-                    wave_number: wave_idx + 1,
-                    completed_task_ids: wave_completed_ids,
-                    goal_id: None,
-                }).await;
+                let _ = event_tx
+                    .send(ExecutionEvent::WaveVerificationRequested {
+                        wave_number: wave_idx + 1,
+                        completed_task_ids: wave_completed_ids,
+                        goal_id: None,
+                    })
+                    .await;
             }
 
             // Check for permanent failures and signal for restructure if service is available
             if wave_failed > 0
-                && let Some(ref restructure_svc) = self.restructure_service {
-                    // Get permanently failed task IDs from this wave
-                    let failed_tasks: Vec<(Uuid, u32)> = {
-                        let results = self.results.read().await;
-                        results.task_results.iter()
-                            .filter(|r| r.status == TaskStatus::Failed && r.retry_count >= self.config.max_retries)
-                            .map(|r| (r.task_id, r.retry_count))
-                            .collect()
-                    };
+                && let Some(ref restructure_svc) = self.restructure_service
+            {
+                // Get permanently failed task IDs from this wave
+                let failed_tasks: Vec<(Uuid, u32)> = {
+                    let results = self.results.read().await;
+                    results
+                        .task_results
+                        .iter()
+                        .filter(|r| {
+                            r.status == TaskStatus::Failed
+                                && r.retry_count >= self.config.max_retries
+                        })
+                        .map(|r| (r.task_id, r.retry_count))
+                        .collect()
+                };
 
-                    for (task_id, retries) in failed_tasks {
-                        // Check if restructure should be attempted
-                        let trigger = crate::services::dag_restructure::RestructureTrigger::PermanentFailure {
+                for (task_id, retries) in failed_tasks {
+                    // Check if restructure should be attempted
+                    let trigger =
+                        crate::services::dag_restructure::RestructureTrigger::PermanentFailure {
                             task_id,
                             retries_exhausted: retries,
                         };
 
-                        if restructure_svc.should_restructure(&trigger) {
-                            // Emit event to signal that restructure is needed
-                            // The actual restructure decision will be made by the orchestrator
-                            // which has access to goals and can build the full RestructureContext
-                            let _ = event_tx.send(ExecutionEvent::RestructureDecision {
+                    if restructure_svc.should_restructure(&trigger) {
+                        // Emit event to signal that restructure is needed
+                        // The actual restructure decision will be made by the orchestrator
+                        // which has access to goals and can build the full RestructureContext
+                        let _ = event_tx
+                            .send(ExecutionEvent::RestructureDecision {
                                 task_id,
                                 decision: format!("Restructure triggered: {:?}", trigger),
-                            }).await;
+                            })
+                            .await;
 
-                            tracing::info!(
-                                "DAG restructure triggered for task {}: {:?}",
-                                task_id, trigger
-                            );
-                        }
+                        tracing::info!(
+                            "DAG restructure triggered for task {}: {:?}",
+                            task_id,
+                            trigger
+                        );
                     }
                 }
+            }
         }
 
         // Finalize results
@@ -459,10 +514,12 @@ where
             *status = final_status.clone();
         }
 
-        let _ = event_tx.send(ExecutionEvent::Completed {
-            status: final_status,
-            results: final_results.clone(),
-        }).await;
+        let _ = event_tx
+            .send(ExecutionEvent::Completed {
+                status: final_status,
+                results: final_results.clone(),
+            })
+            .await;
 
         Ok(final_results)
     }
@@ -495,16 +552,21 @@ where
                 let check_result = cb.check(scope).await;
                 if check_result.is_blocked() {
                     // Skip this task - circuit is open
-                    let _ = event_tx.send(ExecutionEvent::TaskFailed {
-                        task_id,
-                        error: "Circuit breaker open".to_string(),
-                        retry_count: 0,
-                    }).await;
+                    let _ = event_tx
+                        .send(ExecutionEvent::TaskFailed {
+                            task_id,
+                            error: "Circuit breaker open".to_string(),
+                            retry_count: 0,
+                        })
+                        .await;
                     continue;
                 }
             }
 
-            let permit = semaphore.clone().acquire_owned().await
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
                 .map_err(|_| DomainError::ValidationFailed("Semaphore error".to_string()))?;
 
             let task_repo = self.task_repo.clone();
@@ -519,6 +581,7 @@ where
             let goal_id: Option<Uuid> = None;
             let goals_for_task = active_goals.clone();
 
+            // Per-task worker: one spawn per DAG task, joined via handles below.
             let handle = tokio::spawn(async move {
                 let _permit = permit;
                 execute_single_task(
@@ -534,7 +597,8 @@ where
                     circuit_breaker,
                     goals_for_task,
                     event_bus_clone,
-                ).await
+                )
+                .await
             });
 
             handles.push(handle);
@@ -581,7 +645,11 @@ fn build_goal_context(goals: &[Goal], task_goal_id: Option<Uuid>) -> String {
 
     for goal in goals {
         let is_primary = task_goal_id == Some(goal.id);
-        let marker = if is_primary { " [PRIMARY - This task's goal]" } else { "" };
+        let marker = if is_primary {
+            " [PRIMARY - This task's goal]"
+        } else {
+            ""
+        };
 
         context.push_str(&format!("### {}{}\n", goal.name, marker));
         context.push_str(&format!("{}\n", goal.description));
@@ -594,7 +662,10 @@ fn build_goal_context(goals: &[Goal], task_goal_id: Option<Uuid>) -> String {
                     ConstraintType::Preference => "SHOULD",
                     ConstraintType::Boundary => "WITHIN",
                 };
-                context.push_str(&format!("- {} [{}]: {}\n", constraint.name, severity, constraint.description));
+                context.push_str(&format!(
+                    "- {} [{}]: {}\n",
+                    constraint.name, severity, constraint.description
+                ));
             }
         }
         context.push('\n');
@@ -609,7 +680,10 @@ fn build_goal_context(goals: &[Goal], task_goal_id: Option<Uuid>) -> String {
 fn build_mcp_context(config: &ExecutorConfig) -> String {
     let mut context = String::new();
 
-    if config.memory_server_url.is_some() || config.a2a_gateway_url.is_some() || config.tasks_server_url.is_some() {
+    if config.memory_server_url.is_some()
+        || config.a2a_gateway_url.is_some()
+        || config.tasks_server_url.is_some()
+    {
         context.push_str("\n\n## Available System Services (HTTP REST APIs)\n\n");
         context.push_str("Use the WebFetch tool to interact with these services.\n\n");
 
@@ -617,25 +691,46 @@ fn build_mcp_context(config: &ExecutorConfig) -> String {
             context.push_str(&format!("### Memory Service ({})\n", url));
             context.push_str("Query and store project knowledge, patterns, and decisions.\n\n");
             context.push_str("**Endpoints:**\n");
-            context.push_str(&format!("- `GET {}/api/v1/memory?search=<query>` - Search memories\n", url));
-            context.push_str(&format!("- `GET {}/api/v1/memory?namespace=<ns>` - List memories in namespace\n", url));
+            context.push_str(&format!(
+                "- `GET {}/api/v1/memory?search=<query>` - Search memories\n",
+                url
+            ));
+            context.push_str(&format!(
+                "- `GET {}/api/v1/memory?namespace=<ns>` - List memories in namespace\n",
+                url
+            ));
             context.push_str(&format!("- `POST {}/api/v1/memory` - Store new memory (JSON body: {{\"key\": \"...\", \"content\": \"...\", \"namespace\": \"...\"}})\n", url));
-            context.push_str(&format!("- `GET {}/api/v1/memory/key/<namespace>/<key>` - Get specific memory\n\n", url));
+            context.push_str(&format!(
+                "- `GET {}/api/v1/memory/key/<namespace>/<key>` - Get specific memory\n\n",
+                url
+            ));
         }
         if let Some(ref url) = config.tasks_server_url {
             context.push_str(&format!("### Tasks Service ({})\n", url));
             context.push_str("Query task dependencies, status, and spawn subtasks.\n\n");
             context.push_str("**Endpoints:**\n");
-            context.push_str(&format!("- `GET {}/api/v1/tasks/<id>` - Get task details\n", url));
-            context.push_str(&format!("- `GET {}/api/v1/tasks?status=<status>` - List tasks by status\n", url));
-            context.push_str(&format!("- `GET {}/api/v1/tasks/<id>/dependencies` - Get task dependencies\n", url));
+            context.push_str(&format!(
+                "- `GET {}/api/v1/tasks/<id>` - Get task details\n",
+                url
+            ));
+            context.push_str(&format!(
+                "- `GET {}/api/v1/tasks?status=<status>` - List tasks by status\n",
+                url
+            ));
+            context.push_str(&format!(
+                "- `GET {}/api/v1/tasks/<id>/dependencies` - Get task dependencies\n",
+                url
+            ));
             context.push_str(&format!("- `POST {}/api/v1/tasks` - Create subtask (JSON body: {{\"title\": \"...\", \"description\": \"...\", \"parent_id\": \"...\"}})\n\n", url));
         }
         if let Some(ref url) = config.a2a_gateway_url {
             context.push_str(&format!("### A2A Gateway ({})\n", url));
             context.push_str("Delegate work to specialized agents via JSON-RPC 2.0.\n\n");
             context.push_str("**Endpoints:**\n");
-            context.push_str(&format!("- `GET {}/api/v1/agents` - List available agents and their capabilities\n", url));
+            context.push_str(&format!(
+                "- `GET {}/api/v1/agents` - List available agents and their capabilities\n",
+                url
+            ));
             context.push_str(&format!("- `POST {}` - Send JSON-RPC request (method: \"tasks/send\", params: {{\"message\": {{\"role\": \"user\", \"parts\": [{{\"type\": \"text\", \"text\": \"...\"}}]}}}})\n\n", url));
         }
         context.push_str("---\n\n");
@@ -659,33 +754,38 @@ async fn build_upstream_artifacts_context<T: TaskRepository>(
 
     for dep_id in &task.depends_on {
         if let Ok(Some(dep_task)) = task_repo.get(*dep_id).await
-            && dep_task.status == TaskStatus::Complete && !dep_task.artifacts.is_empty() {
-                if !artifacts_found {
-                    context.push_str("\n\n## Upstream Artifacts\n\n");
-                    context.push_str("The following artifacts from completed dependency tasks are available:\n\n");
-                    artifacts_found = true;
-                }
-
-                context.push_str(&format!("### From: {}\n", dep_task.title));
-                for artifact in &dep_task.artifacts {
-                    context.push_str(&format!(
-                        "- **{:?}**: `{}`\n",
-                        artifact.artifact_type,
-                        artifact.uri
-                    ));
-                    if let Some(ref checksum) = artifact.checksum {
-                        context.push_str(&format!("  - Commit: {}\n", checksum));
-                    }
-                }
-                if let Some(ref wt_path) = dep_task.worktree_path {
-                    context.push_str(&format!("  - Worktree path: {}\n", wt_path));
-                }
-                context.push('\n');
+            && dep_task.status == TaskStatus::Complete
+            && !dep_task.artifacts.is_empty()
+        {
+            if !artifacts_found {
+                context.push_str("\n\n## Upstream Artifacts\n\n");
+                context.push_str(
+                    "The following artifacts from completed dependency tasks are available:\n\n",
+                );
+                artifacts_found = true;
             }
+
+            context.push_str(&format!("### From: {}\n", dep_task.title));
+            for artifact in &dep_task.artifacts {
+                context.push_str(&format!(
+                    "- **{:?}**: `{}`\n",
+                    artifact.artifact_type, artifact.uri
+                ));
+                if let Some(ref checksum) = artifact.checksum {
+                    context.push_str(&format!("  - Commit: {}\n", checksum));
+                }
+            }
+            if let Some(ref wt_path) = dep_task.worktree_path {
+                context.push_str(&format!("  - Worktree path: {}\n", wt_path));
+            }
+            context.push('\n');
+        }
     }
 
     if artifacts_found {
-        context.push_str("You can use these artifacts as starting points or references for your work.\n");
+        context.push_str(
+            "You can use these artifacts as starting points or references for your work.\n",
+        );
         context.push_str("---\n\n");
     }
 
@@ -766,10 +866,12 @@ where
         }
     };
 
-    let _ = event_tx.send(ExecutionEvent::TaskStarted {
-        task_id,
-        task_title: task.title.clone(),
-    }).await;
+    let _ = event_tx
+        .send(ExecutionEvent::TaskStarted {
+            task_id,
+            task_title: task.title.clone(),
+        })
+        .await;
 
     // Fetch artifacts from upstream dependencies for context injection
     let upstream_artifacts_context = build_upstream_artifacts_context(&task, &*task_repo).await;
@@ -789,30 +891,37 @@ where
                     task_id,
                     task_title: task.title.clone(),
                 },
-            )).await;
+            ))
+            .await;
         }
     }
 
     // Get system prompt, tools, constraints, and max_turns from agent template
     let agent_type = task.agent_type.as_deref().unwrap_or("default");
-    let (base_system_prompt, agent_tools, agent_constraints, template_max_turns) = match agent_repo.get_template_by_name(agent_type).await {
-        Ok(Some(template)) => {
-            let tools: Vec<String> = template.tools.iter().map(|t| t.name.clone()).collect();
-            let constraints = template.constraints.clone();
-            (template.system_prompt, tools, constraints, template.max_turns)
-        }
-        _ => (
-            format!(
-                "You are a specialized agent for executing tasks.\n\
+    let (base_system_prompt, agent_tools, agent_constraints, template_max_turns) =
+        match agent_repo.get_template_by_name(agent_type).await {
+            Ok(Some(template)) => {
+                let tools: Vec<String> = template.tools.iter().map(|t| t.name.clone()).collect();
+                let constraints = template.constraints.clone();
+                (
+                    template.system_prompt,
+                    tools,
+                    constraints,
+                    template.max_turns,
+                )
+            }
+            _ => (
+                format!(
+                    "You are a specialized agent for executing tasks.\n\
                 Follow the task description carefully and complete the work.\n\
                 Agent type: {}",
-                agent_type
+                    agent_type
+                ),
+                vec![], // Empty means use default tool set
+                vec![], // No constraints
+                0,      // Sentinel: no template override, fall back to config default
             ),
-            vec![], // Empty means use default tool set
-            vec![], // No constraints
-            0,     // Sentinel: no template override, fall back to config default
-        ),
-    };
+        };
 
     // Build agent constraints section for system prompt
     let constraints_context = if agent_constraints.is_empty() {
@@ -821,8 +930,15 @@ where
         let mut ctx = String::from("\n\n## Agent Constraints\n\n");
         ctx.push_str("You MUST adhere to the following constraints:\n\n");
         for constraint in &agent_constraints {
-            let enforcement = if constraint.enforced { "[ENFORCED]" } else { "[ADVISORY]" };
-            ctx.push_str(&format!("- **{}** {}: {}\n", constraint.name, enforcement, constraint.description));
+            let enforcement = if constraint.enforced {
+                "[ENFORCED]"
+            } else {
+                "[ADVISORY]"
+            };
+            ctx.push_str(&format!(
+                "- **{}** {}: {}\n",
+                constraint.name, enforcement, constraint.description
+            ));
         }
         ctx.push_str("\nViolating enforced constraints will result in task failure.\n");
         ctx
@@ -835,7 +951,10 @@ where
     let prompt_tier = task.routing_hints.prompt_tier;
 
     let goal_context = if prompt_tier.include_goal_context() {
-        truncate_section(&build_goal_context(&active_goals, goal_id), &truncation_config)
+        truncate_section(
+            &build_goal_context(&active_goals, goal_id),
+            &truncation_config,
+        )
     } else {
         String::new()
     };
@@ -845,10 +964,13 @@ where
         String::new()
     };
     let project_context = if prompt_tier.include_project_context() {
-        config.project_context.as_ref().map_or(String::new(), |ctx| {
-            let raw = format!("\n\n## Project Context\n\n{}", ctx);
-            truncate_section(&raw, &truncation_config)
-        })
+        config
+            .project_context
+            .as_ref()
+            .map_or(String::new(), |ctx| {
+                let raw = format!("\n\n## Project Context\n\n{}", ctx);
+                truncate_section(&raw, &truncation_config)
+            })
     } else {
         String::new()
     };
@@ -863,7 +985,9 @@ where
         String::new()
     };
     let iteration_context = if prompt_tier.include_iteration_context() {
-        config.iteration_context.as_ref()
+        config
+            .iteration_context
+            .as_ref()
             .map_or(String::new(), |ctx| ctx.format_for_prompt())
     } else {
         String::new()
@@ -910,7 +1034,11 @@ where
     let context_guard = ContextWindowGuard::with_defaults();
     let model_for_guard = substrate_config.model.as_deref().unwrap_or("sonnet");
     match context_guard.check(model_for_guard, &system_prompt, &task.description) {
-        ContextWindowCheck::Block { estimated_prompt_tokens, remaining_tokens, context_window } => {
+        ContextWindowCheck::Block {
+            estimated_prompt_tokens,
+            remaining_tokens,
+            context_window,
+        } => {
             tracing::error!(
                 "Context window exceeded for task {}: ~{}K prompt tokens, {}K remaining ({}K window)",
                 task_id,
@@ -934,7 +1062,10 @@ where
                 retry_count: 0,
             };
         }
-        ContextWindowCheck::Warn { estimated_prompt_tokens, remaining_tokens } => {
+        ContextWindowCheck::Warn {
+            estimated_prompt_tokens,
+            remaining_tokens,
+        } => {
             tracing::warn!(
                 "Context window low for task {}: ~{}K prompt tokens, {}K remaining",
                 task_id,
@@ -956,11 +1087,13 @@ where
     for attempt in 0..=config.max_retries {
         if attempt > 0 {
             retry_count = attempt;
-            let _ = event_tx.send(ExecutionEvent::TaskRetrying {
-                task_id,
-                attempt,
-                max_attempts: config.max_retries,
-            }).await;
+            let _ = event_tx
+                .send(ExecutionEvent::TaskRetrying {
+                    task_id,
+                    attempt,
+                    max_attempts: config.max_retries,
+                })
+                .await;
 
             // Update retry count in task
             let mut retry_task = task.clone();
@@ -978,7 +1111,8 @@ where
                         attempt,
                         max_attempts: config.max_retries,
                     },
-                )).await;
+                ))
+                .await;
             }
         }
 
@@ -993,23 +1127,22 @@ where
         if selection.escalated {
             tracing::info!(
                 "Task {} model escalated: {} ({})",
-                task_id, selection.model, selection.reason,
+                task_id,
+                selection.model,
+                selection.reason,
             );
         }
 
         // Build request with enhanced context
-        let request = SubstrateRequest::new(
-            task_id,
-            agent_type,
-            &system_prompt,
-            &task.description,
-        ).with_config(attempt_config);
+        let request = SubstrateRequest::new(task_id, agent_type, &system_prompt, &task.description)
+            .with_config(attempt_config);
 
         // Execute with timeout
         let execution_result = timeout(
             Duration::from_secs(config.task_timeout_secs),
             substrate.execute(request),
-        ).await;
+        )
+        .await;
 
         match execution_result {
             Ok(Ok(session)) => {
@@ -1052,13 +1185,20 @@ where
                         // Tokens were already consumed by the LLM call, so
                         // record them anyway for accurate accounting.
                         g.record_tokens(tokens_used);
-                        tracing::warn!(tokens_used, "token guardrail exceeded post-hoc; recorded for accounting");
+                        tracing::warn!(
+                            tokens_used,
+                            "token guardrail exceeded post-hoc; recorded for accounting"
+                        );
                     }
                     if let Some(cost_cents) = estimated_cost_cents
-                        && g.check_and_record_cost(cost_cents).is_blocked() {
-                            g.record_cost(cost_cents);
-                            tracing::warn!(cost_cents, "budget guardrail exceeded post-hoc; recorded for accounting");
-                        }
+                        && g.check_and_record_cost(cost_cents).is_blocked()
+                    {
+                        g.record_cost(cost_cents);
+                        tracing::warn!(
+                            cost_cents,
+                            "budget guardrail exceeded post-hoc; recorded for accounting"
+                        );
+                    }
                 }
 
                 if session.status == SessionStatus::Completed {
@@ -1079,7 +1219,8 @@ where
                                 task_id,
                                 tokens_used,
                             },
-                        )).await;
+                        ))
+                        .await;
                     }
 
                     // Register task end with guardrails
@@ -1101,15 +1242,20 @@ where
                         retry_count,
                     };
 
-                    let _ = event_tx.send(ExecutionEvent::TaskCompleted {
-                        task_id,
-                        result: result.clone(),
-                    }).await;
+                    let _ = event_tx
+                        .send(ExecutionEvent::TaskCompleted {
+                            task_id,
+                            result: result.clone(),
+                        })
+                        .await;
 
                     return result;
                 } else {
                     // Session didn't complete successfully
-                    last_error = session.error.clone().or(Some("Session did not complete".to_string()));
+                    last_error = session
+                        .error
+                        .clone()
+                        .or(Some("Session did not complete".to_string()));
                     last_session = Some(session);
                 }
             }
@@ -1117,7 +1263,10 @@ where
                 last_error = Some(e.to_string());
             }
             Err(_) => {
-                last_error = Some(format!("Task timed out after {} seconds", config.task_timeout_secs));
+                last_error = Some(format!(
+                    "Task timed out after {} seconds",
+                    config.task_timeout_secs
+                ));
             }
         }
     }
@@ -1147,19 +1296,23 @@ where
                 error: error_msg.clone(),
                 retry_count,
             },
-        )).await;
+        ))
+        .await;
     }
 
     // Record failure with circuit breaker
     if let (Some(cb), Some(gid)) = (&circuit_breaker, goal_id) {
-        cb.record_failure(CircuitScope::task_chain(gid), &error_msg).await;
+        cb.record_failure(CircuitScope::task_chain(gid), &error_msg)
+            .await;
     }
 
-    let _ = event_tx.send(ExecutionEvent::TaskFailed {
-        task_id,
-        error: error_msg.clone(),
-        retry_count,
-    }).await;
+    let _ = event_tx
+        .send(ExecutionEvent::TaskFailed {
+            task_id,
+            error: error_msg.clone(),
+            retry_count,
+        })
+        .await;
 
     TaskResult {
         task_id,
@@ -1175,11 +1328,13 @@ where
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_migrated_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
+        SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
+        create_migrated_test_pool,
     };
     use crate::adapters::substrates::MockSubstrate;
 
-    async fn setup_executor() -> DagExecutor<SqliteTaskRepository, SqliteAgentRepository, SqliteGoalRepository> {
+    async fn setup_executor()
+    -> DagExecutor<SqliteTaskRepository, SqliteAgentRepository, SqliteGoalRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
 
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
@@ -1188,8 +1343,7 @@ mod tests {
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
         let config = ExecutorConfig::default();
 
-        DagExecutor::new(task_repo, agent_repo, substrate, config)
-            .with_goal_repo(goal_repo)
+        DagExecutor::new(task_repo, agent_repo, substrate, config).with_goal_repo(goal_repo)
     }
 
     #[tokio::test]

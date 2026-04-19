@@ -10,11 +10,13 @@
 //! values denominated in *cents* (`f64`), so callers are unaffected.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+
+use super::supervise_with_handle;
 
 /// Configuration for guardrails.
 #[derive(Debug, Clone)]
@@ -99,7 +101,8 @@ pub struct RuntimeMetrics {
 
 impl RuntimeMetrics {
     pub fn record_tokens(&self, tokens: u64) {
-        self.tokens_used_this_hour.fetch_add(tokens, Ordering::Relaxed);
+        self.tokens_used_this_hour
+            .fetch_add(tokens, Ordering::Relaxed);
         self.total_tokens_used.fetch_add(tokens, Ordering::Relaxed);
     }
 
@@ -126,7 +129,8 @@ impl RuntimeMetrics {
         );
         if result.is_ok() {
             // Also bump the lifetime counter (best-effort, no CAS needed).
-            self.total_tokens_used.fetch_add(requested, Ordering::Relaxed);
+            self.total_tokens_used
+                .fetch_add(requested, Ordering::Relaxed);
         }
         result
     }
@@ -141,17 +145,14 @@ impl RuntimeMetrics {
         additional_hundredths: u64,
         limit_hundredths: u64,
     ) -> Result<u64, u64> {
-        self.cost_hundredths.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |current| {
+        self.cost_hundredths
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 if current.checked_add(additional_hundredths)? <= limit_hundredths {
                     Some(current + additional_hundredths)
                 } else {
                     None
                 }
-            },
-        )
+            })
     }
 
     pub fn record_task_started(&self) {
@@ -334,14 +335,16 @@ impl Guardrails {
 
         if agents.contains(agent_id) {
             tracing::warn!(agent_id, "agent spawn blocked: agent already running");
-            return GuardrailResult::Blocked(format!(
-                "Agent '{}' is already running",
-                agent_id
-            ));
+            return GuardrailResult::Blocked(format!("Agent '{}' is already running", agent_id));
         }
 
         if agents.len() >= self.config.max_concurrent_agents {
-            tracing::warn!(agent_id, current_count = agents.len(), max = self.config.max_concurrent_agents, "agent spawn blocked: max concurrent agents reached");
+            tracing::warn!(
+                agent_id,
+                current_count = agents.len(),
+                max = self.config.max_concurrent_agents,
+                "agent spawn blocked: max concurrent agents reached"
+            );
             return GuardrailResult::Blocked(format!(
                 "Maximum concurrent agents ({}) reached",
                 self.config.max_concurrent_agents
@@ -356,14 +359,22 @@ impl Guardrails {
         let mut agents = self.current_agents.write().await;
         agents.insert(agent_id.to_string());
         self.metrics.record_agent_spawned();
-        tracing::info!(agent_id, current_count = agents.len(), "agent registered as spawned");
+        tracing::info!(
+            agent_id,
+            current_count = agents.len(),
+            "agent registered as spawned"
+        );
     }
 
     /// Register an agent as finished.
     pub async fn register_agent_end(&self, agent_id: &str) {
         let mut agents = self.current_agents.write().await;
         agents.remove(agent_id);
-        tracing::info!(agent_id, remaining_count = agents.len(), "agent registered as ended");
+        tracing::info!(
+            agent_id,
+            remaining_count = agents.len(),
+            "agent registered as ended"
+        );
     }
 
     /// Check if a tool is allowed.
@@ -399,7 +410,12 @@ impl Guardrails {
     pub fn check_tokens(&self, requested: u64) -> GuardrailResult {
         let current = self.metrics.get_tokens_this_hour();
         if current + requested > self.config.max_tokens_per_hour {
-            tracing::warn!(requested, current, max = self.config.max_tokens_per_hour, "token usage blocked: limit would be exceeded");
+            tracing::warn!(
+                requested,
+                current,
+                max = self.config.max_tokens_per_hour,
+                "token usage blocked: limit would be exceeded"
+            );
             return GuardrailResult::Blocked(format!(
                 "Token limit ({}/hour) would be exceeded",
                 self.config.max_tokens_per_hour
@@ -408,7 +424,12 @@ impl Guardrails {
 
         // Warn at 80%
         if current + requested > (self.config.max_tokens_per_hour * 80) / 100 {
-            tracing::warn!(requested, current = current + requested, max = self.config.max_tokens_per_hour, "token usage warning: approaching limit");
+            tracing::warn!(
+                requested,
+                current = current + requested,
+                max = self.config.max_tokens_per_hour,
+                "token usage warning: approaching limit"
+            );
             return GuardrailResult::Warning(format!(
                 "Approaching token limit: {}/{} used",
                 current + requested,
@@ -476,7 +497,12 @@ impl Guardrails {
 
         let current = self.metrics.get_cost_cents();
         if current + additional_cents > self.config.budget_limit_cents {
-            tracing::warn!(additional_cents, current_cents = current, limit_cents = self.config.budget_limit_cents, "budget blocked: limit would be exceeded");
+            tracing::warn!(
+                additional_cents,
+                current_cents = current,
+                limit_cents = self.config.budget_limit_cents,
+                "budget blocked: limit would be exceeded"
+            );
             return GuardrailResult::Blocked(format!(
                 "Budget limit (${:.2}) would be exceeded",
                 self.config.budget_limit_cents / 100.0
@@ -531,7 +557,11 @@ impl Guardrails {
     /// Check decomposition depth.
     pub fn check_decomposition_depth(&self, current_depth: usize) -> GuardrailResult {
         if current_depth >= self.config.max_decomposition_depth {
-            tracing::warn!(current_depth, max_depth = self.config.max_decomposition_depth, "decomposition blocked: max depth reached");
+            tracing::warn!(
+                current_depth,
+                max_depth = self.config.max_decomposition_depth,
+                "decomposition blocked: max depth reached"
+            );
             return GuardrailResult::Blocked(format!(
                 "Maximum decomposition depth ({}) reached",
                 self.config.max_decomposition_depth
@@ -567,12 +597,9 @@ impl Guardrails {
     /// The task runs until the provided `cancel` token is cancelled, enabling
     /// graceful shutdown.  Returns a `JoinHandle` so the caller can await
     /// completion if desired.
-    pub fn spawn_hourly_reset(
-        &self,
-        cancel: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_hourly_reset(&self, cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
         let metrics = Arc::clone(&self.metrics);
-        tokio::spawn(async move {
+        supervise_with_handle("guardrails_hourly_reset", async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3600));
             // The first tick completes immediately — consume it so we don't
             // reset at startup.
@@ -742,7 +769,11 @@ mod tests {
 
         assert!(guardrails.check_file_path("src/main.rs").is_allowed());
         assert!(guardrails.check_file_path(".env").is_blocked());
-        assert!(guardrails.check_file_path("config/secrets/api.key").is_blocked());
+        assert!(
+            guardrails
+                .check_file_path("config/secrets/api.key")
+                .is_blocked()
+        );
     }
 
     #[test]
@@ -755,13 +786,33 @@ mod tests {
         let guardrails = Guardrails::new(config);
 
         // Should block
-        assert!(guardrails.check_file_path("config/secrets/api.key").is_blocked());
-        assert!(guardrails.check_file_path("secrets/password.txt").is_blocked());
-        assert!(guardrails.check_file_path("a/b/secrets/c/d.txt").is_blocked());
+        assert!(
+            guardrails
+                .check_file_path("config/secrets/api.key")
+                .is_blocked()
+        );
+        assert!(
+            guardrails
+                .check_file_path("secrets/password.txt")
+                .is_blocked()
+        );
+        assert!(
+            guardrails
+                .check_file_path("a/b/secrets/c/d.txt")
+                .is_blocked()
+        );
 
         // Should allow — "secrets" is not a standalone segment
-        assert!(guardrails.check_file_path("my-secrets-file.txt").is_allowed());
-        assert!(guardrails.check_file_path("nosecrets/file.txt").is_allowed());
+        assert!(
+            guardrails
+                .check_file_path("my-secrets-file.txt")
+                .is_allowed()
+        );
+        assert!(
+            guardrails
+                .check_file_path("nosecrets/file.txt")
+                .is_allowed()
+        );
     }
 
     #[test]
@@ -806,7 +857,11 @@ mod tests {
         let guardrails = Guardrails::new(config);
 
         assert!(guardrails.check_file_path(".gitignore").is_blocked());
-        assert!(guardrails.check_file_path("sub/dir/.gitignore").is_blocked());
+        assert!(
+            guardrails
+                .check_file_path("sub/dir/.gitignore")
+                .is_blocked()
+        );
         assert!(guardrails.check_file_path("not-gitignore").is_allowed());
     }
 
@@ -823,7 +878,7 @@ mod tests {
 
         // Should warn at 80%+
         match guardrails.check_tokens(50) {
-            GuardrailResult::Warning(_) => {},
+            GuardrailResult::Warning(_) => {}
             other => panic!("Expected Warning, got {:?}", other),
         }
 
@@ -908,7 +963,11 @@ mod tests {
         assert!(result.is_blocked());
         match result {
             GuardrailResult::Blocked(msg) => {
-                assert!(msg.contains("already running"), "Expected 'already running' message, got: {}", msg);
+                assert!(
+                    msg.contains("already running"),
+                    "Expected 'already running' message, got: {}",
+                    msg
+                );
             }
             _ => panic!("Expected Blocked result"),
         }
@@ -940,7 +999,11 @@ mod tests {
         assert!(result.is_blocked());
         match result {
             GuardrailResult::Blocked(msg) => {
-                assert!(msg.contains("Maximum concurrent tasks"), "Unexpected message: {}", msg);
+                assert!(
+                    msg.contains("Maximum concurrent tasks"),
+                    "Unexpected message: {}",
+                    msg
+                );
             }
             _ => panic!("Expected Blocked result"),
         }
@@ -1162,10 +1225,18 @@ mod tests {
     fn test_atomic_metrics_check_and_record_cost_hundredths() {
         let metrics = RuntimeMetrics::default();
 
-        assert!(metrics.check_and_record_cost_hundredths(5000, 10000).is_ok());
+        assert!(
+            metrics
+                .check_and_record_cost_hundredths(5000, 10000)
+                .is_ok()
+        );
         assert_eq!(metrics.cost_hundredths.load(Ordering::Relaxed), 5000);
 
-        assert!(metrics.check_and_record_cost_hundredths(5000, 10000).is_ok());
+        assert!(
+            metrics
+                .check_and_record_cost_hundredths(5000, 10000)
+                .is_ok()
+        );
         assert_eq!(metrics.cost_hundredths.load(Ordering::Relaxed), 10000);
 
         // Over limit

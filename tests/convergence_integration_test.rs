@@ -10,27 +10,30 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use abathur::adapters::sqlite::{create_migrated_test_pool, SqliteTaskRepository};
+use abathur::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
 use abathur::domain::errors::DomainResult;
 use abathur::domain::models::convergence::{
-    ArtifactReference, AttractorType, ConvergenceBudget, ConvergenceEngineConfig,
-    ConvergenceOutcome, ConvergencePolicy, ConvergenceTendency, OverseerSignals,
-    BuildResult, TestResults, Observation, PriorityHint, SpecificationEvolution,
-    SpecificationSnapshot, StrategyBandit, StrategyEntry, StrategyKind, Trajectory,
+    ArtifactReference, AttractorType, BuildResult, ConvergenceBudget, ConvergenceEngineConfig,
+    ConvergenceOutcome, ConvergencePolicy, ConvergenceTendency, Observation, OverseerSignals,
+    PriorityHint, SpecificationEvolution, SpecificationSnapshot, StrategyBandit, StrategyEntry,
+    StrategyKind, TestResults, Trajectory,
 };
 use abathur::domain::models::task::{Complexity, ExecutionMode, Task, TaskPriority};
-use abathur::domain::ports::{NullMemoryRepository, StrategyStats, TaskRepository, TrajectoryRepository};
+use abathur::domain::ports::{
+    NullMemoryRepository, StrategyStats, TaskRepository, TrajectoryRepository,
+};
+use abathur::services::TaskService;
 use abathur::services::convergence_bridge::{
-    build_convergent_prompt, build_engine_config, collect_artifact, task_to_submission,
-    DynTrajectoryRepository,
+    DynTrajectoryRepository, build_convergent_prompt, build_engine_config, collect_artifact,
+    task_to_submission,
 };
 use abathur::services::convergence_engine::{ConvergenceEngine, OverseerMeasurer};
 use abathur::services::event_bus::{
-    EventBus, EventBusConfig, EventCategory, EventPayload, EventSeverity,
+    ConvergenceIterationPayload, ConvergenceTerminatedPayload, EventBus, EventBusConfig,
+    EventCategory, EventPayload, EventSeverity,
 };
 use abathur::services::event_factory;
 use abathur::services::swarm_orchestrator::types::SwarmConfig;
-use abathur::services::TaskService;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -109,10 +112,7 @@ impl TrajectoryRepository for InMemoryTrajectoryRepo {
         Ok(0.0)
     }
 
-    async fn strategy_effectiveness(
-        &self,
-        _strategy: StrategyKind,
-    ) -> DomainResult<StrategyStats> {
+    async fn strategy_effectiveness(&self, _strategy: StrategyKind) -> DomainResult<StrategyStats> {
         Ok(StrategyStats {
             strategy: String::new(),
             total_uses: 0,
@@ -236,12 +236,8 @@ async fn test_classify_execution_mode_complex_gets_convergent() {
 
     // Submit a task whose description and complexity strongly signal convergent
     let mut context = abathur::domain::models::task::TaskContext::default();
-    context
-        .hints
-        .push("constraint: must use async".to_string());
-    context
-        .hints
-        .push("anti-pattern: no unwrap()".to_string());
+    context.hints.push("constraint: must use async".to_string());
+    context.hints.push("anti-pattern: no unwrap()".to_string());
 
     let (task, _events) = task_service
         .submit_task(
@@ -327,9 +323,8 @@ async fn test_build_convergent_prompt_includes_strategy_context() {
     // Build a trajectory whose specification matches the task description.
     // build_convergent_prompt uses trajectory.specification.effective.content,
     // not the task description directly.
-    let spec = SpecificationEvolution::new(SpecificationSnapshot::new(
-        "Implement frobnicator".into(),
-    ));
+    let spec =
+        SpecificationEvolution::new(SpecificationSnapshot::new("Implement frobnicator".into()));
     let mut trajectory = Trajectory::new(
         task_id,
         None,
@@ -372,7 +367,8 @@ async fn test_build_convergent_prompt_includes_strategy_context() {
     trajectory.observations.push(obs);
 
     // Test RetryWithFeedback -- should include previous attempt feedback
-    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::RetryWithFeedback, None);
+    let prompt =
+        build_convergent_prompt(&task, &trajectory, &StrategyKind::RetryWithFeedback, None);
     assert!(
         prompt.contains("Implement frobnicator"),
         "Prompt should include the specification content"
@@ -403,8 +399,12 @@ async fn test_build_convergent_prompt_includes_strategy_context() {
     );
 
     // Test IncrementalRefinement -- should include refinement instructions
-    let prompt =
-        build_convergent_prompt(&task, &trajectory, &StrategyKind::IncrementalRefinement, None);
+    let prompt = build_convergent_prompt(
+        &task,
+        &trajectory,
+        &StrategyKind::IncrementalRefinement,
+        None,
+    );
     assert!(
         prompt.contains("partially correct"),
         "IncrementalRefinement should include refinement guidance"
@@ -501,7 +501,10 @@ async fn test_convergent_outcome_mapping() {
     task_mut.execution_mode = ExecutionMode::Convergent {
         parallel_samples: None,
     };
-    task_repo.update(&task_mut).await.expect("Failed to update task");
+    task_repo
+        .update(&task_mut)
+        .await
+        .expect("Failed to update task");
 
     // Claim the task (Ready -> Running)
     let (_, _events) = task_service
@@ -560,7 +563,10 @@ async fn test_convergent_outcome_mapping() {
     task2_mut.execution_mode = ExecutionMode::Convergent {
         parallel_samples: None,
     };
-    task_repo.update(&task2_mut).await.expect("Failed to update task");
+    task_repo
+        .update(&task2_mut)
+        .await
+        .expect("Failed to update task");
 
     let _ = task_service
         .claim_task(task2.id, "test-agent")
@@ -700,7 +706,7 @@ async fn test_convergence_events_emitted() {
         EventCategory::Convergence,
         None,
         Some(task_id),
-        EventPayload::ConvergenceIteration {
+        EventPayload::ConvergenceIteration(ConvergenceIterationPayload {
             task_id,
             trajectory_id,
             iteration: 1,
@@ -709,7 +715,7 @@ async fn test_convergence_events_emitted() {
             convergence_level: 0.45,
             attractor_type: "indeterminate".to_string(),
             budget_remaining_fraction: 0.8,
-        },
+        }),
     );
     event_bus.publish(iter_event).await;
 
@@ -719,14 +725,14 @@ async fn test_convergence_events_emitted() {
         EventCategory::Convergence,
         None,
         Some(task_id),
-        EventPayload::ConvergenceTerminated {
+        EventPayload::ConvergenceTerminated(ConvergenceTerminatedPayload {
             task_id,
             trajectory_id,
             outcome: "converged".to_string(),
             total_iterations: 3,
             total_tokens: 45000,
             final_convergence_level: 0.97,
-        },
+        }),
     );
     event_bus.publish(term_event).await;
 
@@ -758,18 +764,12 @@ async fn test_convergence_events_emitted() {
         .expect("Should receive ConvergenceIteration event");
     assert!(matches!(
         received_iter.payload,
-        EventPayload::ConvergenceIteration { .. }
+        EventPayload::ConvergenceIteration(_)
     ));
-    if let EventPayload::ConvergenceIteration {
-        iteration,
-        strategy,
-        convergence_delta,
-        ..
-    } = received_iter.payload
-    {
-        assert_eq!(iteration, 1);
-        assert_eq!(strategy, "retry_with_feedback");
-        assert!((convergence_delta - 0.15).abs() < f64::EPSILON);
+    if let EventPayload::ConvergenceIteration(p) = received_iter.payload {
+        assert_eq!(p.iteration, 1);
+        assert_eq!(p.strategy, "retry_with_feedback");
+        assert!((p.convergence_delta - 0.15).abs() < f64::EPSILON);
     }
 
     let received_term = receiver
@@ -778,18 +778,12 @@ async fn test_convergence_events_emitted() {
         .expect("Should receive ConvergenceTerminated event");
     assert!(matches!(
         received_term.payload,
-        EventPayload::ConvergenceTerminated { .. }
+        EventPayload::ConvergenceTerminated(_)
     ));
-    if let EventPayload::ConvergenceTerminated {
-        outcome,
-        total_iterations,
-        final_convergence_level,
-        ..
-    } = received_term.payload
-    {
-        assert_eq!(outcome, "converged");
-        assert_eq!(total_iterations, 3);
-        assert!((final_convergence_level - 0.97).abs() < f64::EPSILON);
+    if let EventPayload::ConvergenceTerminated(p) = received_term.payload {
+        assert_eq!(p.outcome, "converged");
+        assert_eq!(p.total_iterations, 3);
+        assert!((p.final_convergence_level - 0.97).abs() < f64::EPSILON);
     }
 }
 
@@ -847,7 +841,12 @@ async fn test_dyn_trajectory_repository_delegation() {
 
     // Verify get_successful_strategies delegates
     let strategies = dyn_repo
-        .get_successful_strategies(&AttractorType::Indeterminate { tendency: ConvergenceTendency::Flat }, 10)
+        .get_successful_strategies(
+            &AttractorType::Indeterminate {
+                tendency: ConvergenceTendency::Flat,
+            },
+            10,
+        )
         .await
         .expect("get_successful_strategies should delegate successfully");
     assert!(strategies.is_empty());
@@ -1096,7 +1095,9 @@ async fn test_build_convergent_prompt_fresh_start() {
         hints: vec![],
     };
 
-    let strategy = StrategyKind::FreshStart { carry_forward: Box::new(carry_forward) };
+    let strategy = StrategyKind::FreshStart {
+        carry_forward: Box::new(carry_forward),
+    };
 
     let prompt = build_convergent_prompt(&task, &trajectory, &strategy, None);
 
@@ -1177,7 +1178,8 @@ async fn test_build_convergent_prompt_alternative_approach() {
         false,
     ));
 
-    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::AlternativeApproach, None);
+    let prompt =
+        build_convergent_prompt(&task, &trajectory, &StrategyKind::AlternativeApproach, None);
 
     // Should include the "Previous approaches" header
     assert!(
@@ -1626,12 +1628,7 @@ async fn test_finalize_records_calibration_and_alerts_overshoot() {
         event_emission_enabled: false,
     };
 
-    let engine = ConvergenceEngine::new(
-        trajectory_store,
-        memory_repo,
-        overseer,
-        config,
-    );
+    let engine = ConvergenceEngine::new(trajectory_store, memory_repo, overseer, config);
 
     let bandit = StrategyBandit::default();
 
@@ -1640,9 +1637,8 @@ async fn test_finalize_records_calibration_and_alerts_overshoot() {
     // We set tokens_used far above that to trigger an overshoot alert.
     let high_token_usage: u64 = 500_000;
     for _ in 0..30 {
-        let spec = SpecificationEvolution::new(SpecificationSnapshot::new(
-            "test calibration task".into(),
-        ));
+        let spec =
+            SpecificationEvolution::new(SpecificationSnapshot::new("test calibration task".into()));
         let mut trajectory = Trajectory::new(
             Uuid::new_v4(),
             None,
@@ -1706,19 +1702,13 @@ async fn test_finalize_with_no_complexity_skips_calibration() {
         event_emission_enabled: false,
     };
 
-    let engine = ConvergenceEngine::new(
-        trajectory_store.clone(),
-        memory_repo,
-        overseer,
-        config,
-    );
+    let engine = ConvergenceEngine::new(trajectory_store.clone(), memory_repo, overseer, config);
 
     let bandit = StrategyBandit::default();
 
     // Create a trajectory WITHOUT setting complexity (defaults to None).
-    let spec = SpecificationEvolution::new(SpecificationSnapshot::new(
-        "task without complexity".into(),
-    ));
+    let spec =
+        SpecificationEvolution::new(SpecificationSnapshot::new("task without complexity".into()));
     let mut trajectory = Trajectory::new(
         Uuid::new_v4(),
         None,

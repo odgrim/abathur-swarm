@@ -9,11 +9,11 @@ use async_trait::async_trait;
 
 use crate::adapters::a2a::client::A2AClient;
 use crate::domain::models::a2a_protocol::A2APart;
+use crate::domain::models::convergence::Overseer;
 use crate::domain::models::convergence::{
     ArtifactReference, BuildResult, CustomCheckResult, OverseerCost, OverseerResult,
     OverseerSignalUpdate, TestResults,
 };
-use crate::domain::models::convergence::Overseer;
 
 // ---------------------------------------------------------------------------
 // SwarmOverseer
@@ -227,7 +227,9 @@ mod tests {
     #[async_trait]
     impl A2AClient for MockA2AClient {
         async fn discover(&self, _url: &str) -> Result<A2AStandardAgentCard, A2AWireError> {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::discover called — tests in overseers/swarm.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
 
         async fn send_message(
@@ -235,7 +237,9 @@ mod tests {
             _url: &str,
             _params: TaskSendParams,
         ) -> Result<A2ATask, A2AWireError> {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::send_message called — tests in overseers/swarm.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
 
         async fn send_streaming(
@@ -246,7 +250,9 @@ mod tests {
             Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
             A2AWireError,
         > {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::send_streaming called — tests in overseers/swarm.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
 
         async fn get_task(
@@ -262,7 +268,9 @@ mod tests {
         }
 
         async fn cancel_task(&self, _url: &str, _task_id: &str) -> Result<A2ATask, A2AWireError> {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::cancel_task called — tests in overseers/swarm.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
 
         async fn subscribe_to_task(
@@ -273,7 +281,9 @@ mod tests {
             Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
             A2AWireError,
         > {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::subscribe_to_task called — tests in overseers/swarm.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
     }
 

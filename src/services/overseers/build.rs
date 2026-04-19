@@ -73,10 +73,11 @@ impl BuildOverseer {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("error: aborting due to ")
                 && let Some(count_str) = rest.split_whitespace().next()
-                    && let Ok(count) = count_str.parse::<u32>() {
-                        error_count = count;
-                        break;
-                    }
+                && let Ok(count) = count_str.parse::<u32>()
+            {
+                error_count = count;
+                break;
+            }
         }
 
         (error_count, errors)

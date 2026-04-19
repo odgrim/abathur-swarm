@@ -4,10 +4,12 @@ use async_trait::async_trait;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::adapters::sqlite::{parse_datetime, parse_optional_datetime, parse_optional_uuid, parse_uuid};
+use crate::adapters::sqlite::{
+    parse_datetime, parse_optional_datetime, parse_optional_uuid, parse_uuid,
+};
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::task_schedule::*;
 use crate::domain::models::TaskPriority;
+use crate::domain::models::task_schedule::*;
 use crate::domain::ports::task_schedule_repository::{TaskScheduleFilter, TaskScheduleRepository};
 
 #[derive(Clone)]
@@ -87,7 +89,7 @@ impl TaskScheduleRepository for SqliteTaskScheduleRepository {
               task_title, task_description, task_priority, task_agent_type,
               overlap_policy, status, scheduled_event_id,
               fire_count, last_fired_at, last_task_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         )
         .bind(&id)
         .bind(&schedule.name)
@@ -149,7 +151,7 @@ impl TaskScheduleRepository for SqliteTaskScheduleRepository {
              task_title = ?6, task_description = ?7, task_priority = ?8, task_agent_type = ?9,
              overlap_policy = ?10, status = ?11, scheduled_event_id = ?12,
              fire_count = ?13, last_fired_at = ?14, last_task_id = ?15, updated_at = ?16
-             WHERE id = ?1"
+             WHERE id = ?1",
         )
         .bind(&id)
         .bind(&schedule.name)
@@ -184,14 +186,14 @@ impl TaskScheduleRepository for SqliteTaskScheduleRepository {
     async fn list(&self, filter: TaskScheduleFilter) -> DomainResult<Vec<TaskSchedule>> {
         let rows = if let Some(status) = filter.status {
             sqlx::query_as::<_, TaskScheduleRow>(
-                "SELECT * FROM task_schedules WHERE status = ? ORDER BY created_at DESC"
+                "SELECT * FROM task_schedules WHERE status = ? ORDER BY created_at DESC",
             )
             .bind(status.as_str())
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query_as::<_, TaskScheduleRow>(
-                "SELECT * FROM task_schedules ORDER BY created_at DESC"
+                "SELECT * FROM task_schedules ORDER BY created_at DESC",
             )
             .fetch_all(&self.pool)
             .await?
@@ -203,6 +205,7 @@ impl TaskScheduleRepository for SqliteTaskScheduleRepository {
     async fn list_active(&self) -> DomainResult<Vec<TaskSchedule>> {
         self.list(TaskScheduleFilter {
             status: Some(TaskScheduleStatus::Active),
-        }).await
+        })
+        .await
     }
 }

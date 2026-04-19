@@ -9,7 +9,10 @@ use crate::services::crypto::SecretEncryptor;
 use crate::services::event_bus::{
     EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
 };
-use crate::services::event_store::{CircuitBreakerRecord, DeadLetterEntry, EventQuery, EventStore, EventStoreError, EventStoreStats, WebhookSubscription};
+use crate::services::event_store::{
+    CircuitBreakerRecord, DeadLetterEntry, EventQuery, EventStore, EventStoreError,
+    EventStoreStats, WebhookSubscription,
+};
 
 /// SQLite-backed event repository.
 #[derive(Clone)]
@@ -125,7 +128,9 @@ impl EventStore for SqliteEventRepository {
     }
 
     async fn query(&self, query: EventQuery) -> Result<Vec<UnifiedEvent>, EventStoreError> {
-        let mut sql = String::from("SELECT id, sequence, timestamp, severity, category, goal_id, task_id, correlation_id, source_process_id, payload FROM events WHERE 1=1");
+        let mut sql = String::from(
+            "SELECT id, sequence, timestamp, severity, category, goal_id, task_id, correlation_id, source_process_id, payload FROM events WHERE 1=1",
+        );
         let mut params: Vec<String> = Vec::new();
 
         if let Some(since) = query.since_sequence {
@@ -203,11 +208,10 @@ impl EventStore for SqliteEventRepository {
     }
 
     async fn latest_sequence(&self) -> Result<Option<SequenceNumber>, EventStoreError> {
-        let result: Option<(i64,)> =
-            sqlx::query_as("SELECT MAX(sequence) FROM events")
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| EventStoreError::SequenceError(e.to_string()))?;
+        let result: Option<(i64,)> = sqlx::query_as("SELECT MAX(sequence) FROM events")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| EventStoreError::SequenceError(e.to_string()))?;
 
         Ok(result.and_then(|(seq,)| {
             if seq >= 0 {
@@ -243,29 +247,34 @@ impl EventStore for SqliteEventRepository {
     }
 
     async fn minimum_handler_watermark(&self) -> Result<Option<SequenceNumber>, EventStoreError> {
-        let result: Option<(Option<i64>,)> = sqlx::query_as(
-            "SELECT MIN(last_sequence) FROM handler_watermarks"
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+        let result: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT MIN(last_sequence) FROM handler_watermarks")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
         Ok(result.and_then(|(maybe_seq,)| maybe_seq.map(|seq| SequenceNumber(seq as u64))))
     }
 
-    async fn get_watermark(&self, handler_name: &str) -> Result<Option<SequenceNumber>, EventStoreError> {
-        let result: Option<(i64,)> = sqlx::query_as(
-            "SELECT last_sequence FROM handler_watermarks WHERE handler_name = ?"
-        )
-        .bind(handler_name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+    async fn get_watermark(
+        &self,
+        handler_name: &str,
+    ) -> Result<Option<SequenceNumber>, EventStoreError> {
+        let result: Option<(i64,)> =
+            sqlx::query_as("SELECT last_sequence FROM handler_watermarks WHERE handler_name = ?")
+                .bind(handler_name)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
         Ok(result.map(|(seq,)| SequenceNumber(seq as u64)))
     }
 
-    async fn set_watermark(&self, handler_name: &str, seq: SequenceNumber) -> Result<(), EventStoreError> {
+    async fn set_watermark(
+        &self,
+        handler_name: &str,
+        seq: SequenceNumber,
+    ) -> Result<(), EventStoreError> {
         sqlx::query(
             r#"
             INSERT INTO handler_watermarks (handler_name, last_sequence, updated_at)
@@ -284,7 +293,11 @@ impl EventStore for SqliteEventRepository {
         Ok(())
     }
 
-    async fn detect_sequence_gaps(&self, from: u64, to: u64) -> Result<Vec<(u64, u64)>, EventStoreError> {
+    async fn detect_sequence_gaps(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<(u64, u64)>, EventStoreError> {
         // Query all sequence numbers in the range
         let rows: Vec<(i64,)> = sqlx::query_as(
             "SELECT sequence FROM events WHERE sequence >= ? AND sequence <= ? ORDER BY sequence ASC"
@@ -320,29 +333,31 @@ impl EventStore for SqliteEventRepository {
         let latest = self.latest_sequence().await?;
 
         // Get oldest and newest timestamps
-        let time_bounds: Option<(String, String)> = sqlx::query_as(
-            "SELECT MIN(timestamp), MAX(timestamp) FROM events"
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+        let time_bounds: Option<(String, String)> =
+            sqlx::query_as("SELECT MIN(timestamp), MAX(timestamp) FROM events")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
         let (oldest, newest) = if let Some((min_ts, max_ts)) = time_bounds {
             (
-                DateTime::parse_from_rfc3339(&min_ts).ok().map(|dt| dt.with_timezone(&Utc)),
-                DateTime::parse_from_rfc3339(&max_ts).ok().map(|dt| dt.with_timezone(&Utc)),
+                DateTime::parse_from_rfc3339(&min_ts)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc)),
+                DateTime::parse_from_rfc3339(&max_ts)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc)),
             )
         } else {
             (None, None)
         };
 
         // Get counts by category
-        let category_counts: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT category, COUNT(*) FROM events GROUP BY category"
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+        let category_counts: Vec<(String, i64)> =
+            sqlx::query_as("SELECT category, COUNT(*) FROM events GROUP BY category")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
         let events_by_category: Vec<(EventCategory, u64)> = category_counts
             .into_iter()
@@ -358,7 +373,9 @@ impl EventStore for SqliteEventRepository {
         })
     }
 
-    async fn load_circuit_breaker_states(&self) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
+    async fn load_circuit_breaker_states(
+        &self,
+    ) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
         #[derive(sqlx::FromRow)]
         struct CbRow {
             handler_name: String,
@@ -381,11 +398,13 @@ impl EventStore for SqliteEventRepository {
                 handler_name: r.handler_name,
                 failure_count: r.failure_count as u32,
                 tripped: r.tripped != 0,
-                tripped_at: r.tripped_at
+                tripped_at: r
+                    .tripped_at
                     .as_ref()
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc)),
-                last_failure: r.last_failure
+                last_failure: r
+                    .last_failure
                     .as_ref()
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc)),
@@ -458,7 +477,10 @@ impl EventStore for SqliteEventRepository {
         Ok(())
     }
 
-    async fn get_retryable_dead_letters(&self, limit: u32) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+    async fn get_retryable_dead_letters(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
         let now = Utc::now().to_rfc3339();
 
         let rows: Vec<DeadLetterRow> = sqlx::query_as(
@@ -489,7 +511,8 @@ impl EventStore for SqliteEventRepository {
                 error_message: row.error_message,
                 retry_count: row.retry_count as u32,
                 max_retries: row.max_retries as u32,
-                next_retry_at: row.next_retry_at
+                next_retry_at: row
+                    .next_retry_at
                     .as_ref()
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc)),
@@ -516,7 +539,11 @@ impl EventStore for SqliteEventRepository {
         Ok(())
     }
 
-    async fn increment_dead_letter_retry(&self, id: &str, next_retry_at: DateTime<Utc>) -> Result<(), EventStoreError> {
+    async fn increment_dead_letter_retry(
+        &self,
+        id: &str,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<(), EventStoreError> {
         sqlx::query(
             "UPDATE dead_letter_events SET retry_count = retry_count + 1, next_retry_at = ? WHERE id = ?",
         )
@@ -576,7 +603,8 @@ impl EventStore for SqliteEventRepository {
                 error_message: row.error_message,
                 retry_count: row.retry_count as u32,
                 max_retries: row.max_retries as u32,
-                next_retry_at: row.next_retry_at
+                next_retry_at: row
+                    .next_retry_at
                     .as_ref()
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc)),
@@ -590,8 +618,12 @@ impl EventStore for SqliteEventRepository {
         Ok(entries)
     }
 
-    async fn purge_dead_letters(&self, older_than: std::time::Duration) -> Result<u64, EventStoreError> {
-        let cutoff = (Utc::now() - chrono::Duration::from_std(older_than).unwrap_or_default()).to_rfc3339();
+    async fn purge_dead_letters(
+        &self,
+        older_than: std::time::Duration,
+    ) -> Result<u64, EventStoreError> {
+        let cutoff =
+            (Utc::now() - chrono::Duration::from_std(older_than).unwrap_or_default()).to_rfc3339();
 
         let result = sqlx::query(
             "DELETE FROM dead_letter_events WHERE resolved_at IS NOT NULL AND created_at < ?",
@@ -652,7 +684,9 @@ impl EventStore for SqliteEventRepository {
         .await
         .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
-        rows.into_iter().map(|r| self.convert_webhook_row(r)).collect()
+        rows.into_iter()
+            .map(|r| self.convert_webhook_row(r))
+            .collect()
     }
 
     async fn get_webhook(&self, id: &str) -> Result<Option<WebhookSubscription>, EventStoreError> {
@@ -677,7 +711,10 @@ impl EventStore for SqliteEventRepository {
         Ok(())
     }
 
-    async fn list_active_webhooks_for_category(&self, category: &str) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+    async fn list_active_webhooks_for_category(
+        &self,
+        category: &str,
+    ) -> Result<Vec<WebhookSubscription>, EventStoreError> {
         let rows: Vec<WebhookRow> = sqlx::query_as(
             r#"
             SELECT id, url, secret, filter_json, active, max_failures, failure_count, last_delivered_sequence, created_at
@@ -691,7 +728,9 @@ impl EventStore for SqliteEventRepository {
         .await
         .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
-        rows.into_iter().map(|r| self.convert_webhook_row(r)).collect()
+        rows.into_iter()
+            .map(|r| self.convert_webhook_row(r))
+            .collect()
     }
 
     async fn record_webhook_failure(&self, id: &str) -> Result<(), EventStoreError> {
@@ -712,7 +751,11 @@ impl EventStore for SqliteEventRepository {
         Ok(())
     }
 
-    async fn update_webhook_sequence(&self, id: &str, sequence: u64) -> Result<(), EventStoreError> {
+    async fn update_webhook_sequence(
+        &self,
+        id: &str,
+        sequence: u64,
+    ) -> Result<(), EventStoreError> {
         sqlx::query(
             "UPDATE webhook_subscriptions SET last_delivered_sequence = ?, failure_count = 0, updated_at = datetime('now') WHERE id = ?"
         )
@@ -768,11 +811,14 @@ impl SqliteEventRepository {
             goal_id,
             task_id,
             correlation_id,
-            source_process_id: row.source_process_id
+            source_process_id: row
+                .source_process_id
                 .as_ref()
                 .map(|s| uuid::Uuid::parse_str(s))
                 .transpose()
-                .map_err(|e| EventStoreError::QueryError(format!("Invalid source_process_id: {}", e)))?,
+                .map_err(|e| {
+                    EventStoreError::QueryError(format!("Invalid source_process_id: {}", e))
+                })?,
             payload,
         })
     }

@@ -7,14 +7,14 @@ use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    AccessorId, Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType,
-    RelevanceWeights, ScoredMemory,
+    AccessorId, Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType, RelevanceWeights,
+    ScoredMemory,
 };
 use crate::domain::ports::MemoryRepository;
-use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, MemoryCommand, MemoryCommandHandler};
-use crate::services::event_bus::{
-    EventCategory, EventPayload, EventSeverity, UnifiedEvent,
+use crate::services::command_bus::{
+    CommandError, CommandOutcome, CommandResult, MemoryCommand, MemoryCommandHandler,
 };
+use crate::services::event_bus::{EventCategory, EventPayload, EventSeverity, UnifiedEvent};
 use crate::services::event_factory;
 
 /// Configuration for memory decay thresholds.
@@ -106,7 +106,11 @@ impl<R: MemoryRepository> MemoryService<R> {
 
         // Auto-increment version when a memory with the same (namespace, key) already exists
         // to avoid UNIQUE constraint violations and support conflict detection.
-        if let Ok(Some(existing)) = self.repository.get_by_key(&memory.key, &memory.namespace).await {
+        if let Ok(Some(existing)) = self
+            .repository
+            .get_by_key(&memory.key, &memory.namespace)
+            .await
+        {
             memory.version = existing.version + 1;
         }
 
@@ -142,7 +146,8 @@ impl<R: MemoryRepository> MemoryService<R> {
             MemoryTier::Working,
             MemoryType::Fact,
             None,
-        ).await
+        )
+        .await
     }
 
     /// Store a semantic memory (long-term). Returns the memory and events.
@@ -159,7 +164,8 @@ impl<R: MemoryRepository> MemoryService<R> {
             MemoryTier::Semantic,
             MemoryType::Pattern,
             None,
-        ).await
+        )
+        .await
     }
 
     /// Get a memory by ID and record the access. Returns the memory and events.
@@ -167,7 +173,11 @@ impl<R: MemoryRepository> MemoryService<R> {
     /// The `accessor` identifies who is accessing this memory. Distinct accessor
     /// tracking prevents a single runaway loop from inflating access counts to
     /// force unwarranted promotion (promotion-integrity constraint).
-    pub async fn recall(&self, id: Uuid, accessor: AccessorId) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
+    pub async fn recall(
+        &self,
+        id: Uuid,
+        accessor: AccessorId,
+    ) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
         let memory = self.repository.get(id).await?;
 
         if let Some(mut mem) = memory {
@@ -201,7 +211,12 @@ impl<R: MemoryRepository> MemoryService<R> {
     /// The `accessor` identifies who is accessing this memory. Distinct accessor
     /// tracking prevents a single runaway loop from inflating access counts to
     /// force unwarranted promotion (promotion-integrity constraint).
-    pub async fn recall_by_key(&self, key: &str, namespace: &str, accessor: AccessorId) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
+    pub async fn recall_by_key(
+        &self,
+        key: &str,
+        namespace: &str,
+        accessor: AccessorId,
+    ) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
         let memory = self.repository.get_by_key(key, namespace).await?;
 
         if let Some(mut mem) = memory {
@@ -260,7 +275,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         // First, get candidate memories via full-text search
         // We fetch more than needed since scoring will re-rank them
         let fetch_limit = (limit * 3).max(50);
-        let candidates = self.repository.search(query, namespace, fetch_limit).await?;
+        let candidates = self
+            .repository
+            .search(query, namespace, fetch_limit)
+            .await?;
 
         // Score each candidate using multi-factor relevance
         let mut scored: Vec<ScoredMemory> = candidates
@@ -270,7 +288,11 @@ impl<R: MemoryRepository> MemoryService<R> {
             .collect();
 
         // Sort by composite score (highest first)
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Truncate to requested limit
         scored.truncate(limit);
@@ -294,7 +316,9 @@ impl<R: MemoryRepository> MemoryService<R> {
         weights: RelevanceWeights,
     ) -> DomainResult<Vec<ScoredMemory>> {
         // Get scored candidates
-        let scored = self.ranked_search(query, namespace, weights, 100, 0.1).await?;
+        let scored = self
+            .ranked_search(query, namespace, weights, 100, 0.1)
+            .await?;
 
         // Greedily fill the token budget with highest-scored memories
         let mut selected = Vec::new();
@@ -331,7 +355,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         namespace: Option<String>,
         tier: Option<MemoryTier>,
     ) -> DomainResult<(Memory, Vec<UnifiedEvent>)> {
-        let mut memory = self.repository.get(id).await?
+        let mut memory = self
+            .repository
+            .get(id)
+            .await?
             .ok_or(DomainError::MemoryNotFound(id))?;
 
         if let Some(c) = content {
@@ -407,7 +434,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         let mut events = Vec::new();
 
         // Prune working memories
-        let decayed = self.repository.get_decayed(self.decay_config.working_prune_threshold).await?;
+        let decayed = self
+            .repository
+            .get_decayed(self.decay_config.working_prune_threshold)
+            .await?;
         for mem in decayed {
             if mem.tier == MemoryTier::Working {
                 self.repository.delete(mem.id).await?;
@@ -416,7 +446,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         }
 
         // Prune episodic memories
-        let decayed = self.repository.get_decayed(self.decay_config.episodic_prune_threshold).await?;
+        let decayed = self
+            .repository
+            .get_decayed(self.decay_config.episodic_prune_threshold)
+            .await?;
         for mem in decayed {
             if mem.tier == MemoryTier::Episodic {
                 self.repository.delete(mem.id).await?;
@@ -457,12 +490,15 @@ impl<R: MemoryRepository> MemoryService<R> {
         let (conflicts_resolved, events) = self.auto_resolve_conflicts().await?;
         all_events.extend(events);
 
-        Ok((MaintenanceReport {
-            expired_pruned: expired,
-            decayed_pruned: decayed,
-            promoted,
-            conflicts_resolved,
-        }, all_events))
+        Ok((
+            MaintenanceReport {
+                expired_pruned: expired,
+                decayed_pruned: decayed,
+                promoted,
+                conflicts_resolved,
+            },
+            all_events,
+        ))
     }
 
     /// Automatically detect and resolve memory conflicts.
@@ -512,7 +548,10 @@ impl<R: MemoryRepository> MemoryService<R> {
                     all_events.extend(events);
                     resolved_count += 1;
                 }
-            } else if matches!(&conflict.resolution, Some(ConflictResolution::FlaggedForReview)) {
+            } else if matches!(
+                &conflict.resolution,
+                Some(ConflictResolution::FlaggedForReview)
+            ) {
                 // Just flag these for review, count as "processed"
                 if let Ok(events) = self.resolve_conflict(&conflict).await {
                     all_events.extend(events);
@@ -542,7 +581,10 @@ impl<R: MemoryRepository> MemoryService<R> {
     /// This enforces the promotion-integrity constraint: memories promoted to higher tiers
     /// must have demonstrated repeated utility from multiple distinct sources, not just
     /// high access count from a single runaway loop.
-    async fn check_promotion(&self, memory: &mut Memory) -> DomainResult<(bool, Vec<UnifiedEvent>)> {
+    async fn check_promotion(
+        &self,
+        memory: &mut Memory,
+    ) -> DomainResult<(bool, Vec<UnifiedEvent>)> {
         let should_promote = match memory.tier {
             MemoryTier::Working => {
                 memory.access_count >= self.decay_config.promote_to_episodic_threshold
@@ -680,7 +722,10 @@ pub enum ConflictResolution {
     /// Kept the memory with higher confidence.
     PreferHigherConfidence { kept_id: Uuid, deprecated_id: Uuid },
     /// Merged content from both memories.
-    SoftMerge { merged_id: Uuid, merged_content: String },
+    SoftMerge {
+        merged_id: Uuid,
+        merged_content: String,
+    },
     /// Flagged for human review (no automatic resolution).
     FlaggedForReview,
 }
@@ -706,7 +751,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         let memories = self.repository.query(query).await?;
         let conflicts = self.detect_conflicts(&memories);
 
-        Ok(QueryResultWithConflicts { memories, conflicts })
+        Ok(QueryResultWithConflicts {
+            memories,
+            conflicts,
+        })
     }
 
     /// Search with conflict detection.
@@ -719,7 +767,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         let memories = self.repository.search(query, namespace, limit).await?;
         let conflicts = self.detect_conflicts(&memories);
 
-        Ok(QueryResultWithConflicts { memories, conflicts })
+        Ok(QueryResultWithConflicts {
+            memories,
+            conflicts,
+        })
     }
 
     /// Detect conflicts among a set of memories.
@@ -753,7 +804,8 @@ impl<R: MemoryRepository> MemoryService<R> {
                     let mem_b = group[j];
 
                     // Check if content differs significantly
-                    let similarity = self.compute_content_similarity(&mem_a.content, &mem_b.content);
+                    let similarity =
+                        self.compute_content_similarity(&mem_a.content, &mem_b.content);
 
                     // If content is different (low similarity), it's a potential conflict
                     // High similarity (>0.9) means they're essentially the same
@@ -785,10 +837,8 @@ impl<R: MemoryRepository> MemoryService<R> {
         // Simple word-overlap based similarity (Jaccard coefficient)
         let lowercase_a = content_a.to_lowercase();
         let lowercase_b = content_b.to_lowercase();
-        let words_a: std::collections::HashSet<&str> =
-            lowercase_a.split_whitespace().collect();
-        let words_b: std::collections::HashSet<&str> =
-            lowercase_b.split_whitespace().collect();
+        let words_a: std::collections::HashSet<&str> = lowercase_a.split_whitespace().collect();
+        let words_b: std::collections::HashSet<&str> = lowercase_b.split_whitespace().collect();
 
         if words_a.is_empty() && words_b.is_empty() {
             return 1.0;
@@ -878,13 +928,15 @@ impl<R: MemoryRepository> MemoryService<R> {
         };
 
         // Extract sentences/paragraphs from each
-        let newer_parts: Vec<&str> = newer.content
+        let newer_parts: Vec<&str> = newer
+            .content
             .split(['.', '\n'])
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
 
-        let older_parts: Vec<&str> = older.content
+        let older_parts: Vec<&str> = older
+            .content
             .split(['.', '\n'])
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -893,9 +945,9 @@ impl<R: MemoryRepository> MemoryService<R> {
         // Find unique content from older memory not substantially covered in newer
         let mut unique_from_older: Vec<&str> = Vec::new();
         for old_part in &older_parts {
-            let is_covered = newer_parts.iter().any(|new_part| {
-                self.compute_content_similarity(old_part, new_part) > 0.6
-            });
+            let is_covered = newer_parts
+                .iter()
+                .any(|new_part| self.compute_content_similarity(old_part, new_part) > 0.6);
             if !is_covered && !old_part.is_empty() {
                 unique_from_older.push(old_part);
             }
@@ -941,7 +993,10 @@ impl<R: MemoryRepository> MemoryService<R> {
                     self.repository.update(&deprecated).await?;
                 }
             }
-            Some(ConflictResolution::SoftMerge { merged_id, merged_content }) => {
+            Some(ConflictResolution::SoftMerge {
+                merged_id,
+                merged_content,
+            }) => {
                 // Update the merged memory with combined content
                 if let Some(mut merged) = self.repository.get(*merged_id).await? {
                     merged.content = merged_content.clone();
@@ -957,7 +1012,10 @@ impl<R: MemoryRepository> MemoryService<R> {
                 };
                 if let Some(mut other) = self.repository.get(other_id).await? {
                     other.metadata.tags.push("merged-into".to_string());
-                    other.metadata.tags.push(format!("merged-into:{}", merged_id));
+                    other
+                        .metadata
+                        .tags
+                        .push(format!("merged-into:{}", merged_id));
                     self.repository.update(&other).await?;
                 }
             }
@@ -965,10 +1023,11 @@ impl<R: MemoryRepository> MemoryService<R> {
                 // Just mark both memories as needing review
                 for id in [conflict.memory_a, conflict.memory_b] {
                     if let Some(mut mem) = self.repository.get(id).await?
-                        && !mem.metadata.tags.contains(&"needs-review".to_string()) {
-                            mem.metadata.tags.push("needs-review".to_string());
-                            self.repository.update(&mem).await?;
-                        }
+                        && !mem.metadata.tags.contains(&"needs-review".to_string())
+                    {
+                        mem.metadata.tags.push("needs-review".to_string());
+                        self.repository.update(&mem).await?;
+                    }
                 }
             }
         }
@@ -1002,31 +1061,61 @@ impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
                 let (memory, events) = self
                     .store(key, content, namespace, tier, memory_type, metadata)
                     .await?;
-                Ok(CommandOutcome { result: CommandResult::Memory(memory), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Memory(memory),
+                    events,
+                })
             }
             MemoryCommand::Recall { id, accessor } => {
                 let (memory, events) = self.recall(id, accessor).await?;
-                Ok(CommandOutcome { result: CommandResult::MemoryOpt(memory), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::MemoryOpt(memory),
+                    events,
+                })
             }
-            MemoryCommand::RecallByKey { key, namespace, accessor } => {
+            MemoryCommand::RecallByKey {
+                key,
+                namespace,
+                accessor,
+            } => {
                 let (memory, events) = self.recall_by_key(&key, &namespace, accessor).await?;
-                Ok(CommandOutcome { result: CommandResult::MemoryOpt(memory), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::MemoryOpt(memory),
+                    events,
+                })
             }
-            MemoryCommand::Update { id, content, namespace, tier } => {
+            MemoryCommand::Update {
+                id,
+                content,
+                namespace,
+                tier,
+            } => {
                 let (memory, events) = self.update_memory(id, content, namespace, tier).await?;
-                Ok(CommandOutcome { result: CommandResult::Memory(memory), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Memory(memory),
+                    events,
+                })
             }
             MemoryCommand::Forget { id } => {
                 let events = self.forget(id).await?;
-                Ok(CommandOutcome { result: CommandResult::Unit, events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Unit,
+                    events,
+                })
             }
             MemoryCommand::PruneExpired => {
                 let (count, events) = self.prune_expired().await?;
-                Ok(CommandOutcome { result: CommandResult::PruneCount(count), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::PruneCount(count),
+                    events,
+                })
             }
             MemoryCommand::RunMaintenance => {
                 let (report, events) = self.run_maintenance().await?;
-                Ok(CommandOutcome { result: CommandResult::MaintenanceReport(report), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::MaintenanceReport(report),
+                    events,
+                })
             }
         }
     }
@@ -1035,7 +1124,7 @@ impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_migrated_test_pool, SqliteMemoryRepository};
+    use crate::adapters::sqlite::{SqliteMemoryRepository, create_migrated_test_pool};
 
     async fn setup_service() -> MemoryService<SqliteMemoryRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
@@ -1047,15 +1136,17 @@ mod tests {
     async fn test_remember_and_recall() {
         let service = setup_service().await;
 
-        let (memory, _) = service.remember(
-            "test_key".to_string(),
-            "test content".to_string(),
-            "test",
-        ).await.unwrap();
+        let (memory, _) = service
+            .remember("test_key".to_string(), "test content".to_string(), "test")
+            .await
+            .unwrap();
 
         assert_eq!(memory.tier, MemoryTier::Working);
 
-        let (recalled, _) = service.recall(memory.id, AccessorId::system("test")).await.unwrap();
+        let (recalled, _) = service
+            .recall(memory.id, AccessorId::system("test"))
+            .await
+            .unwrap();
         let recalled = recalled.unwrap();
         assert_eq!(recalled.access_count, 1);
     }
@@ -1064,11 +1155,14 @@ mod tests {
     async fn test_learn_semantic() {
         let service = setup_service().await;
 
-        let (memory, _) = service.learn(
-            "pattern_key".to_string(),
-            "learned pattern".to_string(),
-            "patterns",
-        ).await.unwrap();
+        let (memory, _) = service
+            .learn(
+                "pattern_key".to_string(),
+                "learned pattern".to_string(),
+                "patterns",
+            )
+            .await
+            .unwrap();
 
         assert_eq!(memory.tier, MemoryTier::Semantic);
         assert!(memory.expires_at.is_none());
@@ -1078,13 +1172,15 @@ mod tests {
     async fn test_recall_by_key() {
         let service = setup_service().await;
 
-        service.remember(
-            "lookup".to_string(),
-            "value to find".to_string(),
-            "test",
-        ).await.unwrap();
+        service
+            .remember("lookup".to_string(), "value to find".to_string(), "test")
+            .await
+            .unwrap();
 
-        let (found, _) = service.recall_by_key("lookup", "test", AccessorId::system("test")).await.unwrap();
+        let (found, _) = service
+            .recall_by_key("lookup", "test", AccessorId::system("test"))
+            .await
+            .unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().content, "value to find");
     }
@@ -1093,9 +1189,18 @@ mod tests {
     async fn test_stats() {
         let service = setup_service().await;
 
-        service.remember("w1".to_string(), "content".to_string(), "test").await.unwrap();
-        service.remember("w2".to_string(), "content".to_string(), "test").await.unwrap();
-        service.learn("s1".to_string(), "content".to_string(), "test").await.unwrap();
+        service
+            .remember("w1".to_string(), "content".to_string(), "test")
+            .await
+            .unwrap();
+        service
+            .remember("w2".to_string(), "content".to_string(), "test")
+            .await
+            .unwrap();
+        service
+            .learn("s1".to_string(), "content".to_string(), "test")
+            .await
+            .unwrap();
 
         let stats = service.get_stats().await.unwrap();
         assert_eq!(stats.working_count, 2);
@@ -1105,23 +1210,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_promotion_on_access() {
-        let service = setup_service().await
-            .with_decay_config(DecayConfig {
-                promote_to_episodic_threshold: 3,
-                ..Default::default()
-            });
+        let service = setup_service().await.with_decay_config(DecayConfig {
+            promote_to_episodic_threshold: 3,
+            ..Default::default()
+        });
 
-        let (memory, _) = service.remember(
-            "promote_me".to_string(),
-            "content".to_string(),
-            "test",
-        ).await.unwrap();
+        let (memory, _) = service
+            .remember("promote_me".to_string(), "content".to_string(), "test")
+            .await
+            .unwrap();
 
         // Access multiple times with distinct accessors to trigger promotion.
         // Promotion requires BOTH access_count >= 3 AND distinct_accessor_count >= 2.
-        service.recall(memory.id, AccessorId::agent("agent-a")).await.unwrap();
-        service.recall(memory.id, AccessorId::agent("agent-b")).await.unwrap();
-        let (promoted, _) = service.recall(memory.id, AccessorId::agent("agent-a")).await.unwrap();
+        service
+            .recall(memory.id, AccessorId::agent("agent-a"))
+            .await
+            .unwrap();
+        service
+            .recall(memory.id, AccessorId::agent("agent-b"))
+            .await
+            .unwrap();
+        let (promoted, _) = service
+            .recall(memory.id, AccessorId::agent("agent-a"))
+            .await
+            .unwrap();
         let promoted = promoted.unwrap();
 
         assert_eq!(promoted.tier, MemoryTier::Episodic);
@@ -1132,49 +1244,64 @@ mod tests {
         let service = setup_service().await;
 
         // Store some memories with different content
-        service.store(
-            "rust_patterns".to_string(),
-            "Rust programming patterns include iterators closures and traits".to_string(),
-            "code".to_string(),
-            MemoryTier::Semantic,
-            MemoryType::Pattern,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "rust_patterns".to_string(),
+                "Rust programming patterns include iterators closures and traits".to_string(),
+                "code".to_string(),
+                MemoryTier::Semantic,
+                MemoryType::Pattern,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "python_basics".to_string(),
-            "Python is a dynamic language with list comprehensions".to_string(),
-            "code".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "python_basics".to_string(),
+                "Python is a dynamic language with list comprehensions".to_string(),
+                "code".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "rust_errors".to_string(),
-            "Error handling in Rust uses Result and Option types for safety".to_string(),
-            "code".to_string(),
-            MemoryTier::Episodic,
-            MemoryType::Pattern,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "rust_errors".to_string(),
+                "Error handling in Rust uses Result and Option types for safety".to_string(),
+                "code".to_string(),
+                MemoryTier::Episodic,
+                MemoryType::Pattern,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Search for "Rust" - should rank Rust-related memories higher
-        let results = service.ranked_search(
-            "Rust patterns",
-            Some("code"),
-            RelevanceWeights::semantic_biased(),
-            10,
-            0.0,
-        ).await.unwrap();
+        let results = service
+            .ranked_search(
+                "Rust patterns",
+                Some("code"),
+                RelevanceWeights::semantic_biased(),
+                10,
+                0.0,
+            )
+            .await
+            .unwrap();
 
         assert!(!results.is_empty(), "Should find some results");
 
         // Verify results are sorted by score (descending)
         for i in 1..results.len() {
-            assert!(results[i - 1].score >= results[i].score,
+            assert!(
+                results[i - 1].score >= results[i].score,
                 "Results should be sorted by score: {} >= {}",
-                results[i - 1].score, results[i].score);
+                results[i - 1].score,
+                results[i].score
+            );
         }
     }
 
@@ -1183,14 +1310,17 @@ mod tests {
         let service = setup_service().await;
 
         // Store memories with varying sizes
-        service.store(
-            "short".to_string(),
-            "Short memory.".to_string(),
-            "test".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "short".to_string(),
+                "Short memory.".to_string(),
+                "test".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
         service.store(
             "medium".to_string(),
@@ -1202,18 +1332,23 @@ mod tests {
         ).await.unwrap();
 
         // Load with a tight budget - should only include what fits
-        let results = service.load_context_with_budget(
-            "memory project",
-            Some("test"),
-            50, // ~50 tokens budget
-            RelevanceWeights::default(),
-        ).await.unwrap();
+        let results = service
+            .load_context_with_budget(
+                "memory project",
+                Some("test"),
+                50, // ~50 tokens budget
+                RelevanceWeights::default(),
+            )
+            .await
+            .unwrap();
 
         // Should have results but limited by budget
-        let total_tokens: usize = results.iter()
-            .map(|r| r.memory.estimated_tokens())
-            .sum();
-        assert!(total_tokens <= 50, "Total tokens {} should be within budget of 50", total_tokens);
+        let total_tokens: usize = results.iter().map(|r| r.memory.estimated_tokens()).sum();
+        assert!(
+            total_tokens <= 50,
+            "Total tokens {} should be within budget of 50",
+            total_tokens
+        );
     }
 
     #[tokio::test]
@@ -1250,17 +1385,18 @@ mod tests {
 
         // Set budget that fits 2 memories but not all 3
         // Each memory is roughly 20-30 tokens, so ~55 tokens should fit 2
-        let results = service.load_context_with_budget(
-            "architecture patterns",
-            Some("test"),
-            55,
-            RelevanceWeights::default(),
-        ).await.unwrap();
+        let results = service
+            .load_context_with_budget(
+                "architecture patterns",
+                Some("test"),
+                55,
+                RelevanceWeights::default(),
+            )
+            .await
+            .unwrap();
 
         // Collect keys of returned memories
-        let returned_keys: Vec<&str> = results.iter()
-            .map(|r| r.memory.key.as_str())
-            .collect();
+        let returned_keys: Vec<&str> = results.iter().map(|r| r.memory.key.as_str()).collect();
 
         // High-relevance memory about architecture patterns must be present
         assert!(
@@ -1281,64 +1417,86 @@ mod tests {
     async fn test_load_context_with_budget_zero_returns_empty() {
         let service = setup_service().await;
 
-        service.store(
-            "some_memory".to_string(),
-            "This memory has content that takes tokens.".to_string(),
-            "test".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "some_memory".to_string(),
+                "This memory has content that takes tokens.".to_string(),
+                "test".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let results = service.load_context_with_budget(
-            "memory",
-            Some("test"),
-            0,
-            RelevanceWeights::default(),
-        ).await.unwrap();
+        let results = service
+            .load_context_with_budget("memory", Some("test"), 0, RelevanceWeights::default())
+            .await
+            .unwrap();
 
-        assert!(results.is_empty(), "Zero budget should return no memories, got {}", results.len());
+        assert!(
+            results.is_empty(),
+            "Zero budget should return no memories, got {}",
+            results.len()
+        );
     }
 
     #[tokio::test]
     async fn test_load_context_with_budget_large_returns_all() {
         let service = setup_service().await;
 
-        service.store(
-            "mem_a".to_string(),
-            "First memory entry.".to_string(),
-            "test".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "mem_a".to_string(),
+                "First memory entry.".to_string(),
+                "test".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "mem_b".to_string(),
-            "Second memory entry.".to_string(),
-            "test".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "mem_b".to_string(),
+                "Second memory entry.".to_string(),
+                "test".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "mem_c".to_string(),
-            "Third memory entry.".to_string(),
-            "test".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "mem_c".to_string(),
+                "Third memory entry.".to_string(),
+                "test".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let results = service.load_context_with_budget(
-            "memory entry",
-            Some("test"),
-            100_000, // very large budget
-            RelevanceWeights::default(),
-        ).await.unwrap();
+        let results = service
+            .load_context_with_budget(
+                "memory entry",
+                Some("test"),
+                100_000, // very large budget
+                RelevanceWeights::default(),
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(results.len(), 3, "Large budget should return all 3 memories, got {}", results.len());
+        assert_eq!(
+            results.len(),
+            3,
+            "Large budget should return all 3 memories, got {}",
+            results.len()
+        );
     }
 
     #[tokio::test]
@@ -1346,36 +1504,43 @@ mod tests {
         let service = setup_service().await;
 
         // Store a large memory that will be highest relevance but too big
-        service.store(
-            "big_architecture".to_string(),
-            "Architecture ".repeat(50).to_string(), // ~50+ tokens
-            "test".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "big_architecture".to_string(),
+                "Architecture ".repeat(50).to_string(), // ~50+ tokens
+                "test".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Store a small memory that is lower relevance but fits
-        service.store(
-            "small_architecture".to_string(),
-            "Architecture notes.".to_string(), // ~4 tokens
-            "test".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "small_architecture".to_string(),
+                "Architecture notes.".to_string(), // ~4 tokens
+                "test".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Budget large enough for the small memory but not the big one
-        let results = service.load_context_with_budget(
-            "architecture",
-            Some("test"),
-            15,
-            RelevanceWeights::default(),
-        ).await.unwrap();
+        let results = service
+            .load_context_with_budget(
+                "architecture",
+                Some("test"),
+                15,
+                RelevanceWeights::default(),
+            )
+            .await
+            .unwrap();
 
-        let returned_keys: Vec<&str> = results.iter()
-            .map(|r| r.memory.key.as_str())
-            .collect();
+        let returned_keys: Vec<&str> = results.iter().map(|r| r.memory.key.as_str()).collect();
 
         // The small memory should fit within budget
         assert!(
@@ -1385,80 +1550,107 @@ mod tests {
         );
 
         // Total tokens must be within budget
-        let total_tokens: usize = results.iter()
-            .map(|r| r.memory.estimated_tokens())
-            .sum();
-        assert!(total_tokens <= 15, "Total tokens {} should be within budget of 15", total_tokens);
+        let total_tokens: usize = results.iter().map(|r| r.memory.estimated_tokens()).sum();
+        assert!(
+            total_tokens <= 15,
+            "Total tokens {} should be within budget of 15",
+            total_tokens
+        );
     }
 
     #[tokio::test]
     async fn test_forget() {
         let service = setup_service().await;
 
-        let (memory, _) = service.remember(
-            "forget_me".to_string(),
-            "content".to_string(),
-            "test",
-        ).await.unwrap();
+        let (memory, _) = service
+            .remember("forget_me".to_string(), "content".to_string(), "test")
+            .await
+            .unwrap();
 
         service.forget(memory.id).await.unwrap();
 
-        let (recalled, _) = service.recall(memory.id, AccessorId::system("test")).await.unwrap();
+        let (recalled, _) = service
+            .recall(memory.id, AccessorId::system("test"))
+            .await
+            .unwrap();
         assert!(recalled.is_none());
     }
 
     #[tokio::test]
     async fn test_single_accessor_does_not_promote() {
-        let service = setup_service().await
-            .with_decay_config(DecayConfig {
-                promote_to_episodic_threshold: 3,
-                promote_to_episodic_distinct_accessors: 2,
-                ..Default::default()
-            });
+        let service = setup_service().await.with_decay_config(DecayConfig {
+            promote_to_episodic_threshold: 3,
+            promote_to_episodic_distinct_accessors: 2,
+            ..Default::default()
+        });
 
-        let (memory, _) = service.remember(
-            "single_accessor".to_string(),
-            "content".to_string(),
-            "test",
-        ).await.unwrap();
+        let (memory, _) = service
+            .remember("single_accessor".to_string(), "content".to_string(), "test")
+            .await
+            .unwrap();
 
         // Access many times from the SAME accessor — should NOT promote
         // because distinct_accessor_count stays at 1, below the threshold of 2.
         let same_accessor = AccessorId::agent("lone-agent");
         for _ in 0..10 {
-            service.recall(memory.id, same_accessor.clone()).await.unwrap();
+            service
+                .recall(memory.id, same_accessor.clone())
+                .await
+                .unwrap();
         }
 
         let (mem, _) = service.recall(memory.id, same_accessor).await.unwrap();
         let mem = mem.unwrap();
-        assert_eq!(mem.tier, MemoryTier::Working, "Single accessor must not trigger promotion regardless of access count");
+        assert_eq!(
+            mem.tier,
+            MemoryTier::Working,
+            "Single accessor must not trigger promotion regardless of access count"
+        );
         assert!(mem.access_count >= 10, "Access count should be high");
-        assert_eq!(mem.distinct_accessor_count(), 1, "Only one distinct accessor");
+        assert_eq!(
+            mem.distinct_accessor_count(),
+            1,
+            "Only one distinct accessor"
+        );
     }
 
     #[tokio::test]
     async fn test_distinct_accessors_enable_promotion() {
-        let service = setup_service().await
-            .with_decay_config(DecayConfig {
-                promote_to_episodic_threshold: 3,
-                promote_to_episodic_distinct_accessors: 2,
-                ..Default::default()
-            });
+        let service = setup_service().await.with_decay_config(DecayConfig {
+            promote_to_episodic_threshold: 3,
+            promote_to_episodic_distinct_accessors: 2,
+            ..Default::default()
+        });
 
-        let (memory, _) = service.remember(
-            "multi_accessor".to_string(),
-            "content".to_string(),
-            "test",
-        ).await.unwrap();
+        let (memory, _) = service
+            .remember("multi_accessor".to_string(), "content".to_string(), "test")
+            .await
+            .unwrap();
 
         // Access from two distinct accessors to meet both thresholds
-        service.recall(memory.id, AccessorId::task(Uuid::new_v4())).await.unwrap();
-        service.recall(memory.id, AccessorId::agent("helper-agent")).await.unwrap();
-        let (promoted, _) = service.recall(memory.id, AccessorId::system("checker")).await.unwrap();
+        service
+            .recall(memory.id, AccessorId::task(Uuid::new_v4()))
+            .await
+            .unwrap();
+        service
+            .recall(memory.id, AccessorId::agent("helper-agent"))
+            .await
+            .unwrap();
+        let (promoted, _) = service
+            .recall(memory.id, AccessorId::system("checker"))
+            .await
+            .unwrap();
         let promoted = promoted.unwrap();
 
-        assert_eq!(promoted.tier, MemoryTier::Episodic, "Multiple distinct accessors should enable promotion");
-        assert!(promoted.distinct_accessor_count() >= 2, "Should have at least 2 distinct accessors");
+        assert_eq!(
+            promoted.tier,
+            MemoryTier::Episodic,
+            "Multiple distinct accessors should enable promotion"
+        );
+        assert!(
+            promoted.distinct_accessor_count() >= 2,
+            "Should have at least 2 distinct accessors"
+        );
     }
 
     #[tokio::test]
@@ -1466,39 +1658,57 @@ mod tests {
         let service = setup_service().await;
 
         // Store 2 memories with the same namespace+key but different content
-        service.store(
-            "shared_key".to_string(),
-            "alpha bravo charlie delta echo foxtrot".to_string(),
-            "ns1".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "shared_key".to_string(),
+                "alpha bravo charlie delta echo foxtrot".to_string(),
+                "ns1".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "shared_key".to_string(),
-            "golf hotel india juliet kilo lima".to_string(),
-            "ns1".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "shared_key".to_string(),
+                "golf hotel india juliet kilo lima".to_string(),
+                "ns1".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Store 1 memory with a different key in the same namespace
-        service.store(
-            "other_key".to_string(),
-            "mike november oscar papa quebec romeo".to_string(),
-            "ns1".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "other_key".to_string(),
+                "mike november oscar papa quebec romeo".to_string(),
+                "ns1".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let all = service
+            .repository
+            .list_by_tier(MemoryTier::Working)
+            .await
+            .unwrap();
         let conflicts = service.detect_conflicts(&all);
 
         // Only the 2 memories sharing (ns1, shared_key) should conflict
-        assert_eq!(conflicts.len(), 1, "Expected exactly 1 conflict, got {}", conflicts.len());
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "Expected exactly 1 conflict, got {}",
+            conflicts.len()
+        );
         assert!(conflicts[0].key.contains("shared_key"));
     }
 
@@ -1508,28 +1718,42 @@ mod tests {
 
         // Nearly identical content — Jaccard > 0.9
         // 10 unique words shared, 1 extra → Jaccard = 10/11 ≈ 0.91
-        service.store(
-            "same_key".to_string(),
-            "alpha bravo charlie delta echo foxtrot golf hotel india juliet".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "same_key".to_string(),
+                "alpha bravo charlie delta echo foxtrot golf hotel india juliet".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "same_key".to_string(),
-            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "same_key".to_string(),
+                "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let all = service
+            .repository
+            .list_by_tier(MemoryTier::Working)
+            .await
+            .unwrap();
         let conflicts = service.detect_conflicts(&all);
 
-        assert_eq!(conflicts.len(), 0, "Nearly identical content (>0.9 Jaccard) should not be flagged");
+        assert_eq!(
+            conflicts.len(),
+            0,
+            "Nearly identical content (>0.9 Jaccard) should not be flagged"
+        );
     }
 
     #[tokio::test]
@@ -1537,30 +1761,43 @@ mod tests {
         let service = setup_service().await;
 
         // Completely different content — Jaccard < 0.3
-        service.store(
-            "conflict_key".to_string(),
-            "alpha bravo charlie delta echo foxtrot golf".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "conflict_key".to_string(),
+                "alpha bravo charlie delta echo foxtrot golf".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "conflict_key".to_string(),
-            "one two three four five six seven eight nine ten".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "conflict_key".to_string(),
+                "one two three four five six seven eight nine ten".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let all = service
+            .repository
+            .list_by_tier(MemoryTier::Working)
+            .await
+            .unwrap();
         let conflicts = service.detect_conflicts(&all);
 
         assert_eq!(conflicts.len(), 1);
         assert!(
-            matches!(conflicts[0].resolution, Some(ConflictResolution::FlaggedForReview)),
+            matches!(
+                conflicts[0].resolution,
+                Some(ConflictResolution::FlaggedForReview)
+            ),
             "Completely different content should be FlaggedForReview, got {:?}",
             conflicts[0].resolution
         );
@@ -1575,25 +1812,35 @@ mod tests {
         // A unique: "types for safety and correctness" (5 words)
         // B unique: "option enum provides null safety" (5 words)
         // Union = 15, Intersection = 5, Jaccard = 5/15 ≈ 0.33
-        service.store(
-            "merge_key".to_string(),
-            "rust error handling uses result types for safety and correctness".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "merge_key".to_string(),
+                "rust error handling uses result types for safety and correctness".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "merge_key".to_string(),
-            "rust error handling uses result option enum provides null safety".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "merge_key".to_string(),
+                "rust error handling uses result option enum provides null safety".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let all = service
+            .repository
+            .list_by_tier(MemoryTier::Working)
+            .await
+            .unwrap();
         let conflicts = service.detect_conflicts(&all);
 
         assert_eq!(conflicts.len(), 1);
@@ -1604,7 +1851,10 @@ mod tests {
             sim
         );
         assert!(
-            matches!(conflicts[0].resolution, Some(ConflictResolution::SoftMerge { .. })),
+            matches!(
+                conflicts[0].resolution,
+                Some(ConflictResolution::SoftMerge { .. })
+            ),
             "Same-tier memories with 0.3-0.7 similarity should SoftMerge, got {:?}",
             conflicts[0].resolution
         );
@@ -1619,25 +1869,35 @@ mod tests {
         // A unique: "dog" (1 word) → 9 unique in A
         // B unique: "cat today" (2 words) → 10 unique in B
         // Union = 11, Intersection = 8, Jaccard = 8/11 ≈ 0.727
-        service.store(
-            "newer_key".to_string(),
-            "the quick brown fox jumps over the lazy dog".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "newer_key".to_string(),
+                "the quick brown fox jumps over the lazy dog".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        service.store(
-            "newer_key".to_string(),
-            "the quick brown fox jumps over the lazy cat today".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "newer_key".to_string(),
+                "the quick brown fox jumps over the lazy cat today".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let all = service
+            .repository
+            .list_by_tier(MemoryTier::Working)
+            .await
+            .unwrap();
         let conflicts = service.detect_conflicts(&all);
 
         assert_eq!(conflicts.len(), 1);
@@ -1648,7 +1908,10 @@ mod tests {
             sim
         );
         assert!(
-            matches!(conflicts[0].resolution, Some(ConflictResolution::PreferNewer { .. })),
+            matches!(
+                conflicts[0].resolution,
+                Some(ConflictResolution::PreferNewer { .. })
+            ),
             "Same-tier memories with 0.7-0.9 similarity should PreferNewer, got {:?}",
             conflicts[0].resolution
         );
@@ -1659,32 +1922,46 @@ mod tests {
         let service = setup_service().await;
 
         // Working tier memory
-        service.store(
-            "tier_key".to_string(),
-            "alpha bravo charlie delta echo foxtrot golf hotel".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "tier_key".to_string(),
+                "alpha bravo charlie delta echo foxtrot golf hotel".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Episodic tier memory (higher confidence) with moderate overlap
         // Shared: "alpha bravo charlie delta" (4 words)
         // Working unique: "echo foxtrot golf hotel" (4 words)
         // Episodic unique: "india juliet kilo lima" (4 words)
         // Union = 12, Intersection = 4, Jaccard = 4/12 ≈ 0.33
-        service.store(
-            "tier_key".to_string(),
-            "alpha bravo charlie delta india juliet kilo lima".to_string(),
-            "ns".to_string(),
-            MemoryTier::Episodic,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        service
+            .store(
+                "tier_key".to_string(),
+                "alpha bravo charlie delta india juliet kilo lima".to_string(),
+                "ns".to_string(),
+                MemoryTier::Episodic,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Gather both tiers like auto_resolve_conflicts does
-        let working = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
-        let episodic = service.repository.list_by_tier(MemoryTier::Episodic).await.unwrap();
+        let working = service
+            .repository
+            .list_by_tier(MemoryTier::Working)
+            .await
+            .unwrap();
+        let episodic = service
+            .repository
+            .list_by_tier(MemoryTier::Episodic)
+            .await
+            .unwrap();
         let all: Vec<Memory> = working.into_iter().chain(episodic.into_iter()).collect();
 
         let conflicts = service.detect_conflicts(&all);
@@ -1693,10 +1970,20 @@ mod tests {
         match &conflicts[0].resolution {
             Some(ConflictResolution::PreferHigherConfidence { kept_id, .. }) => {
                 // The episodic memory should be kept
-                let episodic_mems = service.repository.list_by_tier(MemoryTier::Episodic).await.unwrap();
-                assert_eq!(*kept_id, episodic_mems[0].id, "Should keep the higher-tier (Episodic) memory");
+                let episodic_mems = service
+                    .repository
+                    .list_by_tier(MemoryTier::Episodic)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    *kept_id, episodic_mems[0].id,
+                    "Should keep the higher-tier (Episodic) memory"
+                );
             }
-            other => panic!("Different tiers should resolve to PreferHigherConfidence, got {:?}", other),
+            other => panic!(
+                "Different tiers should resolve to PreferHigherConfidence, got {:?}",
+                other
+            ),
         }
     }
 
@@ -1705,29 +1992,38 @@ mod tests {
         let service = setup_service().await;
 
         // Create two Working-tier memories with same key and ~80% overlap (PreferNewer)
-        let (older, _) = service.store(
-            "e2e_key".to_string(),
-            "the quick brown fox jumps over the lazy dog".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        let (older, _) = service
+            .store(
+                "e2e_key".to_string(),
+                "the quick brown fox jumps over the lazy dog".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let (_newer, _) = service.store(
-            "e2e_key".to_string(),
-            "the quick brown fox jumps over the lazy cat today".to_string(),
-            "ns".to_string(),
-            MemoryTier::Working,
-            MemoryType::Fact,
-            None,
-        ).await.unwrap();
+        let (_newer, _) = service
+            .store(
+                "e2e_key".to_string(),
+                "the quick brown fox jumps over the lazy cat today".to_string(),
+                "ns".to_string(),
+                MemoryTier::Working,
+                MemoryType::Fact,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Run auto-resolve
         let (resolved_count, events) = service.auto_resolve_conflicts().await.unwrap();
 
         assert!(resolved_count >= 1, "Should resolve at least 1 conflict");
-        assert!(!events.is_empty(), "Should emit events for conflict detection and resolution");
+        assert!(
+            !events.is_empty(),
+            "Should emit events for conflict detection and resolution"
+        );
 
         // The older memory should now be tagged as "superseded"
         let deprecated = service.repository.get(older.id).await.unwrap().unwrap();
@@ -1740,14 +2036,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_episodic_to_semantic_promotion_blocked_by_insufficient_accessors() {
-        let service = setup_service().await
-            .with_decay_config(DecayConfig {
-                promote_to_episodic_threshold: 3,
-                promote_to_episodic_distinct_accessors: 2,
-                promote_to_semantic_threshold: 10,
-                promote_to_semantic_distinct_accessors: 3,
-                ..Default::default()
-            });
+        let service = setup_service().await.with_decay_config(DecayConfig {
+            promote_to_episodic_threshold: 3,
+            promote_to_episodic_distinct_accessors: 2,
+            promote_to_semantic_threshold: 10,
+            promote_to_semantic_distinct_accessors: 3,
+            ..Default::default()
+        });
 
         // Create an Episodic-tier memory directly
         let (mem, _) = service.store(
@@ -1777,8 +2072,16 @@ mod tests {
             "Memory should stay Episodic when distinct accessors ({}) < semantic threshold (3)",
             result.distinct_accessor_count()
         );
-        assert!(result.access_count >= 12, "Access count should be high: {}", result.access_count);
-        assert_eq!(result.distinct_accessor_count(), 2, "Only 2 distinct accessors");
+        assert!(
+            result.access_count >= 12,
+            "Access count should be high: {}",
+            result.access_count
+        );
+        assert_eq!(
+            result.distinct_accessor_count(),
+            2,
+            "Only 2 distinct accessors"
+        );
     }
 
     #[tokio::test]
@@ -1805,12 +2108,15 @@ mod tests {
         ).await.unwrap();
 
         // Query for a completely unrelated topic with generous budget
-        let results = service.load_context_with_budget(
-            "underwater basket weaving techniques for beginners",
-            Some("test"),
-            10000, // Very generous budget
-            RelevanceWeights::default(),
-        ).await.unwrap();
+        let results = service
+            .load_context_with_budget(
+                "underwater basket weaving techniques for beginners",
+                Some("test"),
+                10000, // Very generous budget
+                RelevanceWeights::default(),
+            )
+            .await
+            .unwrap();
 
         assert!(
             results.is_empty(),

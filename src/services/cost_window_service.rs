@@ -45,7 +45,10 @@ impl CostWindowService {
 
     /// Reload enabled windows from the database into the cache.
     pub async fn reload_windows(&self) -> Result<usize, String> {
-        let windows = self.repo.list_enabled().await
+        let windows = self
+            .repo
+            .list_enabled()
+            .await
             .map_err(|e| format!("failed to load quiet windows: {}", e))?;
         let count = windows.len();
         *self.windows.write().await = windows;
@@ -88,17 +91,18 @@ impl CostWindowService {
     /// Determine whether `now` falls inside the given window.
     fn is_inside_window(&self, window: &QuietWindow, now: DateTime<Utc>) -> bool {
         // Parse the cron schedules using the `cron` crate.
-        let start_schedule = match cron::Schedule::from_str(&normalize_cron_5to7(&window.start_cron)) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    window_name = %window.name,
-                    error = %e,
-                    "invalid start_cron expression, skipping window"
-                );
-                return false;
-            }
-        };
+        let start_schedule =
+            match cron::Schedule::from_str(&normalize_cron_5to7(&window.start_cron)) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        window_name = %window.name,
+                        error = %e,
+                        "invalid start_cron expression, skipping window"
+                    );
+                    return false;
+                }
+            };
         let end_schedule = match cron::Schedule::from_str(&normalize_cron_5to7(&window.end_cron)) {
             Ok(s) => s,
             Err(e) => {
@@ -142,7 +146,9 @@ impl CostWindowService {
     /// List all windows (from DB, not cache).
     pub async fn list_windows(&self) -> Result<Vec<QuietWindow>, String> {
         use crate::domain::ports::quiet_window_repository::QuietWindowFilter;
-        self.repo.list(QuietWindowFilter::default()).await
+        self.repo
+            .list(QuietWindowFilter::default())
+            .await
             .map_err(|e| format!("failed to list quiet windows: {}", e))
     }
 }
@@ -184,7 +190,6 @@ fn last_fire_before_tz<T: chrono::TimeZone>(
     }
     last
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -287,12 +292,35 @@ mod tests {
 
     #[async_trait::async_trait]
     impl QuietWindowRepository for NullQuietWindowRepo {
-        async fn create(&self, _: &QuietWindow) -> crate::domain::errors::DomainResult<()> { Ok(()) }
-        async fn get(&self, _: uuid::Uuid) -> crate::domain::errors::DomainResult<Option<QuietWindow>> { Ok(None) }
-        async fn get_by_name(&self, _: &str) -> crate::domain::errors::DomainResult<Option<QuietWindow>> { Ok(None) }
-        async fn update(&self, _: &QuietWindow) -> crate::domain::errors::DomainResult<()> { Ok(()) }
-        async fn delete(&self, _: uuid::Uuid) -> crate::domain::errors::DomainResult<()> { Ok(()) }
-        async fn list(&self, _: crate::domain::ports::quiet_window_repository::QuietWindowFilter) -> crate::domain::errors::DomainResult<Vec<QuietWindow>> { Ok(vec![]) }
-        async fn list_enabled(&self) -> crate::domain::errors::DomainResult<Vec<QuietWindow>> { Ok(vec![]) }
+        async fn create(&self, _: &QuietWindow) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+        async fn get(
+            &self,
+            _: uuid::Uuid,
+        ) -> crate::domain::errors::DomainResult<Option<QuietWindow>> {
+            Ok(None)
+        }
+        async fn get_by_name(
+            &self,
+            _: &str,
+        ) -> crate::domain::errors::DomainResult<Option<QuietWindow>> {
+            Ok(None)
+        }
+        async fn update(&self, _: &QuietWindow) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _: uuid::Uuid) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+        async fn list(
+            &self,
+            _: crate::domain::ports::quiet_window_repository::QuietWindowFilter,
+        ) -> crate::domain::errors::DomainResult<Vec<QuietWindow>> {
+            Ok(vec![])
+        }
+        async fn list_enabled(&self) -> crate::domain::errors::DomainResult<Vec<QuietWindow>> {
+            Ok(vec![])
+        }
     }
 }

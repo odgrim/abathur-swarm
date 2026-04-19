@@ -56,12 +56,10 @@ impl AgentRepository for SqliteAgentRepository {
     }
 
     async fn get_template(&self, id: Uuid) -> DomainResult<Option<AgentTemplate>> {
-        let row: Option<TemplateRow> = sqlx::query_as(
-            "SELECT * FROM agent_templates WHERE id = ?"
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<TemplateRow> = sqlx::query_as("SELECT * FROM agent_templates WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
 
         row.map(|r| r.try_into()).transpose()
     }
@@ -77,14 +75,17 @@ impl AgentRepository for SqliteAgentRepository {
         row.map(|r| r.try_into()).transpose()
     }
 
-    async fn get_template_version(&self, name: &str, version: u32) -> DomainResult<Option<AgentTemplate>> {
-        let row: Option<TemplateRow> = sqlx::query_as(
-            "SELECT * FROM agent_templates WHERE name = ? AND version = ?"
-        )
-        .bind(name)
-        .bind(version as i32)
-        .fetch_optional(&self.pool)
-        .await?;
+    async fn get_template_version(
+        &self,
+        name: &str,
+        version: u32,
+    ) -> DomainResult<Option<AgentTemplate>> {
+        let row: Option<TemplateRow> =
+            sqlx::query_as("SELECT * FROM agent_templates WHERE name = ? AND version = ?")
+                .bind(name)
+                .bind(version as i32)
+                .fetch_optional(&self.pool)
+                .await?;
 
         row.map(|r| r.try_into()).transpose()
     }
@@ -98,7 +99,7 @@ impl AgentRepository for SqliteAgentRepository {
             r#"UPDATE agent_templates SET name = ?, description = ?, tier = ?, version = ?,
                system_prompt = ?, tools = ?, constraints = ?, handoff_targets = ?,
                max_turns = ?, read_only = ?, is_active = ?, updated_at = ?
-               WHERE id = ?"#
+               WHERE id = ?"#,
         )
         .bind(&template.name)
         .bind(&template.description)
@@ -110,7 +111,11 @@ impl AgentRepository for SqliteAgentRepository {
         .bind(&handoff_json)
         .bind(template.max_turns as i32)
         .bind(template.read_only as i32)
-        .bind(if template.status == AgentStatus::Active { 1i32 } else { 0i32 })
+        .bind(if template.status == AgentStatus::Active {
+            1i32
+        } else {
+            0i32
+        })
         .bind(template.updated_at.to_rfc3339())
         .bind(template.id.to_string())
         .execute(&self.pool)
@@ -146,7 +151,14 @@ impl AgentRepository for SqliteAgentRepository {
         }
         if let Some(status) = &filter.status {
             sql.push_str(" AND is_active = ?");
-            bindings.push(if *status == AgentStatus::Active { "1" } else { "0" }.to_string());
+            bindings.push(
+                if *status == AgentStatus::Active {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            );
         }
         if let Some(pattern) = &filter.name_pattern {
             sql.push_str(" AND name LIKE ?");
@@ -165,11 +177,19 @@ impl AgentRepository for SqliteAgentRepository {
     }
 
     async fn list_by_tier(&self, tier: AgentTier) -> DomainResult<Vec<AgentTemplate>> {
-        self.list_templates(AgentFilter { tier: Some(tier), ..Default::default() }).await
+        self.list_templates(AgentFilter {
+            tier: Some(tier),
+            ..Default::default()
+        })
+        .await
     }
 
     async fn get_active_templates(&self) -> DomainResult<Vec<AgentTemplate>> {
-        self.list_templates(AgentFilter { status: Some(AgentStatus::Active), ..Default::default() }).await
+        self.list_templates(AgentFilter {
+            status: Some(AgentStatus::Active),
+            ..Default::default()
+        })
+        .await
     }
 
     // Instance operations
@@ -178,7 +198,7 @@ impl AgentRepository for SqliteAgentRepository {
         sqlx::query(
             r#"INSERT INTO agent_instances (id, template_id, template_name, current_task_id,
                turn_count, status, started_at, completed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(instance.id.to_string())
         .bind(instance.template_id.to_string())
@@ -195,12 +215,10 @@ impl AgentRepository for SqliteAgentRepository {
     }
 
     async fn get_instance(&self, id: Uuid) -> DomainResult<Option<AgentInstance>> {
-        let row: Option<InstanceRow> = sqlx::query_as(
-            "SELECT * FROM agent_instances WHERE id = ?"
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<InstanceRow> = sqlx::query_as("SELECT * FROM agent_instances WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
 
         row.map(|r| r.try_into()).transpose()
     }
@@ -209,7 +227,7 @@ impl AgentRepository for SqliteAgentRepository {
         let result = sqlx::query(
             r#"UPDATE agent_instances SET current_task_id = ?, turn_count = ?,
                status = ?, completed_at = ?
-               WHERE id = ?"#
+               WHERE id = ?"#,
         )
         .bind(instance.current_task_id.map(|id| id.to_string()))
         .bind(instance.turn_count as i32)
@@ -239,9 +257,12 @@ impl AgentRepository for SqliteAgentRepository {
         Ok(())
     }
 
-    async fn list_instances_by_status(&self, status: InstanceStatus) -> DomainResult<Vec<AgentInstance>> {
+    async fn list_instances_by_status(
+        &self,
+        status: InstanceStatus,
+    ) -> DomainResult<Vec<AgentInstance>> {
         let rows: Vec<InstanceRow> = sqlx::query_as(
-            "SELECT * FROM agent_instances WHERE status = ? ORDER BY started_at DESC"
+            "SELECT * FROM agent_instances WHERE status = ? ORDER BY started_at DESC",
         )
         .bind(status.as_str())
         .fetch_all(&self.pool)
@@ -252,7 +273,7 @@ impl AgentRepository for SqliteAgentRepository {
 
     async fn get_running_instances(&self, template_name: &str) -> DomainResult<Vec<AgentInstance>> {
         let rows: Vec<InstanceRow> = sqlx::query_as(
-            "SELECT * FROM agent_instances WHERE template_name = ? AND status = 'running'"
+            "SELECT * FROM agent_instances WHERE template_name = ? AND status = 'running'",
         )
         .bind(template_name)
         .fetch_all(&self.pool)
@@ -268,7 +289,10 @@ impl AgentRepository for SqliteAgentRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|(name, count)| (name, count as u32)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(name, count)| (name, count as u32))
+            .collect())
     }
 }
 
@@ -296,8 +320,9 @@ impl TryFrom<TemplateRow> for AgentTemplate {
     fn try_from(row: TemplateRow) -> Result<Self, Self::Error> {
         let id = super::parse_uuid(&row.id)?;
 
-        let tier = AgentTier::parse_str(&row.tier)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid tier: {}", row.tier)))?;
+        let tier = AgentTier::parse_str(&row.tier).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid tier: {}", row.tier))
+        })?;
 
         let tools: Vec<ToolCapability> = super::parse_json_or_default(row.tools)?;
         let constraints: Vec<AgentConstraint> = super::parse_json_or_default(row.constraints)?;
@@ -355,8 +380,9 @@ impl TryFrom<InstanceRow> for AgentInstance {
         let template_id = super::parse_uuid(&row.template_id)?;
         let current_task_id = super::parse_optional_uuid(row.current_task_id)?;
 
-        let status = InstanceStatus::parse_str(&row.status)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid status: {}", row.status)))?;
+        let status = InstanceStatus::parse_str(&row.status).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid status: {}", row.status))
+        })?;
 
         let started_at = super::parse_datetime(&row.started_at)?;
         let completed_at = super::parse_optional_datetime(row.completed_at)?;
@@ -418,10 +444,9 @@ mod tests {
     async fn test_list_by_tier() {
         let (repo, pool) = setup_test_repo().await;
 
-        let worker = AgentTemplate::new("worker-1", AgentTier::Worker)
-            .with_prompt("Worker");
-        let architect = AgentTemplate::new("architect-1", AgentTier::Architect)
-            .with_prompt("Architect");
+        let worker = AgentTemplate::new("worker-1", AgentTier::Worker).with_prompt("Worker");
+        let architect =
+            AgentTemplate::new("architect-1", AgentTier::Architect).with_prompt("Architect");
 
         repo.create_template(&worker).await.unwrap();
         repo.create_template(&architect).await.unwrap();
@@ -438,8 +463,7 @@ mod tests {
     async fn test_instance_lifecycle() {
         let (repo, pool) = setup_test_repo().await;
 
-        let template = AgentTemplate::new("instance-test", AgentTier::Worker)
-            .with_prompt("Test");
+        let template = AgentTemplate::new("instance-test", AgentTier::Worker).with_prompt("Test");
         repo.create_template(&template).await.unwrap();
 
         let mut instance = AgentInstance::from_template(&template);
@@ -478,7 +502,11 @@ mod tests {
         repo.create_template(&v2).await.unwrap();
 
         // Both active — should return the highest version (v2)
-        let found = repo.get_template_by_name("evolving-agent").await.unwrap().unwrap();
+        let found = repo
+            .get_template_by_name("evolving-agent")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found.version, 2);
         assert_eq!(found.system_prompt, "Refined prompt v2");
 
@@ -488,7 +516,11 @@ mod tests {
         repo.update_template(&disabled_v2).await.unwrap();
 
         // Now get_template_by_name should prefer active v1
-        let found = repo.get_template_by_name("evolving-agent").await.unwrap().unwrap();
+        let found = repo
+            .get_template_by_name("evolving-agent")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found.version, 1);
         assert_eq!(found.system_prompt, "Original prompt v1");
         assert_eq!(found.status, AgentStatus::Active);
@@ -521,19 +553,40 @@ mod tests {
         repo.update_template(&restored_v1).await.unwrap();
 
         // Verify: get_template_by_name returns v1 with exact original content
-        let current = repo.get_template_by_name("revert-agent").await.unwrap().unwrap();
+        let current = repo
+            .get_template_by_name("revert-agent")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(current.version, 1);
-        assert_eq!(current.system_prompt, "You are a code reviewer. Check for bugs.");
+        assert_eq!(
+            current.system_prompt,
+            "You are a code reviewer. Check for bugs."
+        );
         assert_eq!(current.status, AgentStatus::Active);
 
         // Verify: get_template_version still returns the disabled v2
-        let v2_check = repo.get_template_version("revert-agent", 2).await.unwrap().unwrap();
+        let v2_check = repo
+            .get_template_version("revert-agent", 2)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(v2_check.status, AgentStatus::Disabled);
-        assert_eq!(v2_check.system_prompt, "You are a broken prompt that causes failures.");
+        assert_eq!(
+            v2_check.system_prompt,
+            "You are a broken prompt that causes failures."
+        );
 
         // Verify: v1 content is untouched via version lookup
-        let v1_check = repo.get_template_version("revert-agent", 1).await.unwrap().unwrap();
-        assert_eq!(v1_check.system_prompt, "You are a code reviewer. Check for bugs.");
+        let v1_check = repo
+            .get_template_version("revert-agent", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v1_check.system_prompt,
+            "You are a code reviewer. Check for bugs."
+        );
     }
 
     #[tokio::test]
@@ -541,8 +594,8 @@ mod tests {
         let (repo, pool) = setup_test_repo().await;
 
         // Create v1
-        let mut v1 = AgentTemplate::new("history-agent", AgentTier::Worker)
-            .with_prompt("Version 1 prompt");
+        let mut v1 =
+            AgentTemplate::new("history-agent", AgentTier::Worker).with_prompt("Version 1 prompt");
         v1.version = 1;
         repo.create_template(&v1).await.unwrap();
 
@@ -559,16 +612,28 @@ mod tests {
         repo.create_template(&v2).await.unwrap();
 
         // Both versions should be retrievable by version number
-        let v1_check = repo.get_template_version("history-agent", 1).await.unwrap().unwrap();
+        let v1_check = repo
+            .get_template_version("history-agent", 1)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(v1_check.system_prompt, "Version 1 prompt");
         assert_eq!(v1_check.status, AgentStatus::Disabled);
 
-        let v2_check = repo.get_template_version("history-agent", 2).await.unwrap().unwrap();
+        let v2_check = repo
+            .get_template_version("history-agent", 2)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(v2_check.system_prompt, "Version 2 prompt (refined)");
         assert_eq!(v2_check.status, AgentStatus::Active);
 
         // get_template_by_name returns active v2
-        let current = repo.get_template_by_name("history-agent").await.unwrap().unwrap();
+        let current = repo
+            .get_template_by_name("history-agent")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(current.version, 2);
     }
 }

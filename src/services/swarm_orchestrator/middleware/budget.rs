@@ -34,10 +34,7 @@ impl PreSpawnMiddleware for BudgetDispatchMiddleware {
         "budget-dispatch"
     }
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision> {
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
         let Some(ref bt) = ctx.budget_tracker else {
             return Ok(PreSpawnDecision::Continue);
         };
@@ -77,10 +74,7 @@ impl PreSpawnMiddleware for BudgetConcurrencyMiddleware {
         "budget-concurrency"
     }
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision> {
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
         let Some(ref bt) = ctx.budget_tracker else {
             return Ok(PreSpawnDecision::Continue);
         };
@@ -97,10 +91,7 @@ impl PreSpawnMiddleware for BudgetConcurrencyMiddleware {
                 "spawn_task_agent: skipping — at budget-adjusted agent limit"
             );
             return Ok(PreSpawnDecision::Skip {
-                reason: format!(
-                    "budget-concurrency-ceiling:{}/{}",
-                    running, budget_max
-                ),
+                reason: format!("budget-concurrency-ceiling:{}/{}", running, budget_max),
             });
         }
 

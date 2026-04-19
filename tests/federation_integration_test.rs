@@ -50,7 +50,11 @@ async fn test_full_delegation_roundtrip() {
 
     // 1. Overmind registers and connects to the cerebrate
     overmind
-        .register_cerebrate("cerebrate-1", "Test Cerebrate", "https://cerebrate.local:8443")
+        .register_cerebrate(
+            "cerebrate-1",
+            "Test Cerebrate",
+            "https://cerebrate.local:8443",
+        )
         .await;
     overmind.connect("cerebrate-1").await.unwrap();
 
@@ -63,11 +67,15 @@ async fn test_full_delegation_roundtrip() {
     // 2. Create and delegate a task
     let task_id = Uuid::new_v4();
     let correlation_id = Uuid::new_v4();
-    let envelope = FederationTaskEnvelope::new(task_id, "Build feature X", "Implement the X feature")
-        .with_parent_goal(Uuid::new_v4())
-        .with_constraint("Must pass CI".to_string());
+    let envelope =
+        FederationTaskEnvelope::new(task_id, "Build feature X", "Implement the X feature")
+            .with_parent_goal(Uuid::new_v4())
+            .with_constraint("Must pass CI".to_string());
 
-    let assigned = overmind.delegate_to(&envelope, "cerebrate-1").await.unwrap();
+    let assigned = overmind
+        .delegate_to(&envelope, "cerebrate-1")
+        .await
+        .unwrap();
     assert_eq!(assigned, "cerebrate-1");
     assert_eq!(overmind.in_flight_count().await, 1);
 
@@ -90,9 +98,16 @@ async fn test_full_delegation_roundtrip() {
     assert!(event.is_ok(), "Expected FederationProgressReceived event");
 
     // 5. Cerebrate sends final result
-    let result = FederationResult::completed(task_id, correlation_id, "Feature X implemented successfully")
-        .with_artifact(Artifact::new("pr_url", "https://github.com/org/repo/pull/42"))
-        .with_artifact(Artifact::new("commit_sha", "abc123def456"));
+    let result = FederationResult::completed(
+        task_id,
+        correlation_id,
+        "Feature X implemented successfully",
+    )
+    .with_artifact(Artifact::new(
+        "pr_url",
+        "https://github.com/org/repo/pull/42",
+    ))
+    .with_artifact(Artifact::new("commit_sha", "abc123def456"));
 
     let goal_id = Uuid::new_v4();
     let ctx = ParentContext {
@@ -104,9 +119,16 @@ async fn test_full_delegation_roundtrip() {
     let reactions = overmind.handle_result(result, ctx).await;
 
     // 6. Verify result processing
-    assert_eq!(reactions.len(), 1, "Expected one reaction from result processor");
+    assert_eq!(
+        reactions.len(),
+        1,
+        "Expected one reaction from result processor"
+    );
     match &reactions[0] {
-        FederationReaction::UpdateGoalProgress { goal_id: gid, summary } => {
+        FederationReaction::UpdateGoalProgress {
+            goal_id: gid,
+            summary,
+        } => {
             assert_eq!(*gid, goal_id);
             assert!(summary.contains("Feature X implemented"));
         }
@@ -166,7 +188,8 @@ async fn test_failed_result_escalates() {
     let envelope = FederationTaskEnvelope::new(task_id, "Test", "Test");
     overmind.delegate_to(&envelope, "c1").await.unwrap();
 
-    let result = FederationResult::failed(task_id, correlation_id, "Build failed", "CI pipeline broke");
+    let result =
+        FederationResult::failed(task_id, correlation_id, "Build failed", "CI pipeline broke");
 
     let goal_id = Uuid::new_v4();
     let ctx = ParentContext {
@@ -178,7 +201,10 @@ async fn test_failed_result_escalates() {
 
     assert_eq!(reactions.len(), 1);
     match &reactions[0] {
-        FederationReaction::Escalate { reason, goal_id: gid } => {
+        FederationReaction::Escalate {
+            reason,
+            goal_id: gid,
+        } => {
             assert!(reason.contains("CI pipeline broke"));
             assert_eq!(*gid, Some(goal_id));
         }

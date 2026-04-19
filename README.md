@@ -144,6 +144,14 @@ goal_convergence_check_interval_secs = 28800
 
 Environment variables with the `ABATHUR_` prefix override config file values (e.g. `ABATHUR_LIMITS_MAX_DEPTH`, `ABATHUR_DATABASE_PATH`, `ABATHUR_LOG_LEVEL`).
 
+## Environment variables
+
+Only `ANTHROPIC_API_KEY` is needed for a standard run — the other variables are conditional on which adapters you enable.
+
+- **`ANTHROPIC_API_KEY`** — required at runtime for agents to call Claude. Without it the swarm has no way to dispatch real LLM calls against the direct Anthropic API substrate. Most unit tests do not need this (they run against a mock/null substrate); only the integration tests that actually invoke an agent require it. See [CONTRIBUTING.md](CONTRIBUTING.md#running-tests) for the test-matrix details.
+- **`ABATHUR_GITHUB_TOKEN`** — required only when the GitHub Issues adapter is enabled. Read by the adapter's HTTP client at startup; if the adapter is not configured, this variable is ignored.
+- **`CLICKUP_API_KEY`** — required only when the ClickUp adapter is enabled. Same story as above — only consulted when the ClickUp adapter is loaded.
+- **`ABATHUR_*`-prefixed variables** — override individual values from `abathur.toml` (see the Configuration section above for examples like `ABATHUR_DATABASE_PATH` or `ABATHUR_LOG_LEVEL`).
 
 ## Architecture
 

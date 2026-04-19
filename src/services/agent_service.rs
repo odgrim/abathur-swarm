@@ -5,9 +5,8 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    AgentConstraint, AgentInstance, AgentStatus, AgentTemplate, AgentTier,
-    InstanceStatus, ToolCapability, specialist_templates,
-    workflow_template::WorkflowTemplate,
+    AgentConstraint, AgentInstance, AgentStatus, AgentTemplate, AgentTier, InstanceStatus,
+    ToolCapability, specialist_templates, workflow_template::WorkflowTemplate,
 };
 use crate::domain::ports::{AgentFilter, AgentRepository};
 use crate::services::event_bus::{
@@ -84,7 +83,8 @@ impl<R: AgentRepository> AgentService<R> {
                     tier: format!("{:?}", template.tier),
                     version: template.version,
                 },
-            }).await;
+            })
+            .await;
 
             return Ok(template);
         }
@@ -124,7 +124,8 @@ impl<R: AgentRepository> AgentService<R> {
                 tier: format!("{:?}", template.tier),
                 version: template.version,
             },
-        }).await;
+        })
+        .await;
 
         Ok(template)
     }
@@ -135,7 +136,11 @@ impl<R: AgentRepository> AgentService<R> {
     }
 
     /// Get a specific version of a template.
-    pub async fn get_template_version(&self, name: &str, version: u32) -> DomainResult<Option<AgentTemplate>> {
+    pub async fn get_template_version(
+        &self,
+        name: &str,
+        version: u32,
+    ) -> DomainResult<Option<AgentTemplate>> {
         self.repository.get_template_version(name, version).await
     }
 
@@ -158,7 +163,10 @@ impl<R: AgentRepository> AgentService<R> {
         tier: Option<AgentTier>,
         max_turns: Option<u32>,
     ) -> DomainResult<AgentTemplate> {
-        let mut template = self.repository.get_template_by_name(name).await?
+        let mut template = self
+            .repository
+            .get_template_by_name(name)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(name.to_string()))?;
 
         if let Some(d) = description {
@@ -193,22 +201,28 @@ impl<R: AgentRepository> AgentService<R> {
                 tier: format!("{:?}", template.tier),
                 version: template.version,
             },
-        }).await;
+        })
+        .await;
 
         Ok(template)
     }
 
     /// Delete a template by name.
     pub async fn delete_template(&self, name: &str) -> DomainResult<()> {
-        let template = self.repository.get_template_by_name(name).await?
+        let template = self
+            .repository
+            .get_template_by_name(name)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(name.to_string()))?;
 
         // Check for running instances
         let running = self.repository.get_running_instances(name).await?;
         if !running.is_empty() {
-            return Err(DomainError::ValidationFailed(
-                format!("Cannot delete template '{}' with {} running instances", name, running.len())
-            ));
+            return Err(DomainError::ValidationFailed(format!(
+                "Cannot delete template '{}' with {} running instances",
+                name,
+                running.len()
+            )));
         }
 
         self.repository.delete_template(template.id).await?;
@@ -228,14 +242,22 @@ impl<R: AgentRepository> AgentService<R> {
                 from_status: format!("{:?}", template.status),
                 to_status: "Deleted".to_string(),
             },
-        }).await;
+        })
+        .await;
 
         Ok(())
     }
 
     /// Set a template's status (active, disabled, deprecated).
-    pub async fn set_template_status(&self, name: &str, status: AgentStatus) -> DomainResult<AgentTemplate> {
-        let mut template = self.repository.get_template_by_name(name).await?
+    pub async fn set_template_status(
+        &self,
+        name: &str,
+        status: AgentStatus,
+    ) -> DomainResult<AgentTemplate> {
+        let mut template = self
+            .repository
+            .get_template_by_name(name)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(name.to_string()))?;
 
         let from_status = format!("{:?}", template.status);
@@ -258,28 +280,35 @@ impl<R: AgentRepository> AgentService<R> {
                 from_status,
                 to_status: format!("{:?}", status),
             },
-        }).await;
+        })
+        .await;
 
         Ok(template)
     }
 
     /// Spawn a new agent instance.
     pub async fn spawn_instance(&self, template_name: &str) -> DomainResult<AgentInstance> {
-        let template = self.repository.get_template_by_name(template_name).await?
+        let template = self
+            .repository
+            .get_template_by_name(template_name)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(template_name.to_string()))?;
 
         if template.status != AgentStatus::Active {
-            return Err(DomainError::ValidationFailed(
-                format!("Template {} is not active", template_name)
-            ));
+            return Err(DomainError::ValidationFailed(format!(
+                "Template {} is not active",
+                template_name
+            )));
         }
 
         // Check instance limit
         let running = self.repository.get_running_instances(template_name).await?;
         if running.len() as u32 >= template.tier.max_instances() {
-            return Err(DomainError::ValidationFailed(
-                format!("Max instances ({}) reached for {}", template.tier.max_instances(), template_name)
-            ));
+            return Err(DomainError::LimitExceeded {
+                kind: format!("agent_instances[{}]", template_name),
+                value: running.len() as u64,
+                limit: template.tier.max_instances() as u64,
+            });
         }
 
         let instance = AgentInstance::from_template(&template);
@@ -300,19 +329,27 @@ impl<R: AgentRepository> AgentService<R> {
                 template_name: template.name.clone(),
                 tier: format!("{:?}", template.tier),
             },
-        }).await;
+        })
+        .await;
 
         Ok(instance)
     }
 
     /// Assign a task to an agent instance.
-    pub async fn assign_task(&self, instance_id: Uuid, task_id: Uuid) -> DomainResult<AgentInstance> {
-        let mut instance = self.repository.get_instance(instance_id).await?
+    pub async fn assign_task(
+        &self,
+        instance_id: Uuid,
+        task_id: Uuid,
+    ) -> DomainResult<AgentInstance> {
+        let mut instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(instance_id.to_string()))?;
 
         if instance.status != InstanceStatus::Idle {
             return Err(DomainError::ValidationFailed(
-                "Instance is not idle".to_string()
+                "Instance is not idle".to_string(),
             ));
         }
 
@@ -334,14 +371,18 @@ impl<R: AgentRepository> AgentService<R> {
                 task_id,
                 template_name: instance.template_name.clone(),
             },
-        }).await;
+        })
+        .await;
 
         Ok(instance)
     }
 
     /// Record a turn for an agent instance.
     pub async fn record_turn(&self, instance_id: Uuid) -> DomainResult<AgentInstance> {
-        let mut instance = self.repository.get_instance(instance_id).await?
+        let mut instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(instance_id.to_string()))?;
 
         instance.record_turn();
@@ -352,7 +393,10 @@ impl<R: AgentRepository> AgentService<R> {
 
     /// Complete an agent instance's task.
     pub async fn complete_instance(&self, instance_id: Uuid) -> DomainResult<AgentInstance> {
-        let mut instance = self.repository.get_instance(instance_id).await?
+        let mut instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(instance_id.to_string()))?;
 
         instance.complete();
@@ -373,14 +417,18 @@ impl<R: AgentRepository> AgentService<R> {
                 task_id: instance.current_task_id.unwrap_or(Uuid::nil()),
                 tokens_used: 0,
             },
-        }).await;
+        })
+        .await;
 
         Ok(instance)
     }
 
     /// Fail an agent instance.
     pub async fn fail_instance(&self, instance_id: Uuid) -> DomainResult<AgentInstance> {
-        let mut instance = self.repository.get_instance(instance_id).await?
+        let mut instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(instance_id.to_string()))?;
 
         instance.fail();
@@ -401,24 +449,32 @@ impl<R: AgentRepository> AgentService<R> {
                 task_id: instance.current_task_id,
                 template_name: instance.template_name.clone(),
             },
-        }).await;
+        })
+        .await;
 
         Ok(instance)
     }
 
     /// Get running instances.
     pub async fn get_running_instances(&self) -> DomainResult<Vec<AgentInstance>> {
-        self.repository.list_instances_by_status(InstanceStatus::Running).await
+        self.repository
+            .list_instances_by_status(InstanceStatus::Running)
+            .await
     }
 
     /// Get instance counts by template.
-    pub async fn get_instance_counts(&self) -> DomainResult<std::collections::HashMap<String, u32>> {
+    pub async fn get_instance_counts(
+        &self,
+    ) -> DomainResult<std::collections::HashMap<String, u32>> {
         self.repository.count_running_by_template().await
     }
 
     /// Check if can spawn more instances of a template.
     pub async fn can_spawn(&self, template_name: &str) -> DomainResult<bool> {
-        let template = self.repository.get_template_by_name(template_name).await?
+        let template = self
+            .repository
+            .get_template_by_name(template_name)
+            .await?
             .ok_or_else(|| DomainError::AgentNotFound(template_name.to_string()))?;
 
         if template.status != AgentStatus::Active {
@@ -469,7 +525,12 @@ impl<R: AgentRepository> AgentService<R> {
 
         // Find specialist with matching capability
         for template in templates {
-            if template.agent_card.capabilities.iter().any(|c| c == capability) {
+            if template
+                .agent_card
+                .capabilities
+                .iter()
+                .any(|c| c == capability)
+            {
                 return Ok(Some(template));
             }
         }
@@ -504,7 +565,9 @@ impl<R: AgentRepository> AgentService<R> {
                     seeded.push(upgraded.name.clone());
                     tracing::info!(
                         "Upgraded baseline agent '{}' from v{} to v{}",
-                        upgraded.name, existing.version, upgraded.version
+                        upgraded.name,
+                        existing.version,
+                        upgraded.version
                     );
                 }
                 Some(_) => {
@@ -525,7 +588,10 @@ impl<R: AgentRepository> AgentService<R> {
         workflow: Option<&WorkflowTemplate>,
         overmind_max_turns: Option<u32>,
     ) -> DomainResult<Vec<String>> {
-        let baseline = specialist_templates::create_baseline_agents_with_workflow(workflow, overmind_max_turns);
+        let baseline = specialist_templates::create_baseline_agents_with_workflow(
+            workflow,
+            overmind_max_turns,
+        );
         let mut seeded = Vec::new();
 
         for template in baseline {
@@ -543,7 +609,9 @@ impl<R: AgentRepository> AgentService<R> {
                     seeded.push(upgraded.name.clone());
                     tracing::info!(
                         "Upgraded baseline agent '{}' from v{} to v{}",
-                        upgraded.name, existing.version, upgraded.version
+                        upgraded.name,
+                        existing.version,
+                        upgraded.version
                     );
                 }
                 Some(_) => {
@@ -565,7 +633,10 @@ impl<R: AgentRepository> AgentService<R> {
         workflows: &[WorkflowTemplate],
         overmind_max_turns: Option<u32>,
     ) -> DomainResult<Vec<String>> {
-        let baseline = specialist_templates::create_baseline_agents_with_workflows(workflows, overmind_max_turns);
+        let baseline = specialist_templates::create_baseline_agents_with_workflows(
+            workflows,
+            overmind_max_turns,
+        );
         let mut seeded = Vec::new();
 
         for template in baseline {
@@ -582,7 +653,9 @@ impl<R: AgentRepository> AgentService<R> {
                     seeded.push(upgraded.name.clone());
                     tracing::info!(
                         "Upgraded baseline agent '{}' from v{} to v{}",
-                        upgraded.name, existing.version, upgraded.version
+                        upgraded.name,
+                        existing.version,
+                        upgraded.version
                     );
                 }
                 Some(_) => {
@@ -604,7 +677,10 @@ impl<R: AgentRepository> AgentService<R> {
             return Ok(template);
         }
 
-        Err(DomainError::AgentNotFound(format!("Agent '{}' not found. Create it via the Agents REST API.", name)))
+        Err(DomainError::AgentNotFound(format!(
+            "Agent '{}' not found. Create it via the Agents REST API.",
+            name
+        )))
     }
 }
 
@@ -612,13 +688,17 @@ impl<R: AgentRepository> AgentService<R> {
 #[allow(unused_variables)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_migrated_test_pool, insert_test_task, SqliteAgentRepository};
+    use crate::adapters::sqlite::{
+        SqliteAgentRepository, create_migrated_test_pool, insert_test_task,
+    };
     use sqlx::SqlitePool;
 
     async fn setup_service() -> (AgentService<SqliteAgentRepository>, SqlitePool) {
         let pool = create_migrated_test_pool().await.unwrap();
         let repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let event_bus = Arc::new(EventBus::new(crate::services::event_bus::EventBusConfig::default()));
+        let event_bus = Arc::new(EventBus::new(
+            crate::services::event_bus::EventBusConfig::default(),
+        ));
         (AgentService::new(repo, event_bus), pool)
     }
 
@@ -626,17 +706,20 @@ mod tests {
     async fn test_register_template() {
         let (service, pool) = setup_service().await;
 
-        let template = service.register_template(
-            "test-agent".to_string(),
-            "A test agent".to_string(),
-            AgentTier::Worker,
-            "You are a test agent.".to_string(),
-            vec![ToolCapability::new("read", "Read files")],
-            vec![],
-            None,
-            false,
-            None,
-        ).await.unwrap();
+        let template = service
+            .register_template(
+                "test-agent".to_string(),
+                "A test agent".to_string(),
+                AgentTier::Worker,
+                "You are a test agent.".to_string(),
+                vec![ToolCapability::new("read", "Read files")],
+                vec![],
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(template.name, "test-agent");
         assert_eq!(template.version, 1);
@@ -647,30 +730,36 @@ mod tests {
         let (service, pool) = setup_service().await;
 
         // Create first version
-        service.register_template(
-            "versioned".to_string(),
-            "V1".to_string(),
-            AgentTier::Worker,
-            "Version 1".to_string(),
-            vec![],
-            vec![],
-            None,
-            false,
-            None,
-        ).await.unwrap();
+        service
+            .register_template(
+                "versioned".to_string(),
+                "V1".to_string(),
+                AgentTier::Worker,
+                "Version 1".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Create second version
-        let v2 = service.register_template(
-            "versioned".to_string(),
-            "V2".to_string(),
-            AgentTier::Worker,
-            "Version 2".to_string(),
-            vec![],
-            vec![],
-            None,
-            false,
-            None,
-        ).await.unwrap();
+        let v2 = service
+            .register_template(
+                "versioned".to_string(),
+                "V2".to_string(),
+                AgentTier::Worker,
+                "Version 2".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(v2.version, 2);
         assert_eq!(v2.system_prompt, "Version 2");
@@ -680,17 +769,20 @@ mod tests {
     async fn test_spawn_instance() {
         let (service, pool) = setup_service().await;
 
-        service.register_template(
-            "spawnable".to_string(),
-            "Test".to_string(),
-            AgentTier::Worker,
-            "Test prompt".to_string(),
-            vec![],
-            vec![],
-            None,
-            false,
-            None,
-        ).await.unwrap();
+        service
+            .register_template(
+                "spawnable".to_string(),
+                "Test".to_string(),
+                AgentTier::Worker,
+                "Test prompt".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
 
         let instance = service.spawn_instance("spawnable").await.unwrap();
         assert_eq!(instance.status, InstanceStatus::Idle);
@@ -701,17 +793,20 @@ mod tests {
     async fn test_instance_lifecycle() {
         let (service, pool) = setup_service().await;
 
-        service.register_template(
-            "lifecycle".to_string(),
-            "Test".to_string(),
-            AgentTier::Worker,
-            "Test prompt".to_string(),
-            vec![],
-            vec![],
-            None,
-            false,
-            None,
-        ).await.unwrap();
+        service
+            .register_template(
+                "lifecycle".to_string(),
+                "Test".to_string(),
+                AgentTier::Worker,
+                "Test prompt".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
 
         let instance = service.spawn_instance("lifecycle").await.unwrap();
         let task_id = Uuid::new_v4();
@@ -781,26 +876,35 @@ mod tests {
     async fn test_disable_enable() {
         let (service, pool) = setup_service().await;
 
-        service.register_template(
-            "toggleable".to_string(),
-            "Test".to_string(),
-            AgentTier::Worker,
-            "Test prompt".to_string(),
-            vec![],
-            vec![],
-            None,
-            false,
-            None,
-        ).await.unwrap();
+        service
+            .register_template(
+                "toggleable".to_string(),
+                "Test".to_string(),
+                AgentTier::Worker,
+                "Test prompt".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let disabled = service.set_template_status("toggleable", AgentStatus::Disabled).await.unwrap();
+        let disabled = service
+            .set_template_status("toggleable", AgentStatus::Disabled)
+            .await
+            .unwrap();
         assert_eq!(disabled.status, AgentStatus::Disabled);
 
         // Should fail to spawn when disabled
         let spawn_result = service.spawn_instance("toggleable").await;
         assert!(spawn_result.is_err());
 
-        let enabled = service.set_template_status("toggleable", AgentStatus::Active).await.unwrap();
+        let enabled = service
+            .set_template_status("toggleable", AgentStatus::Active)
+            .await
+            .unwrap();
         assert_eq!(enabled.status, AgentStatus::Active);
 
         // Should succeed now

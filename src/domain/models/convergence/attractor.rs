@@ -530,9 +530,10 @@ pub fn detect_cycle(signatures: &[String]) -> Option<u32> {
     // plateau or uniform state, not a limit cycle.  A true cycle requires at
     // least two distinct signature values within the period.
     if let Some(first) = signatures.first()
-        && signatures.iter().all(|s| s == first) {
-            return None;
-        }
+        && signatures.iter().all(|s| s == first)
+    {
+        return None;
+    }
 
     for period in 2..=4usize {
         if signatures.len() < period * 2 {
@@ -693,11 +694,7 @@ pub fn fingerprint_overseer_results(signals: &OverseerSignals) -> String {
     // Custom checks
     if !signals.custom_checks.is_empty() {
         let passed = signals.custom_checks.iter().filter(|c| c.passed).count();
-        parts.push(format!(
-            "custom:{}/{}",
-            passed,
-            signals.custom_checks.len()
-        ));
+        parts.push(format!("custom:{}/{}", passed, signals.custom_checks.len()));
     }
 
     if parts.is_empty() {

@@ -79,7 +79,12 @@ impl DetailView {
             }
             for (key, value) in &section.fields {
                 let padded_key = format!("{:<width$}", key, width = key_width);
-                lines.push(format!("  {}{}  {}", padded_key.bold(), ":".dimmed(), value));
+                lines.push(format!(
+                    "  {}{}  {}",
+                    padded_key.bold(),
+                    ":".dimmed(),
+                    value
+                ));
             }
             for item in &section.items {
                 lines.push(format!("  {} {}", "\u{2022}".dimmed(), item));

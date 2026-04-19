@@ -25,27 +25,57 @@ pub struct ModelPricing {
 const PRICING_TABLE: &[(&str, ModelPricing)] = &[
     (
         "claude-opus-4-6",
-        ModelPricing { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 },
+        ModelPricing {
+            input: 15.0,
+            output: 75.0,
+            cache_read: 1.5,
+            cache_write: 18.75,
+        },
     ),
     (
         "opus",
-        ModelPricing { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 },
+        ModelPricing {
+            input: 15.0,
+            output: 75.0,
+            cache_read: 1.5,
+            cache_write: 18.75,
+        },
     ),
     (
         "claude-sonnet-4-5",
-        ModelPricing { input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 },
+        ModelPricing {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.3,
+            cache_write: 3.75,
+        },
     ),
     (
         "sonnet",
-        ModelPricing { input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 },
+        ModelPricing {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.3,
+            cache_write: 3.75,
+        },
     ),
     (
         "claude-haiku-4-5",
-        ModelPricing { input: 0.80, output: 4.0, cache_read: 0.08, cache_write: 1.0 },
+        ModelPricing {
+            input: 0.80,
+            output: 4.0,
+            cache_read: 0.08,
+            cache_write: 1.0,
+        },
     ),
     (
         "haiku",
-        ModelPricing { input: 0.80, output: 4.0, cache_read: 0.08, cache_write: 1.0 },
+        ModelPricing {
+            input: 0.80,
+            output: 4.0,
+            cache_read: 0.08,
+            cache_write: 1.0,
+        },
     ),
 ];
 
@@ -88,8 +118,14 @@ pub fn estimate_cost_cents(
     cache_read_tokens: u64,
     cache_write_tokens: u64,
 ) -> Option<f64> {
-    estimate_cost(model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-        .map(|usd| usd * 100.0)
+    estimate_cost(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    )
+    .map(|usd| usd * 100.0)
 }
 
 /// Summary of costs for a goal or execution run.
@@ -155,10 +191,16 @@ impl CostSummary {
         );
 
         if self.total_cache_read_tokens > 0 {
-            s.push_str(&format!(", {}K cache_read", self.total_cache_read_tokens / 1000));
+            s.push_str(&format!(
+                ", {}K cache_read",
+                self.total_cache_read_tokens / 1000
+            ));
         }
         if self.total_cache_write_tokens > 0 {
-            s.push_str(&format!(", {}K cache_write", self.total_cache_write_tokens / 1000));
+            s.push_str(&format!(
+                ", {}K cache_write",
+                self.total_cache_write_tokens / 1000
+            ));
         }
         s.push(')');
 
@@ -202,15 +244,24 @@ impl CostTracker {
     ) {
         {
             let mut global = self.global.write().await;
-            global.add_task(model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+            global.add_task(
+                model,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            );
         }
 
         if let Some(gid) = goal_id {
             let mut goals = self.goal_costs.write().await;
-            goals
-                .entry(gid)
-                .or_default()
-                .add_task(model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+            goals.entry(gid).or_default().add_task(
+                model,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            );
         }
     }
 
@@ -316,9 +367,15 @@ mod tests {
         let tracker = CostTracker::new();
         let goal_id = Uuid::new_v4();
 
-        tracker.record_task(Some(goal_id), "opus", 10_000, 5_000, 0, 0).await;
-        tracker.record_task(Some(goal_id), "haiku", 20_000, 10_000, 0, 0).await;
-        tracker.record_task(None, "sonnet", 5_000, 2_000, 0, 0).await;
+        tracker
+            .record_task(Some(goal_id), "opus", 10_000, 5_000, 0, 0)
+            .await;
+        tracker
+            .record_task(Some(goal_id), "haiku", 20_000, 10_000, 0, 0)
+            .await;
+        tracker
+            .record_task(None, "sonnet", 5_000, 2_000, 0, 0)
+            .await;
 
         let global = tracker.global_summary().await;
         assert_eq!(global.task_count, 3);

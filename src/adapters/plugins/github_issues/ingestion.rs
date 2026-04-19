@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::adapter::{AdapterManifest, IngestionItem, IngestionItemKind};
 use crate::domain::models::TaskPriority;
+use crate::domain::models::adapter::{AdapterManifest, IngestionItem, IngestionItemKind};
 use crate::domain::ports::adapter::IngestionAdapter;
 
 use super::client::GitHubClient;
@@ -46,18 +46,12 @@ impl GitHubIngestionAdapter {
 
     /// Read the `owner` from the manifest config.
     fn owner(&self) -> Option<&str> {
-        self.manifest
-            .config
-            .get("owner")
-            .and_then(|v| v.as_str())
+        self.manifest.config.get("owner").and_then(|v| v.as_str())
     }
 
     /// Read the `repo` from the manifest config.
     fn repo(&self) -> Option<&str> {
-        self.manifest
-            .config
-            .get("repo")
-            .and_then(|v| v.as_str())
+        self.manifest.config.get("repo").and_then(|v| v.as_str())
     }
 
     /// Read the `state` from the manifest config, defaulting to `"open"`.
@@ -82,7 +76,11 @@ impl GitHubIngestionAdapter {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())?;
 
-        let labels: Vec<&str> = raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let labels: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
 
         if labels.is_empty() {
             None
@@ -118,7 +116,11 @@ impl GitHubIngestionAdapter {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())?;
 
-        let branches: Vec<&str> = raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let branches: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
 
         if branches.is_empty() {
             None
@@ -138,7 +140,11 @@ impl GitHubIngestionAdapter {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())?;
 
-        let authors: Vec<&str> = raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let authors: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
 
         if authors.is_empty() {
             None
@@ -155,7 +161,10 @@ impl GitHubIngestionAdapter {
         self.manifest
             .config
             .get("max_diff_chars")
-            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .map(|n| n as usize)
             .unwrap_or(100_000)
     }
@@ -277,16 +286,18 @@ impl IngestionAdapter for GitHubIngestionAdapter {
     }
 
     async fn poll(&self, last_poll: Option<DateTime<Utc>>) -> DomainResult<Vec<IngestionItem>> {
-        let owner = self.owner().ok_or_else(|| {
-            crate::domain::errors::DomainError::ValidationFailed(
-                "GitHub Issues adapter config missing required 'owner'".to_string(),
-            )
-        })?;
-        let repo = self.repo().ok_or_else(|| {
-            crate::domain::errors::DomainError::ValidationFailed(
-                "GitHub Issues adapter config missing required 'repo'".to_string(),
-            )
-        })?;
+        let owner =
+            self.owner()
+                .ok_or_else(|| crate::domain::errors::DomainError::ConfigError {
+                    key: "github.owner".to_string(),
+                    reason: "GitHub Issues adapter config missing required 'owner'".to_string(),
+                })?;
+        let repo = self
+            .repo()
+            .ok_or_else(|| crate::domain::errors::DomainError::ConfigError {
+                key: "github.repo".to_string(),
+                reason: "GitHub Issues adapter config missing required 'repo'".to_string(),
+            })?;
 
         let state = self.state();
 
@@ -324,7 +335,11 @@ impl IngestionAdapter for GitHubIngestionAdapter {
                 }
 
                 // Hydrate full PR details from the pulls endpoint.
-                let pr = match self.client.get_pull_request(owner, repo, gh_item.number).await {
+                let pr = match self
+                    .client
+                    .get_pull_request(owner, repo, gh_item.number)
+                    .await
+                {
                     Ok(pr) => pr,
                     Err(e) => {
                         tracing::warn!(
@@ -367,7 +382,11 @@ impl IngestionAdapter for GitHubIngestionAdapter {
                 }
 
                 // Fetch the unified diff.
-                let diff = match self.client.get_pull_request_diff(owner, repo, pr.number).await {
+                let diff = match self
+                    .client
+                    .get_pull_request_diff(owner, repo, pr.number)
+                    .await
+                {
                     Ok(d) => d,
                     Err(e) => {
                         tracing::warn!(
@@ -410,8 +429,8 @@ impl IngestionAdapter for GitHubIngestionAdapter {
 mod tests {
     use super::*;
     use crate::adapters::plugins::github_issues::models::{
-        GitHubLabel, GitHubPullRequestRef,
-        GitHubPullRequestDetail, GitHubPullRequestHead, GitHubPullRequestBase, GitHubUser,
+        GitHubLabel, GitHubPullRequestBase, GitHubPullRequestDetail, GitHubPullRequestHead,
+        GitHubPullRequestRef, GitHubUser,
     };
     use crate::domain::models::adapter::{
         AdapterCapability, AdapterDirection, AdapterType, IngestionItemKind,
@@ -454,37 +473,55 @@ mod tests {
     #[test]
     fn test_extract_priority_critical() {
         let issue = make_github_issue(1, "Crash on startup", vec!["priority: critical"]);
-        assert_eq!(GitHubIngestionAdapter::extract_priority(&issue), Some(TaskPriority::Critical));
+        assert_eq!(
+            GitHubIngestionAdapter::extract_priority(&issue),
+            Some(TaskPriority::Critical)
+        );
     }
 
     #[test]
     fn test_extract_priority_high() {
         let issue = make_github_issue(2, "Slow query", vec!["priority: high"]);
-        assert_eq!(GitHubIngestionAdapter::extract_priority(&issue), Some(TaskPriority::High));
+        assert_eq!(
+            GitHubIngestionAdapter::extract_priority(&issue),
+            Some(TaskPriority::High)
+        );
     }
 
     #[test]
     fn test_extract_priority_normal_via_medium() {
         let issue = make_github_issue(3, "UI glitch", vec!["priority: medium"]);
-        assert_eq!(GitHubIngestionAdapter::extract_priority(&issue), Some(TaskPriority::Normal));
+        assert_eq!(
+            GitHubIngestionAdapter::extract_priority(&issue),
+            Some(TaskPriority::Normal)
+        );
     }
 
     #[test]
     fn test_extract_priority_normal_via_normal() {
         let issue = make_github_issue(4, "Docs update", vec!["priority: normal"]);
-        assert_eq!(GitHubIngestionAdapter::extract_priority(&issue), Some(TaskPriority::Normal));
+        assert_eq!(
+            GitHubIngestionAdapter::extract_priority(&issue),
+            Some(TaskPriority::Normal)
+        );
     }
 
     #[test]
     fn test_extract_priority_low() {
         let issue = make_github_issue(5, "Minor typo", vec!["priority: low"]);
-        assert_eq!(GitHubIngestionAdapter::extract_priority(&issue), Some(TaskPriority::Low));
+        assert_eq!(
+            GitHubIngestionAdapter::extract_priority(&issue),
+            Some(TaskPriority::Low)
+        );
     }
 
     #[test]
     fn test_extract_priority_case_insensitive() {
         let issue = make_github_issue(6, "Thing", vec!["PRIORITY: HIGH"]);
-        assert_eq!(GitHubIngestionAdapter::extract_priority(&issue), Some(TaskPriority::High));
+        assert_eq!(
+            GitHubIngestionAdapter::extract_priority(&issue),
+            Some(TaskPriority::High)
+        );
     }
 
     #[test]
@@ -526,8 +563,8 @@ mod tests {
 
     #[test]
     fn test_filter_labels_from_config() {
-        let manifest = test_manifest()
-            .with_config("filter_labels", serde_json::json!("bug, enhancement"));
+        let manifest =
+            test_manifest().with_config("filter_labels", serde_json::json!("bug, enhancement"));
         let client = Arc::new(GitHubClient::new("token".to_string()));
         let adapter = GitHubIngestionAdapter::new(manifest, client);
         let labels = adapter.filter_labels().unwrap();
@@ -545,8 +582,7 @@ mod tests {
 
     #[test]
     fn test_filter_labels_empty_string_treated_as_absent() {
-        let manifest = test_manifest()
-            .with_config("filter_labels", serde_json::json!(""));
+        let manifest = test_manifest().with_config("filter_labels", serde_json::json!(""));
         let client = Arc::new(GitHubClient::new("token".to_string()));
         let adapter = GitHubIngestionAdapter::new(manifest, client);
         assert!(adapter.filter_labels().is_none());
@@ -564,8 +600,7 @@ mod tests {
 
     #[test]
     fn test_state_from_config() {
-        let manifest = test_manifest()
-            .with_config("state", serde_json::json!("all"));
+        let manifest = test_manifest().with_config("state", serde_json::json!("all"));
         let client = Arc::new(GitHubClient::new("token".to_string()));
         let adapter = GitHubIngestionAdapter::new(manifest, client);
         assert_eq!(adapter.state(), "all");
@@ -599,7 +634,10 @@ mod tests {
             .collect();
 
         assert_eq!(items.len(), 1, "Only the non-PR issue should be included");
-        assert_eq!(items[0].external_id, "100", "PR issue #99 must be filtered out");
+        assert_eq!(
+            items[0].external_id, "100",
+            "PR issue #99 must be filtered out"
+        );
     }
 
     // ── to_ingestion_item sets IngestionItemKind::Issue ──────────────────
@@ -701,8 +739,8 @@ mod tests {
 
     #[test]
     fn test_ingest_pull_requests_enabled() {
-        let manifest = test_manifest()
-            .with_config("ingest_pull_requests", serde_json::json!("true"));
+        let manifest =
+            test_manifest().with_config("ingest_pull_requests", serde_json::json!("true"));
         let client = Arc::new(GitHubClient::new("token".to_string()));
         let adapter = GitHubIngestionAdapter::new(manifest, client);
         assert!(adapter.ingest_pull_requests());
@@ -710,8 +748,7 @@ mod tests {
 
     #[test]
     fn test_ingest_pull_requests_bool_value() {
-        let manifest = test_manifest()
-            .with_config("ingest_pull_requests", serde_json::json!(true));
+        let manifest = test_manifest().with_config("ingest_pull_requests", serde_json::json!(true));
         let client = Arc::new(GitHubClient::new("token".to_string()));
         let adapter = GitHubIngestionAdapter::new(manifest, client);
         assert!(adapter.ingest_pull_requests());
@@ -719,8 +756,8 @@ mod tests {
 
     #[test]
     fn test_pr_base_filter_from_config() {
-        let manifest = test_manifest()
-            .with_config("pr_base_filter", serde_json::json!("main, develop"));
+        let manifest =
+            test_manifest().with_config("pr_base_filter", serde_json::json!("main, develop"));
         let client = Arc::new(GitHubClient::new("token".to_string()));
         let adapter = GitHubIngestionAdapter::new(manifest, client);
         let bases = adapter.pr_base_filter().unwrap();
@@ -738,8 +775,10 @@ mod tests {
 
     #[test]
     fn test_pr_ignore_authors_from_config() {
-        let manifest = test_manifest()
-            .with_config("pr_ignore_authors", serde_json::json!("dependabot[bot], renovate[bot]"));
+        let manifest = test_manifest().with_config(
+            "pr_ignore_authors",
+            serde_json::json!("dependabot[bot], renovate[bot]"),
+        );
         let client = Arc::new(GitHubClient::new("token".to_string()));
         let adapter = GitHubIngestionAdapter::new(manifest, client);
         let authors = adapter.pr_ignore_authors().unwrap();
@@ -757,8 +796,7 @@ mod tests {
 
     #[test]
     fn test_max_diff_chars_from_config() {
-        let manifest = test_manifest()
-            .with_config("max_diff_chars", serde_json::json!("50000"));
+        let manifest = test_manifest().with_config("max_diff_chars", serde_json::json!("50000"));
         let client = Arc::new(GitHubClient::new("token".to_string()));
         let adapter = GitHubIngestionAdapter::new(manifest, client);
         assert_eq!(adapter.max_diff_chars(), 50_000);

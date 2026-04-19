@@ -154,11 +154,7 @@ pub fn convergence_readiness(signals: &OverseerSignals) -> f64 {
     let custom_level = if signals.custom_checks.is_empty() {
         1.0
     } else {
-        signals
-            .custom_checks
-            .iter()
-            .filter(|c| c.passed)
-            .count() as f64
+        signals.custom_checks.iter().filter(|c| c.passed).count() as f64
             / signals.custom_checks.len() as f64
     };
 
@@ -1060,19 +1056,35 @@ mod tests {
 
         // Without intent — uses standard weights
         let delta_no_intent = compute_convergence_delta_with_intent(
-            &prev, &current_signals, 20, &health, &weights,
-            None, None,
+            &prev,
+            &current_signals,
+            20,
+            &health,
+            &weights,
+            None,
+            None,
         );
 
         // With intent — reweights to prioritize intent satisfaction
         let delta_with_intent = compute_convergence_delta_with_intent(
-            &prev, &current_signals, 20, &health, &weights,
-            Some(0.5), Some(0.9), // confidence improved significantly
+            &prev,
+            &current_signals,
+            20,
+            &health,
+            &weights,
+            Some(0.5),
+            Some(0.9), // confidence improved significantly
         );
 
         // Both should be positive (progress on tests + intent improvement)
-        assert!(delta_no_intent > 0.0, "Expected positive delta without intent");
-        assert!(delta_with_intent > 0.0, "Expected positive delta with intent");
+        assert!(
+            delta_no_intent > 0.0,
+            "Expected positive delta without intent"
+        );
+        assert!(
+            delta_with_intent > 0.0,
+            "Expected positive delta with intent"
+        );
 
         // Weight redistribution produces different results: intent-weighted
         // delta differs from standard because 40% weight goes to intent delta
@@ -1085,8 +1097,13 @@ mod tests {
         // The intent component is 0.55 * (0.9 - 0.5) = 0.22.
         // Verify by comparing to a zero-change intent (0.7 -> 0.7):
         let delta_flat_intent = compute_convergence_delta_with_intent(
-            &prev, &current_signals, 20, &health, &weights,
-            Some(0.7), Some(0.7),
+            &prev,
+            &current_signals,
+            20,
+            &health,
+            &weights,
+            Some(0.7),
+            Some(0.7),
         );
         assert!(
             delta_with_intent > delta_flat_intent,
@@ -1105,13 +1122,23 @@ mod tests {
 
         // Intent confidence dropped despite test progress
         let delta = compute_convergence_delta_with_intent(
-            &prev, &current_signals, 20, &health, &weights,
-            Some(0.9), Some(0.3), // confidence dropped
+            &prev,
+            &current_signals,
+            20,
+            &health,
+            &weights,
+            Some(0.9),
+            Some(0.3), // confidence dropped
         );
 
         let delta_no_intent = compute_convergence_delta_with_intent(
-            &prev, &current_signals, 20, &health, &weights,
-            None, None,
+            &prev,
+            &current_signals,
+            20,
+            &health,
+            &weights,
+            None,
+            None,
         );
 
         // Declining intent (0.9 -> 0.3 = -0.6) should reduce delta vs no-intent
@@ -1132,12 +1159,16 @@ mod tests {
 
         // Only one side has intent confidence — should use standard weights
         let delta_one_side = compute_convergence_delta_with_intent(
-            &prev, &current_signals, 20, &health, &weights,
-            None, Some(0.8),
+            &prev,
+            &current_signals,
+            20,
+            &health,
+            &weights,
+            None,
+            Some(0.8),
         );
-        let delta_standard = compute_convergence_delta(
-            &prev, &current_signals, 20, &health, &weights,
-        );
+        let delta_standard =
+            compute_convergence_delta(&prev, &current_signals, 20, &health, &weights);
 
         assert!(
             (delta_one_side - delta_standard).abs() < f64::EPSILON,
@@ -1309,7 +1340,7 @@ mod tests {
                     i,
                     signals.clone(),
                     Some(ObservationMetrics {
-                        ast_diff_nodes: 150, // High churn
+                        ast_diff_nodes: 150,     // High churn
                         convergence_delta: 0.01, // Near-zero progress
                         convergence_level: 0.5,
                         ..ObservationMetrics::default()
@@ -1488,11 +1519,12 @@ mod tests {
         };
         let readiness = convergence_readiness(&signals);
         let level = convergence_level(&signals);
-        assert!((readiness - level).abs() < f64::EPSILON,
-            "convergence_level ({level}) should equal convergence_readiness ({readiness})");
+        assert!(
+            (readiness - level).abs() < f64::EPSILON,
+            "convergence_level ({level}) should equal convergence_readiness ({readiness})"
+        );
         // 0.55 * 1.0 + 0.20 * 0.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.80
-        assert!((level - 0.80).abs() < 1e-10,
-            "Expected 0.80, got {level}");
+        assert!((level - 0.80).abs() < 1e-10, "Expected 0.80, got {level}");
     }
 
     #[test]
@@ -1501,8 +1533,10 @@ mod tests {
         let signals = signals_with_tests(8, 10, 0);
         let readiness = convergence_readiness(&signals);
         let level = convergence_level(&signals);
-        assert!((readiness - level).abs() < f64::EPSILON,
-            "readiness ({readiness}) should always equal level ({level})");
+        assert!(
+            (readiness - level).abs() < f64::EPSILON,
+            "readiness ({readiness}) should always equal level ({level})"
+        );
     }
 
     // --- convergence_level_with_intent tests ---
@@ -1512,8 +1546,10 @@ mod tests {
         let signals = signals_with_tests(8, 10, 0);
         let level = convergence_level(&signals);
         let blended = convergence_level_with_intent(&signals, None);
-        assert!((blended - level).abs() < f64::EPSILON,
-            "Without intent, blended ({blended}) should equal level ({level})");
+        assert!(
+            (blended - level).abs() < f64::EPSILON,
+            "Without intent, blended ({blended}) should equal level ({level})"
+        );
     }
 
     #[test]
@@ -1523,8 +1559,10 @@ mod tests {
         let intent_confidence = 0.8;
         let blended = convergence_level_with_intent(&signals, Some(intent_confidence));
         // 0.60 * 0.8 + 0.40 * 1.0 = 0.48 + 0.40 = 0.88
-        assert!((blended - 0.88).abs() < 1e-10,
-            "Expected 0.88, got {blended}");
+        assert!(
+            (blended - 0.88).abs() < 1e-10,
+            "Expected 0.88, got {blended}"
+        );
     }
 
     #[test]
@@ -1533,8 +1571,10 @@ mod tests {
         // All tests pass but intent is low
         let blended = convergence_level_with_intent(&signals, Some(0.3));
         // 0.60 * 0.3 + 0.40 * 1.0 = 0.18 + 0.40 = 0.58
-        assert!((blended - 0.58).abs() < 1e-10,
-            "Expected 0.58, got {blended}");
+        assert!(
+            (blended - 0.58).abs() < 1e-10,
+            "Expected 0.58, got {blended}"
+        );
     }
 
     #[test]
@@ -1545,8 +1585,10 @@ mod tests {
         // overseer_readiness: 0.55 * 0.0 + 0.20 * 1.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.45
         // 0.60 * 0.95 + 0.40 * 0.45 = 0.57 + 0.18 = 0.75
         let expected = 0.60 * 0.95 + 0.40 * 0.45;
-        assert!((blended - expected).abs() < 1e-10,
-            "Expected {expected}, got {blended}");
+        assert!(
+            (blended - expected).abs() < 1e-10,
+            "Expected {expected}, got {blended}"
+        );
     }
 
     // --- convergence_delta intent reweight tests ---
@@ -1562,14 +1604,21 @@ mod tests {
 
         // With intent — uses 55/20/15/5/5 weights
         let delta = compute_convergence_delta_with_intent(
-            &prev, &current_signals, 20, &health, &weights,
-            Some(0.5), Some(0.9),
+            &prev,
+            &current_signals,
+            20,
+            &health,
+            &weights,
+            Some(0.5),
+            Some(0.9),
         );
 
         // Intent component: 0.55 * (0.9 - 0.5) = 0.22
         // Test component: 0.20 * (8-5)/10 = 0.06
         // The intent at 55% should dominate
-        assert!(delta > 0.2,
-            "Intent-weighted delta with rising intent should be > 0.2, got {delta}");
+        assert!(
+            delta > 0.2,
+            "Intent-weighted delta with rising intent should be > 0.2, got {delta}"
+        );
     }
 }

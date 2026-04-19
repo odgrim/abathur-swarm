@@ -6,14 +6,14 @@ use clap::{Args, Subcommand};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::adapters::sqlite::{initialize_default_database, SqliteTaskScheduleRepository};
-use crate::cli::id_resolver::resolve_schedule_id;
+use crate::adapters::sqlite::{SqliteTaskScheduleRepository, initialize_default_database};
 use crate::cli::display::{
-    action_failure, action_success, colorize_status, list_table, output, render_list, short_id,
-    truncate_ellipsis, CommandOutput, DetailView, relative_time_str,
+    CommandOutput, DetailView, action_failure, action_success, colorize_status, list_table, output,
+    relative_time_str, render_list, short_id, truncate_ellipsis,
 };
-use crate::domain::models::task_schedule::*;
+use crate::cli::id_resolver::resolve_schedule_id;
 use crate::domain::models::TaskPriority;
+use crate::domain::models::task_schedule::*;
 use crate::domain::ports::task_schedule_repository::{TaskScheduleFilter, TaskScheduleRepository};
 use crate::services::task_schedule_service::TaskScheduleService;
 use crate::services::trigger_rules::normalize_cron_expression;
@@ -188,10 +188,20 @@ impl CommandOutput for ScheduleListOutput {
             return "No task schedules found.".to_string();
         }
 
-        let mut table = list_table(&["ID", "Name", "Status", "Schedule", "Next Fire", "Fires", "Task Title"]);
+        let mut table = list_table(&[
+            "ID",
+            "Name",
+            "Status",
+            "Schedule",
+            "Next Fire",
+            "Fires",
+            "Task Title",
+        ]);
 
         for s in &self.schedules {
-            let next_fire = s.next_fire_at.as_deref()
+            let next_fire = s
+                .next_fire_at
+                .as_deref()
                 .map(relative_time_str)
                 .unwrap_or_else(|| "-".to_string());
             table.add_row(vec![
@@ -229,24 +239,32 @@ impl CommandOutput for ScheduleDetailOutput {
     fn to_human(&self) -> String {
         let mut view = DetailView::new(&self.schedule.name)
             .field("ID", &self.schedule.id)
-            .field("Status", &colorize_status(&self.schedule.status).to_string())
+            .field(
+                "Status",
+                &colorize_status(&self.schedule.status).to_string(),
+            )
             .field("Schedule", &self.schedule.schedule_detail);
 
         if let Some(ref next) = self.schedule.next_fire_at {
             view = view.field("Next Fire", &relative_time_str(next));
         }
 
-        view = view.field("Overlap", &self.overlap_policy)
+        view = view
+            .field("Overlap", &self.overlap_policy)
             .section("Task Template")
             .field("Title", &self.schedule.task_title)
-            .field("Description", &truncate_ellipsis(&self.task_description, 80))
+            .field(
+                "Description",
+                &truncate_ellipsis(&self.task_description, 80),
+            )
             .field("Priority", &self.task_priority);
 
         if let Some(ref agent) = self.task_agent_type {
             view = view.field("Agent", agent);
         }
 
-        view = view.section("History")
+        view = view
+            .section("History")
             .field("Fires", &self.schedule.fire_count.to_string());
 
         if let Some(ref last) = self.schedule.last_fired_at {
@@ -257,7 +275,8 @@ impl CommandOutput for ScheduleDetailOutput {
             view = view.field("Last Task", short_id(task_id));
         }
 
-        view = view.section("Timing")
+        view = view
+            .section("Timing")
             .field("Created", &relative_time_str(&self.created_at))
             .field("Updated", &relative_time_str(&self.updated_at));
 
@@ -301,9 +320,16 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
 
     match args.command {
         ScheduleCommands::Create {
-            name, description, cron, interval, at,
-            task_title, task_description, priority,
-            agent_type, overlap,
+            name,
+            description,
+            cron,
+            interval,
+            at,
+            task_title,
+            task_description,
+            priority,
+            agent_type,
+            overlap,
         } => {
             // Parse schedule type
             let schedule_type = if let Some(expr) = cron {
@@ -319,13 +345,15 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
                 anyhow::bail!("Must specify one of: --cron, --interval, or --at");
             };
 
-            let priority = TaskPriority::from_str(&priority)
-                .unwrap_or(TaskPriority::Normal);
-            let overlap_policy = OverlapPolicy::from_str(&overlap)
-                .unwrap_or(OverlapPolicy::Skip);
+            let priority = TaskPriority::from_str(&priority).unwrap_or(TaskPriority::Normal);
+            let overlap_policy = OverlapPolicy::from_str(&overlap).unwrap_or(OverlapPolicy::Skip);
 
             let mut schedule = TaskSchedule::new(
-                name, description, schedule_type, task_title, task_description,
+                name,
+                description,
+                schedule_type,
+                task_title,
+                task_description,
             );
             schedule.task_priority = priority;
             schedule.task_agent_type = agent_type;
@@ -397,8 +425,13 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
         }
 
         ScheduleCommands::Update {
-            id_or_name, description, cron, task_title,
-            task_description, priority, agent_type,
+            id_or_name,
+            description,
+            cron,
+            task_title,
+            task_description,
+            priority,
+            agent_type,
         } => {
             let mut schedule = find_schedule(&repo, &pool, &id_or_name).await?;
 
@@ -415,8 +448,7 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
                 schedule.task_description = desc;
             }
             if let Some(p) = priority {
-                schedule.task_priority = TaskPriority::from_str(&p)
-                    .unwrap_or(TaskPriority::Normal);
+                schedule.task_priority = TaskPriority::from_str(&p).unwrap_or(TaskPriority::Normal);
             }
             if let Some(agent) = agent_type {
                 schedule.task_agent_type = Some(agent);
@@ -460,9 +492,10 @@ async fn find_schedule(
 
     // Try by UUID prefix
     if let Ok(uuid) = resolve_schedule_id(pool, id_or_name).await
-        && let Some(schedule) = repo.get(uuid).await? {
-            return Ok(schedule);
-        }
+        && let Some(schedule) = repo.get(uuid).await?
+    {
+        return Ok(schedule);
+    }
 
     anyhow::bail!("Task schedule not found: {}", id_or_name)
 }

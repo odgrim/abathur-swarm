@@ -13,13 +13,13 @@ use crate::adapters::sqlite::{
     SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
     SqliteTrajectoryRepository, SqliteWorktreeRepository,
 };
-use crate::services::overseers::{
-    BuildOverseer, CompilationOverseer, LintOverseer, OverseerClusterService,
-    SecurityScanOverseer, TestSuiteOverseer, TypeCheckOverseer,
-};
 use crate::domain::models::goal_federation::{ContractSignal, ConvergenceContract};
 use crate::domain::models::swarm_dag::{SwarmDag, SwarmDagNode, SwarmDagNodeState};
-use crate::services::{SwarmConfig, SwarmOrchestrator, SwarmEvent};
+use crate::services::overseers::{
+    BuildOverseer, CompilationOverseer, LintOverseer, OverseerClusterService, SecurityScanOverseer,
+    TestSuiteOverseer, TypeCheckOverseer,
+};
+use crate::services::{SwarmConfig, SwarmEvent, SwarmOrchestrator};
 
 type CliOrchestrator = SwarmOrchestrator<
     SqliteGoalRepository,
@@ -46,15 +46,17 @@ fn build_rust_overseer_cluster() -> OverseerClusterService {
 
 /// Build an orchestrator with mock substrate for CLI commands.
 async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> {
-    use crate::adapters::sqlite::{
-        create_pool, Migrator, all_embedded_migrations,
-    };
+    use crate::adapters::sqlite::{Migrator, all_embedded_migrations, create_pool};
     use crate::adapters::substrates::SubstrateRegistry;
-    use crate::services::{EventBus, EventBusConfig, EventReactor, ReactorConfig, EventScheduler, SchedulerConfig};
+    use crate::services::{
+        EventBus, EventBusConfig, EventReactor, EventScheduler, ReactorConfig, SchedulerConfig,
+    };
 
     let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
     let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
+    migrator
+        .run_embedded_migrations(all_embedded_migrations())
+        .await?;
 
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
@@ -66,27 +68,41 @@ async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> 
         Arc::from(SubstrateRegistry::mock_substrate());
 
     let event_store: Arc<dyn crate::services::event_store::EventStore> =
-        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(pool.clone(), crate::services::crypto::load_encryptor_from_env()));
+        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(
+            pool.clone(),
+            crate::services::crypto::load_encryptor_from_env(),
+        ));
     let event_bus = Arc::new(
-        EventBus::new(EventBusConfig { persist_events: true, ..Default::default() })
-            .with_store(event_store.clone()),
+        EventBus::new(EventBusConfig {
+            persist_events: true,
+            ..Default::default()
+        })
+        .with_store(event_store.clone()),
     );
     let event_reactor = Arc::new(
-        EventReactor::new(event_bus.clone(), ReactorConfig::default())
-            .with_store(event_store),
+        EventReactor::new(event_bus.clone(), ReactorConfig::default()).with_store(event_store),
     );
-    let event_scheduler = Arc::new(EventScheduler::new(event_bus.clone(), SchedulerConfig::default()).with_pool(pool.clone()));
+    let event_scheduler = Arc::new(
+        EventScheduler::new(event_bus.clone(), SchedulerConfig::default()).with_pool(pool.clone()),
+    );
 
-    let trigger_rule_repo = Arc::new(
-        crate::adapters::sqlite::SqliteTriggerRuleRepository::new(pool.clone()),
-    );
+    let trigger_rule_repo = Arc::new(crate::adapters::sqlite::SqliteTriggerRuleRepository::new(
+        pool.clone(),
+    ));
 
     let trajectory_repo = Arc::new(SqliteTrajectoryRepository::new(pool.clone()));
     let overseer_cluster = Arc::new(build_rust_overseer_cluster());
 
     Ok(SwarmOrchestrator::new(
-        goal_repo, task_repo, worktree_repo, agent_repo, substrate.clone(), config,
-        event_bus, event_reactor, event_scheduler,
+        goal_repo,
+        task_repo,
+        worktree_repo,
+        agent_repo,
+        substrate.clone(),
+        config,
+        event_bus,
+        event_reactor,
+        event_scheduler,
     )
     .with_memory_repo(memory_repo)
     .with_trigger_rule_repo(trigger_rule_repo)
@@ -270,7 +286,8 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
                 dangerously_skip_permissions,
                 no_worktrees,
                 dag,
-            ).await
+            )
+            .await
         }
         SwarmCommand::Stop => stop_swarm(json_mode).await,
         SwarmCommand::Status => show_status(json_mode).await,
@@ -278,27 +295,24 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
         SwarmCommand::Config => show_config(json_mode).await,
         SwarmCommand::Tick => run_tick(json_mode).await,
         SwarmCommand::Escalations => show_escalations(json_mode).await,
-        SwarmCommand::Respond { id, decision, message } => {
-            respond_to_escalation(&id, &decision, message.as_deref(), json_mode).await
-        }
-        SwarmCommand::Connect { url, auto_connect, max_concurrent, yes } => {
-            federation_connect(&url, auto_connect, max_concurrent, yes, json_mode).await
-        }
-        SwarmCommand::Disconnect { id } => {
-            federation_disconnect(&id, json_mode).await
-        }
-        SwarmCommand::Cerebrates { id } => {
-            federation_cerebrates(id.as_deref(), json_mode).await
-        }
-        SwarmCommand::Hive => {
-            federation_hive(json_mode).await
-        }
-        SwarmCommand::Dag { command } => {
-            match command {
-                DagCommand::Create { file } => dag_create(&file, json_mode).await,
-                DagCommand::Status => dag_status(json_mode).await,
-            }
-        }
+        SwarmCommand::Respond {
+            id,
+            decision,
+            message,
+        } => respond_to_escalation(&id, &decision, message.as_deref(), json_mode).await,
+        SwarmCommand::Connect {
+            url,
+            auto_connect,
+            max_concurrent,
+            yes,
+        } => federation_connect(&url, auto_connect, max_concurrent, yes, json_mode).await,
+        SwarmCommand::Disconnect { id } => federation_disconnect(&id, json_mode).await,
+        SwarmCommand::Cerebrates { id } => federation_cerebrates(id.as_deref(), json_mode).await,
+        SwarmCommand::Hive => federation_hive(json_mode).await,
+        SwarmCommand::Dag { command } => match command {
+            DagCommand::Create { file } => dag_create(&file, json_mode).await,
+            DagCommand::Status => dag_status(json_mode).await,
+        },
     }
 }
 
@@ -429,10 +443,33 @@ async fn start_swarm(
 
     if foreground {
         // Run in foreground (original behavior)
-        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions, no_worktrees, dag.as_deref()).await
+        run_swarm_foreground(
+            max_agents,
+            dry_run,
+            json_mode,
+            mcp_urls,
+            with_mcp_servers,
+            &default_execution_mode,
+            workflow.as_deref(),
+            dangerously_skip_permissions,
+            no_worktrees,
+            dag.as_deref(),
+        )
+        .await
     } else {
         // Background the swarm
-        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions, no_worktrees, dag.as_deref())
+        start_swarm_background(
+            max_agents,
+            dry_run,
+            json_mode,
+            mcp_urls,
+            with_mcp_servers,
+            &default_execution_mode,
+            workflow.as_deref(),
+            dangerously_skip_permissions,
+            no_worktrees,
+            dag.as_deref(),
+        )
     }
 }
 
@@ -480,7 +517,8 @@ fn start_swarm_background(
     if with_mcp_servers {
         cmd.arg("--with-mcp-servers");
     }
-    cmd.arg("--default-execution-mode").arg(default_execution_mode);
+    cmd.arg("--default-execution-mode")
+        .arg(default_execution_mode);
     if let Some(wf) = workflow {
         cmd.arg("--workflow").arg(wf);
     }
@@ -558,15 +596,11 @@ async fn stop_swarm(json_mode: bool) -> Result<()> {
             #[cfg(unix)]
             {
                 use std::process::Command;
-                let status = Command::new("kill")
-                    .arg(pid.to_string())
-                    .status()?;
+                let status = Command::new("kill").arg(pid.to_string()).status()?;
 
                 if !status.success() {
                     // Try SIGKILL if SIGTERM didn't work
-                    let _ = Command::new("kill")
-                        .args(["-9", &pid.to_string()])
-                        .status();
+                    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
                 }
             }
             #[cfg(not(unix))]
@@ -619,9 +653,7 @@ async fn run_swarm_foreground(
     no_worktrees: bool,
     dag_file: Option<&str>,
 ) -> Result<()> {
-    use crate::adapters::sqlite::{
-        create_pool, Migrator, all_embedded_migrations,
-    };
+    use crate::adapters::sqlite::{Migrator, all_embedded_migrations, create_pool};
     use crate::adapters::substrates::SubstrateRegistry;
     use crate::domain::models::{ExecutionMode, SubstrateType};
     use crate::services::McpServerConfig;
@@ -637,7 +669,9 @@ async fn run_swarm_foreground(
     // Initialize database
     let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
     let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
+    migrator
+        .run_embedded_migrations(all_embedded_migrations())
+        .await?;
 
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
@@ -674,12 +708,16 @@ async fn run_swarm_foreground(
     };
 
     let execution_mode = match default_execution_mode.to_lowercase().as_str() {
-        "convergent" => Some(ExecutionMode::Convergent { parallel_samples: None }),
+        "convergent" => Some(ExecutionMode::Convergent {
+            parallel_samples: None,
+        }),
         "direct" => Some(ExecutionMode::Direct),
         "auto" | "none" => None,
         other => {
             tracing::warn!("Unknown execution mode '{}', using convergent", other);
-            Some(ExecutionMode::Convergent { parallel_samples: None })
+            Some(ExecutionMode::Convergent {
+                parallel_samples: None,
+            })
         }
     };
 
@@ -726,17 +764,27 @@ async fn run_swarm_foreground(
         all_workflows,
         dangerously_skip_permissions,
         polling: app_config.polling,
-        use_worktrees: if no_worktrees { false } else { app_config.worktrees.enabled },
+        use_worktrees: if no_worktrees {
+            false
+        } else {
+            app_config.worktrees.enabled
+        },
         overmind_max_turns: Some(app_config.overmind.max_turns),
         fetch_on_sync: app_config.worktrees.fetch_on_sync,
         ..Default::default()
     };
 
-    tracing::info!(use_worktrees = config.use_worktrees, "Swarm config: worktrees");
+    tracing::info!(
+        use_worktrees = config.use_worktrees,
+        "Swarm config: worktrees"
+    );
 
     // Create shared EventBus with persistence for reactive event system
     let event_store: Arc<dyn crate::services::event_store::EventStore> =
-        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(pool.clone(), crate::services::crypto::load_encryptor_from_env()));
+        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(
+            pool.clone(),
+            crate::services::crypto::load_encryptor_from_env(),
+        ));
     let event_bus = Arc::new(
         crate::services::EventBus::new(crate::services::EventBusConfig {
             persist_events: true,
@@ -749,8 +797,11 @@ async fn run_swarm_foreground(
     // Built-in handlers and schedules are registered by the orchestrator
     // in its run() method via register_builtin_handlers/register_builtin_schedules.
     let reactor = Arc::new(
-        crate::services::EventReactor::new(event_bus.clone(), crate::services::ReactorConfig::default())
-            .with_store(event_store),
+        crate::services::EventReactor::new(
+            event_bus.clone(),
+            crate::services::ReactorConfig::default(),
+        )
+        .with_store(event_store),
     );
 
     let scheduler = Arc::new(
@@ -761,9 +812,9 @@ async fn run_swarm_foreground(
         .with_pool(pool.clone()),
     );
 
-    let trigger_rule_repo = Arc::new(
-        crate::adapters::sqlite::SqliteTriggerRuleRepository::new(pool.clone()),
-    );
+    let trigger_rule_repo = Arc::new(crate::adapters::sqlite::SqliteTriggerRuleRepository::new(
+        pool.clone(),
+    ));
 
     let trajectory_repo = Arc::new(SqliteTrajectoryRepository::new(pool.clone()));
     let overseer_cluster = Arc::new(build_rust_overseer_cluster());
@@ -800,21 +851,27 @@ async fn run_swarm_foreground(
 
     // Wire up budget-aware scheduling using thresholds from abathur.toml [budget] section
     let orchestrator = {
-        let tracker_config = crate::services::budget_tracker::BudgetTrackerConfig::from_budget_config(&app_config.budget);
-        let tracker = std::sync::Arc::new(
-            crate::services::budget_tracker::BudgetTracker::new(tracker_config, event_bus.clone())
-        );
+        let tracker_config =
+            crate::services::budget_tracker::BudgetTrackerConfig::from_budget_config(
+                &app_config.budget,
+            );
+        let tracker = std::sync::Arc::new(crate::services::budget_tracker::BudgetTracker::new(
+            tracker_config,
+            event_bus.clone(),
+        ));
         orchestrator.with_budget_tracker(tracker)
     };
 
     // Wire up quiet-window scheduling from [scheduling] + [[quiet_windows]] config
     let orchestrator = if app_config.scheduling.quiet_hours_enabled {
-        let qw_repo = Arc::new(
-            crate::adapters::sqlite::SqliteQuietWindowRepository::new(pool.clone()),
-        );
+        let qw_repo = Arc::new(crate::adapters::sqlite::SqliteQuietWindowRepository::new(
+            pool.clone(),
+        ));
         // Seed config-defined windows into the database (upsert by name)
         for wc in &app_config.quiet_windows {
-            let tz = wc.timezone.as_deref()
+            let tz = wc
+                .timezone
+                .as_deref()
                 .unwrap_or(&app_config.scheduling.default_timezone);
             let desc = wc.description.as_deref().unwrap_or("");
             use crate::domain::ports::QuietWindowRepository;
@@ -830,7 +887,11 @@ async fn run_swarm_foreground(
                 }
                 Ok(None) => {
                     let window = crate::domain::models::quiet_window::QuietWindow::new(
-                        &wc.name, desc, &wc.start_cron, &wc.end_cron, tz,
+                        &wc.name,
+                        desc,
+                        &wc.start_cron,
+                        &wc.end_cron,
+                        tz,
                     );
                     if let Err(e) = qw_repo.create(&window).await {
                         tracing::warn!(name = %wc.name, error = %e, "Failed to create quiet window from config");
@@ -841,9 +902,7 @@ async fn run_swarm_foreground(
                 }
             }
         }
-        let cws = Arc::new(
-            crate::services::cost_window_service::CostWindowService::new(qw_repo),
-        );
+        let cws = Arc::new(crate::services::cost_window_service::CostWindowService::new(qw_repo));
         if let Err(e) = cws.reload_windows().await {
             tracing::warn!(error = %e, "Failed to load quiet windows into cache");
         }
@@ -855,9 +914,10 @@ async fn run_swarm_foreground(
     // Wire federation if enabled in config.
     let fed_config = app_config.federation.clone();
     let orchestrator = if fed_config.enabled {
-        let federation_service = Arc::new(
-            crate::services::federation::FederationService::new(fed_config.clone(), event_bus.clone()),
-        );
+        let federation_service = Arc::new(crate::services::federation::FederationService::new(
+            fed_config.clone(),
+            event_bus.clone(),
+        ));
 
         // Register and auto-connect configured cerebrates.
         for cc in &fed_config.cerebrates {
@@ -865,9 +925,10 @@ async fn run_swarm_foreground(
                 .register_cerebrate(&cc.id, &cc.display_name, &cc.url)
                 .await;
             if cc.auto_connect
-                && let Err(e) = federation_service.connect(&cc.id).await {
-                    tracing::warn!(cerebrate_id = %cc.id, error = %e, "Federation auto-connect failed");
-                }
+                && let Err(e) = federation_service.connect(&cc.id).await
+            {
+                tracing::warn!(cerebrate_id = %cc.id, error = %e, "Federation auto-connect failed");
+            }
         }
 
         // Start federation background loops (heartbeat, stall/orphan detection).
@@ -888,7 +949,10 @@ async fn run_swarm_foreground(
         if dangerously_skip_permissions {
             println!("   Permissions: SKIPPED (dangerously-skip-permissions)");
         }
-        if mcp_urls.memory_server.is_some() || mcp_urls.tasks_server.is_some() || mcp_urls.a2a_gateway.is_some() {
+        if mcp_urls.memory_server.is_some()
+            || mcp_urls.tasks_server.is_some()
+            || mcp_urls.a2a_gateway.is_some()
+        {
             println!("   MCP Servers:");
             if let Some(ref url) = mcp_urls.memory_server {
                 println!("      Memory: {}", url);
@@ -912,7 +976,10 @@ async fn run_swarm_foreground(
     match orchestrator.cold_start().await {
         Ok(Some(report)) => {
             if !json_mode {
-                println!("Cold start complete: {} memories created", report.memories_created);
+                println!(
+                    "Cold start complete: {} memories created",
+                    report.memories_created
+                );
                 println!("   Project type: {}", report.project_type);
             }
         }
@@ -954,22 +1021,22 @@ async fn run_swarm_foreground(
         if let Err(e) = orchestrator
             .start_convergence_poller(a2a_client, federated_goal_repo)
             .await
-            && !json_mode {
-                println!("Warning: Failed to start convergence poller: {}", e);
-            }
+            && !json_mode
+        {
+            println!("Warning: Failed to start convergence poller: {}", e);
+        }
 
         // Cerebrate: start convergence publisher (no-op if role is Overmind).
         // The publisher needs the A2A gateway's in-memory task map. If an A2A
         // gateway is running in-process we would share its task map here.
         // For now, create a standalone task map — the A2A gateway integration
         // will unify these when running embedded.
-        let a2a_tasks = Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        ));
+        let a2a_tasks = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         if let Err(e) = orchestrator.start_convergence_publisher(a2a_tasks).await
-            && !json_mode {
-                println!("Warning: Failed to start convergence publisher: {}", e);
-            }
+            && !json_mode
+        {
+            println!("Warning: Failed to start convergence publisher: {}", e);
+        }
     }
 
     // If a DAG file was provided, parse it, create the parent goal, register
@@ -977,7 +1044,7 @@ async fn run_swarm_foreground(
     // federation pipeline drives DAG progression alongside normal goal processing.
     if let Some(dag_path) = dag_file {
         use crate::domain::models::goal::GoalPriority;
-        use crate::services::federation::{SwarmDagExecutor, SwarmDagEventHandler};
+        use crate::services::federation::{SwarmDagEventHandler, SwarmDagExecutor};
         use crate::services::goal_service::GoalService;
 
         let federation_service = orchestrator
@@ -1015,7 +1082,11 @@ async fn run_swarm_foreground(
             .map_err(|e| anyhow::anyhow!("Failed to start DAG execution: {}", e))?;
 
         if !json_mode {
-            println!("DAG '{}' started ({} root nodes delegated)", dag.name, delegated.len());
+            println!(
+                "DAG '{}' started ({} root nodes delegated)",
+                dag.name,
+                delegated.len()
+            );
             print_dag_nodes(&dag);
             println!();
         }
@@ -1033,11 +1104,7 @@ async fn run_swarm_foreground(
             map
         }));
 
-        let dag_handler = SwarmDagEventHandler::new(
-            swarm_dags,
-            executor,
-            placeholder_goals,
-        );
+        let dag_handler = SwarmDagEventHandler::new(swarm_dags, executor, placeholder_goals);
         reactor.register(Arc::new(dag_handler)).await;
     }
 
@@ -1058,14 +1125,23 @@ async fn run_swarm_foreground(
                         println!("Goal started: {} ({})", goal_name, goal_id);
                     }
                 }
-                SwarmEvent::GoalDecomposed { goal_id, task_count } => {
+                SwarmEvent::GoalDecomposed {
+                    goal_id,
+                    task_count,
+                } => {
                     if !json_mode {
                         println!("  Goal decomposed into {} tasks ({})", task_count, goal_id);
                     }
                 }
-                SwarmEvent::GoalIterationCompleted { goal_id, tasks_completed } => {
+                SwarmEvent::GoalIterationCompleted {
+                    goal_id,
+                    tasks_completed,
+                } => {
                     if !json_mode {
-                        println!("Goal iteration completed: {} ({} tasks done)", goal_id, tasks_completed);
+                        println!(
+                            "Goal iteration completed: {} ({} tasks done)",
+                            goal_id, tasks_completed
+                        );
                     }
                 }
                 SwarmEvent::GoalPaused { goal_id, reason } => {
@@ -1073,22 +1149,39 @@ async fn run_swarm_foreground(
                         println!("Goal paused: {} - {}", goal_id, reason);
                     }
                 }
-                SwarmEvent::TaskSubmitted { task_id, task_title, goal_id } => {
+                SwarmEvent::TaskSubmitted {
+                    task_id,
+                    task_title,
+                    goal_id,
+                } => {
                     if !json_mode {
                         match goal_id {
-                            Some(gid) => println!("  Task created: {} ({}) for goal {}", task_title, task_id, gid),
+                            Some(gid) => println!(
+                                "  Task created: {} ({}) for goal {}",
+                                task_title, task_id, gid
+                            ),
                             None => println!("  Task created: {} ({})", task_title, task_id),
                         }
                     }
                 }
-                SwarmEvent::TaskReady { task_id, task_title } => {
+                SwarmEvent::TaskReady {
+                    task_id,
+                    task_title,
+                } => {
                     if !json_mode {
                         println!("  Task ready: {} ({})", task_title, task_id);
                     }
                 }
-                SwarmEvent::TaskSpawned { task_id, task_title, agent_type } => {
+                SwarmEvent::TaskSpawned {
+                    task_id,
+                    task_title,
+                    agent_type,
+                } => {
                     if !json_mode {
-                        println!("  Task started: {} ({}) [agent: {:?}]", task_title, task_id, agent_type);
+                        println!(
+                            "  Task started: {} ({}) [agent: {:?}]",
+                            task_title, task_id, agent_type
+                        );
                     }
                 }
                 SwarmEvent::WorktreeCreated { task_id, path } => {
@@ -1096,31 +1189,56 @@ async fn run_swarm_foreground(
                         println!("  Worktree created: {} -> {}", task_id, path);
                     }
                 }
-                SwarmEvent::TaskCompleted { task_id, tokens_used } => {
+                SwarmEvent::TaskCompleted {
+                    task_id,
+                    tokens_used,
+                } => {
                     if !json_mode {
                         println!("  Task completed: {} (tokens: {})", task_id, tokens_used);
                     }
                 }
-                SwarmEvent::TaskFailed { task_id, error, retry_count } => {
+                SwarmEvent::TaskFailed {
+                    task_id,
+                    error,
+                    retry_count,
+                } => {
                     if !json_mode {
-                        println!("  Task failed: {} - {} (attempt {})", task_id, error, retry_count);
+                        println!(
+                            "  Task failed: {} - {} (attempt {})",
+                            task_id, error, retry_count
+                        );
                     }
                 }
-                SwarmEvent::TaskRetrying { task_id, attempt, max_attempts } => {
+                SwarmEvent::TaskRetrying {
+                    task_id,
+                    attempt,
+                    max_attempts,
+                } => {
                     if !json_mode {
-                        println!("  Task retrying: {} (attempt {}/{})", task_id, attempt, max_attempts);
+                        println!(
+                            "  Task retrying: {} (attempt {}/{})",
+                            task_id, attempt, max_attempts
+                        );
                     }
                 }
-                SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total, failures_summary } => {
+                SwarmEvent::TaskVerified {
+                    task_id,
+                    passed,
+                    checks_passed,
+                    checks_total,
+                    failures_summary,
+                } => {
                     if !json_mode {
                         let status = if *passed { "passed" } else { "failed" };
-                        println!("  Task verified: {} - {} ({}/{})", task_id, status, checks_passed, checks_total);
-                        if !passed
-                            && let Some(summary) = failures_summary {
-                                for line in summary.lines() {
-                                    println!("    FAILED CHECK: {}", line);
-                                }
+                        println!(
+                            "  Task verified: {} - {} ({}/{})",
+                            task_id, status, checks_passed, checks_total
+                        );
+                        if !passed && let Some(summary) = failures_summary {
+                            for line in summary.lines() {
+                                println!("    FAILED CHECK: {}", line);
                             }
+                        }
                     }
                 }
                 SwarmEvent::TaskQueuedForMerge { task_id, stage } => {
@@ -1128,31 +1246,62 @@ async fn run_swarm_foreground(
                         println!("  Task queued for merge: {} (stage: {})", task_id, stage);
                     }
                 }
-                SwarmEvent::PullRequestCreated { task_id, pr_url, branch } => {
+                SwarmEvent::PullRequestCreated {
+                    task_id,
+                    pr_url,
+                    branch,
+                } => {
                     if !json_mode {
-                        println!("  PR created: {} (branch: {}, url: {})", task_id, branch, pr_url);
+                        println!(
+                            "  PR created: {} (branch: {}, url: {})",
+                            task_id, branch, pr_url
+                        );
                     }
                 }
-                SwarmEvent::TaskMerged { task_id, commit_sha } => {
+                SwarmEvent::TaskMerged {
+                    task_id,
+                    commit_sha,
+                } => {
                     if !json_mode {
                         println!("  Task merged: {} (commit: {})", task_id, commit_sha);
                     }
                 }
-                SwarmEvent::EvolutionTriggered { template_name, trigger } => {
+                SwarmEvent::EvolutionTriggered {
+                    template_name,
+                    trigger,
+                } => {
                     if !json_mode {
                         println!("  Evolution triggered: {} - {}", template_name, trigger);
                     }
                 }
-                SwarmEvent::SpecialistSpawned { specialist_type, trigger, task_id } => {
+                SwarmEvent::SpecialistSpawned {
+                    specialist_type,
+                    trigger,
+                    task_id,
+                } => {
                     if !json_mode {
-                        let task_info = task_id.map(|id| format!(" (task: {})", id)).unwrap_or_default();
-                        println!("  Specialist spawned: {} - {}{}", specialist_type, trigger, task_info);
+                        let task_info = task_id
+                            .map(|id| format!(" (task: {})", id))
+                            .unwrap_or_default();
+                        println!(
+                            "  Specialist spawned: {} - {}{}",
+                            specialist_type, trigger, task_info
+                        );
                     }
                 }
-                SwarmEvent::GoalAlignmentEvaluated { task_id, overall_score, passes } => {
+                SwarmEvent::GoalAlignmentEvaluated {
+                    task_id,
+                    overall_score,
+                    passes,
+                } => {
                     if !json_mode {
                         let status = if *passes { "aligned" } else { "misaligned" };
-                        println!("  Goal alignment: {} - {} ({:.0}%)", task_id, status, overall_score * 100.0);
+                        println!(
+                            "  Goal alignment: {} - {} ({:.0}%)",
+                            task_id,
+                            status,
+                            overall_score * 100.0
+                        );
                     }
                 }
                 SwarmEvent::RestructureTriggered { task_id, decision } => {
@@ -1160,10 +1309,17 @@ async fn run_swarm_foreground(
                         println!("  DAG restructure: {} - {}", task_id, decision);
                     }
                 }
-                SwarmEvent::SpawnLimitExceeded { parent_task_id, limit_type, current_value, limit_value } => {
+                SwarmEvent::SpawnLimitExceeded {
+                    parent_task_id,
+                    limit_type,
+                    current_value,
+                    limit_value,
+                } => {
                     if !json_mode {
-                        println!("  Spawn limit exceeded: task {} - {} ({}/{})",
-                            parent_task_id, limit_type, current_value, limit_value);
+                        println!(
+                            "  Spawn limit exceeded: task {} - {} ({}/{})",
+                            parent_task_id, limit_type, current_value, limit_value
+                        );
                     }
                 }
                 SwarmEvent::AgentCreated { agent_type, tier } => {
@@ -1173,8 +1329,10 @@ async fn run_swarm_foreground(
                 }
                 SwarmEvent::StatusUpdate(stats) => {
                     if !json_mode && stats.active_goals > 0 {
-                        println!("Status: {} active goals, {} running tasks, {} tokens used",
-                            stats.active_goals, stats.running_tasks, stats.total_tokens_used);
+                        println!(
+                            "Status: {} active goals, {} running tasks, {} tokens used",
+                            stats.active_goals, stats.running_tasks, stats.total_tokens_used
+                        );
                     }
                 }
                 SwarmEvent::Paused => {
@@ -1195,7 +1353,10 @@ async fn run_swarm_foreground(
                 }
                 SwarmEvent::IntentVerificationStarted { goal_id, iteration } => {
                     if !json_mode {
-                        println!("  Intent verification started: goal {} (iteration {})", goal_id, iteration);
+                        println!(
+                            "  Intent verification started: goal {} (iteration {})",
+                            goal_id, iteration
+                        );
                     }
                 }
                 SwarmEvent::IntentVerificationCompleted {
@@ -1210,7 +1371,12 @@ async fn run_swarm_foreground(
                         let retry_status = if *will_retry { "will retry" } else { "final" };
                         println!(
                             "  Intent verification: goal {} - {} (confidence: {:.0}%, {} gaps, iteration {}) [{}]",
-                            goal_id, satisfaction, confidence * 100.0, gaps_count, iteration, retry_status
+                            goal_id,
+                            satisfaction,
+                            confidence * 100.0,
+                            gaps_count,
+                            iteration,
+                            retry_status
                         );
                     }
                 }
@@ -1221,7 +1387,11 @@ async fn run_swarm_foreground(
                     final_satisfaction,
                 } => {
                     if !json_mode {
-                        let status = if *converged { "CONVERGED" } else { "NOT CONVERGED" };
+                        let status = if *converged {
+                            "CONVERGED"
+                        } else {
+                            "NOT CONVERGED"
+                        };
                         println!(
                             "  Convergence loop completed: goal {} - {} after {} iterations ({})",
                             goal_id, status, iterations, final_satisfaction
@@ -1259,7 +1429,11 @@ async fn run_swarm_foreground(
                     allows_continuation,
                 } => {
                     if !json_mode {
-                        let cont_str = if *allows_continuation { "continuing" } else { "halted" };
+                        let cont_str = if *allows_continuation {
+                            "continuing"
+                        } else {
+                            "halted"
+                        };
                         println!(
                             "  Human response received for {}: {} - {}",
                             escalation_id, decision, cont_str
@@ -1273,7 +1447,8 @@ async fn run_swarm_foreground(
                     if !json_mode {
                         println!(
                             "  Branch verification started: {} branch tasks, {} waiting",
-                            branch_task_ids.len(), waiting_task_ids.len()
+                            branch_task_ids.len(),
+                            waiting_task_ids.len()
                         );
                     }
                 }
@@ -1283,8 +1458,16 @@ async fn run_swarm_foreground(
                     gaps_count,
                 } => {
                     if !json_mode {
-                        let status = if *branch_satisfied { "✓ satisfied" } else { "✗ not satisfied" };
-                        let proceed = if *dependents_can_proceed { "proceeding" } else { "blocked" };
+                        let status = if *branch_satisfied {
+                            "✓ satisfied"
+                        } else {
+                            "✗ not satisfied"
+                        };
+                        let proceed = if *dependents_can_proceed {
+                            "proceeding"
+                        } else {
+                            "blocked"
+                        };
                         println!(
                             "  Branch verification completed: {} ({} gaps) - dependents {}",
                             status, gaps_count, proceed
@@ -1307,14 +1490,24 @@ async fn run_swarm_foreground(
                         }
                     }
                 }
-                SwarmEvent::TaskClaimed { task_id, agent_type } => {
+                SwarmEvent::TaskClaimed {
+                    task_id,
+                    agent_type,
+                } => {
                     if !json_mode {
                         println!("  Task claimed: {} by agent '{}'", task_id, agent_type);
                     }
                 }
-                SwarmEvent::AgentInstanceCompleted { instance_id, task_id, tokens_used } => {
+                SwarmEvent::AgentInstanceCompleted {
+                    instance_id,
+                    task_id,
+                    tokens_used,
+                } => {
                     if !json_mode {
-                        println!("  Agent instance completed: {} for task {} ({} tokens)", instance_id, task_id, tokens_used);
+                        println!(
+                            "  Agent instance completed: {} for task {} ({} tokens)",
+                            instance_id, task_id, tokens_used
+                        );
                     }
                 }
                 SwarmEvent::ReconciliationCompleted { corrections_made } => {
@@ -1322,63 +1515,138 @@ async fn run_swarm_foreground(
                         println!("  Reconciliation: {} corrections made", corrections_made);
                     }
                 }
-                SwarmEvent::SubtaskMergedToFeature { task_id, feature_branch } => {
+                SwarmEvent::SubtaskMergedToFeature {
+                    task_id,
+                    feature_branch,
+                } => {
                     if !json_mode {
-                        println!("  Subtask merged to feature: {} → {}", task_id, feature_branch);
+                        println!(
+                            "  Subtask merged to feature: {} → {}",
+                            task_id, feature_branch
+                        );
                     }
                 }
                 // Federation events
-                SwarmEvent::FederationCerebrateConnected { cerebrate_id, capabilities } => {
+                SwarmEvent::FederationCerebrateConnected {
+                    cerebrate_id,
+                    capabilities,
+                } => {
                     if !json_mode {
-                        println!("  🌐 Cerebrate connected: {} (capabilities: {})", cerebrate_id, capabilities.join(", "));
+                        println!(
+                            "  🌐 Cerebrate connected: {} (capabilities: {})",
+                            cerebrate_id,
+                            capabilities.join(", ")
+                        );
                     }
                 }
-                SwarmEvent::FederationCerebrateDisconnected { cerebrate_id, reason } => {
+                SwarmEvent::FederationCerebrateDisconnected {
+                    cerebrate_id,
+                    reason,
+                } => {
                     if !json_mode {
                         println!("  🌐 Cerebrate disconnected: {} ({})", cerebrate_id, reason);
                     }
                 }
-                SwarmEvent::FederationTaskDelegated { task_id, cerebrate_id } => {
+                SwarmEvent::FederationTaskDelegated {
+                    task_id,
+                    cerebrate_id,
+                } => {
                     if !json_mode {
                         println!("  🌐 Task delegated: {} → {}", task_id, cerebrate_id);
                     }
                 }
-                SwarmEvent::FederationTaskAccepted { task_id, cerebrate_id } => {
+                SwarmEvent::FederationTaskAccepted {
+                    task_id,
+                    cerebrate_id,
+                } => {
                     if !json_mode {
                         println!("  🌐 Task accepted: {} by {}", task_id, cerebrate_id);
                     }
                 }
-                SwarmEvent::FederationTaskRejected { task_id, cerebrate_id, reason } => {
+                SwarmEvent::FederationTaskRejected {
+                    task_id,
+                    cerebrate_id,
+                    reason,
+                } => {
                     if !json_mode {
-                        println!("  🌐 Task rejected: {} by {} ({})", task_id, cerebrate_id, reason);
+                        println!(
+                            "  🌐 Task rejected: {} by {} ({})",
+                            task_id, cerebrate_id, reason
+                        );
                     }
                 }
-                SwarmEvent::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary } => {
+                SwarmEvent::FederationProgressReceived {
+                    task_id,
+                    cerebrate_id,
+                    phase,
+                    progress_pct,
+                    summary,
+                } => {
                     if !json_mode {
-                        println!("  🌐 Progress: {} from {} — {} ({:.0}%): {}", task_id, cerebrate_id, phase, progress_pct * 100.0, summary);
+                        println!(
+                            "  🌐 Progress: {} from {} — {} ({:.0}%): {}",
+                            task_id,
+                            cerebrate_id,
+                            phase,
+                            progress_pct * 100.0,
+                            summary
+                        );
                     }
                 }
-                SwarmEvent::FederationResultReceived { task_id, cerebrate_id, status, summary, .. } => {
+                SwarmEvent::FederationResultReceived {
+                    task_id,
+                    cerebrate_id,
+                    status,
+                    summary,
+                    ..
+                } => {
                     if !json_mode {
-                        println!("  🌐 Result: {} from {} — {}: {}", task_id, cerebrate_id, status, summary);
+                        println!(
+                            "  🌐 Result: {} from {} — {}: {}",
+                            task_id, cerebrate_id, status, summary
+                        );
                     }
                 }
-                SwarmEvent::FederationHeartbeatMissed { cerebrate_id, missed_count } => {
+                SwarmEvent::FederationHeartbeatMissed {
+                    cerebrate_id,
+                    missed_count,
+                } => {
                     if !json_mode {
-                        println!("  ⚠️ Heartbeat missed: {} (count: {})", cerebrate_id, missed_count);
+                        println!(
+                            "  ⚠️ Heartbeat missed: {} (count: {})",
+                            cerebrate_id, missed_count
+                        );
                     }
                 }
-                SwarmEvent::FederationCerebrateUnreachable { cerebrate_id, in_flight_tasks } => {
+                SwarmEvent::FederationCerebrateUnreachable {
+                    cerebrate_id,
+                    in_flight_tasks,
+                } => {
                     if !json_mode {
-                        println!("  ❌ Cerebrate unreachable: {} ({} in-flight tasks)", cerebrate_id, in_flight_tasks.len());
+                        println!(
+                            "  ❌ Cerebrate unreachable: {} ({} in-flight tasks)",
+                            cerebrate_id,
+                            in_flight_tasks.len()
+                        );
                     }
                 }
-                SwarmEvent::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs } => {
+                SwarmEvent::FederationStallDetected {
+                    task_id,
+                    cerebrate_id,
+                    stall_duration_secs,
+                } => {
                     if !json_mode {
-                        println!("  ⚠️ Stall detected: task {} on {} ({}s with no progress)", task_id, cerebrate_id, stall_duration_secs);
+                        println!(
+                            "  ⚠️ Stall detected: task {} on {} ({}s with no progress)",
+                            task_id, cerebrate_id, stall_duration_secs
+                        );
                     }
                 }
-                SwarmEvent::FederationReactionEmitted { reaction_type, description, .. } => {
+                SwarmEvent::FederationReactionEmitted {
+                    reaction_type,
+                    description,
+                    ..
+                } => {
                     if !json_mode {
                         println!("  🌐 Reaction [{}]: {}", reaction_type, description);
                     }
@@ -1431,10 +1699,13 @@ async fn start_mcp_servers(
     urls: &McpServerUrls,
     json_mode: bool,
 ) -> Result<McpServerHandles> {
-    use crate::adapters::mcp::{MemoryHttpServer, MemoryHttpConfig, TasksHttpServer, TasksHttpConfig, A2AHttpGateway, A2AHttpConfig, EventsHttpServer, EventsHttpConfig};
+    use crate::adapters::mcp::{
+        A2AHttpConfig, A2AHttpGateway, EventsHttpConfig, EventsHttpServer, MemoryHttpConfig,
+        MemoryHttpServer, TasksHttpConfig, TasksHttpServer,
+    };
     use crate::adapters::sqlite::SqliteEventRepository;
     use crate::services::command_bus::CommandBus;
-    use crate::services::{GoalService, MemoryService, TaskService, EventBus, EventBusConfig};
+    use crate::services::{EventBus, EventBusConfig, GoalService, MemoryService, TaskService};
 
     let mut handles = McpServerHandles {
         memory_handle: None,
@@ -1450,14 +1721,23 @@ async fn start_mcp_servers(
     let task_service = TaskService::new(task_repo);
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let goal_service = GoalService::new(goal_repo);
-    let mcp_event_bus = Arc::new(EventBus::new(EventBusConfig { persist_events: true, ..Default::default() }));
-    let outbox_repo = Arc::new(crate::adapters::sqlite::SqliteOutboxRepository::new(pool.clone()));
-    let command_bus = Arc::new(CommandBus::new(
-        Arc::new(task_service.clone()),
-        Arc::new(goal_service),
-        Arc::new(memory_service.clone()),
-        mcp_event_bus,
-    ).with_pool(pool.clone()).with_outbox(outbox_repo));
+    let mcp_event_bus = Arc::new(EventBus::new(EventBusConfig {
+        persist_events: true,
+        ..Default::default()
+    }));
+    let outbox_repo = Arc::new(crate::adapters::sqlite::SqliteOutboxRepository::new(
+        pool.clone(),
+    ));
+    let command_bus = Arc::new(
+        CommandBus::new(
+            Arc::new(task_service.clone()),
+            Arc::new(goal_service),
+            Arc::new(memory_service.clone()),
+            mcp_event_bus,
+        )
+        .with_pool(pool.clone())
+        .with_outbox(outbox_repo),
+    );
 
     // Start Memory HTTP server
     if let Some(ref url) = urls.memory_server {
@@ -1522,8 +1802,12 @@ async fn start_mcp_servers(
     // Start Events HTTP server
     if let Some(ref url) = urls.events_server {
         let port = extract_port(url).unwrap_or(9102);
-        let event_store = Arc::new(SqliteEventRepository::new(pool.clone(), crate::services::crypto::load_encryptor_from_env()));
-        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()).with_store(event_store.clone()));
+        let event_store = Arc::new(SqliteEventRepository::new(
+            pool.clone(),
+            crate::services::crypto::load_encryptor_from_env(),
+        ));
+        let event_bus =
+            Arc::new(EventBus::new(EventBusConfig::default()).with_store(event_store.clone()));
         let config = EventsHttpConfig {
             port,
             ..Default::default()
@@ -1571,7 +1855,10 @@ fn stop_mcp_servers(handles: McpServerHandles) {
 async fn show_status(json_mode: bool) -> Result<()> {
     use crate::adapters::sqlite::create_pool;
     use crate::domain::models::{GoalStatus, TaskStatus, WorktreeStatus};
-    use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, GoalFilter, MemoryRepository, TaskRepository, WorktreeRepository};
+    use crate::domain::ports::{
+        AgentFilter, AgentRepository, GoalFilter, GoalRepository, MemoryRepository, TaskRepository,
+        WorktreeRepository,
+    };
 
     // Check if swarm is running
     let (swarm_running, swarm_pid) = match check_existing_swarm() {
@@ -1588,10 +1875,19 @@ async fn show_status(json_mode: bool) -> Result<()> {
     let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
 
     // Get counts
-    let active_goals = goal_repo.list(GoalFilter { status: Some(GoalStatus::Active), ..Default::default() }).await?.len();
+    let active_goals = goal_repo
+        .list(GoalFilter {
+            status: Some(GoalStatus::Active),
+            ..Default::default()
+        })
+        .await?
+        .len();
     let pending_tasks = task_repo.list_by_status(TaskStatus::Pending).await?.len();
     let running_tasks = task_repo.list_by_status(TaskStatus::Running).await?.len();
-    let active_worktrees = worktree_repo.list_by_status(WorktreeStatus::Active).await?.len();
+    let active_worktrees = worktree_repo
+        .list_by_status(WorktreeStatus::Active)
+        .await?
+        .len();
 
     // Task breakdown
     let ready_tasks = task_repo.list_by_status(TaskStatus::Ready).await?.len();
@@ -1600,13 +1896,26 @@ async fn show_status(json_mode: bool) -> Result<()> {
 
     // Memory health
     let memory_tier_counts = memory_repo.count_by_tier().await.unwrap_or_default();
-    let working_memories = memory_tier_counts.get(&crate::domain::models::MemoryTier::Working).copied().unwrap_or(0);
-    let episodic_memories = memory_tier_counts.get(&crate::domain::models::MemoryTier::Episodic).copied().unwrap_or(0);
-    let semantic_memories = memory_tier_counts.get(&crate::domain::models::MemoryTier::Semantic).copied().unwrap_or(0);
+    let working_memories = memory_tier_counts
+        .get(&crate::domain::models::MemoryTier::Working)
+        .copied()
+        .unwrap_or(0);
+    let episodic_memories = memory_tier_counts
+        .get(&crate::domain::models::MemoryTier::Episodic)
+        .copied()
+        .unwrap_or(0);
+    let semantic_memories = memory_tier_counts
+        .get(&crate::domain::models::MemoryTier::Semantic)
+        .copied()
+        .unwrap_or(0);
     let total_memories = working_memories + episodic_memories + semantic_memories;
 
     // Agent templates
-    let agent_templates = agent_repo.list_templates(AgentFilter::default()).await.map(|t| t.len()).unwrap_or(0);
+    let agent_templates = agent_repo
+        .list_templates(AgentFilter::default())
+        .await
+        .map(|t| t.len())
+        .unwrap_or(0);
 
     let status = if swarm_running { "running" } else { "stopped" };
 
@@ -1622,7 +1931,11 @@ async fn show_status(json_mode: bool) -> Result<()> {
                             return None;
                         }
                         let role = f.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
-                        let cerebrates_count = f.get("cerebrates").and_then(|c| c.as_array()).map(|a| a.len()).unwrap_or(0);
+                        let cerebrates_count = f
+                            .get("cerebrates")
+                            .and_then(|c| c.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
                         Some((role.to_string(), cerebrates_count))
                     })
                 } else {
@@ -1696,7 +2009,10 @@ async fn show_status(json_mode: bool) -> Result<()> {
         println!();
         println!("Agent Templates:  {}", agent_templates);
         if let Some((role, cerebrate_count)) = federation_info {
-            println!("Federation:       {} ({} cerebrates)", role, cerebrate_count);
+            println!(
+                "Federation:       {} ({} cerebrates)",
+                role, cerebrate_count
+            );
         }
     }
 
@@ -1706,14 +2022,19 @@ async fn show_status(json_mode: bool) -> Result<()> {
 async fn show_active(json_mode: bool) -> Result<()> {
     use crate::adapters::sqlite::create_pool;
     use crate::domain::models::{GoalStatus, TaskStatus};
-    use crate::domain::ports::{GoalRepository, GoalFilter, TaskRepository};
+    use crate::domain::ports::{GoalFilter, GoalRepository, TaskRepository};
 
     let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
 
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
 
-    let active_goals = goal_repo.list(GoalFilter { status: Some(GoalStatus::Active), ..Default::default() }).await?;
+    let active_goals = goal_repo
+        .list(GoalFilter {
+            status: Some(GoalStatus::Active),
+            ..Default::default()
+        })
+        .await?;
     let running_tasks = task_repo.list_by_status(TaskStatus::Running).await?;
     let pending_tasks = task_repo.list_by_status(TaskStatus::Pending).await?;
 
@@ -1740,7 +2061,10 @@ async fn show_active(json_mode: bool) -> Result<()> {
 
         println!("\nRunning Tasks ({}):", running_tasks.len());
         for task in &running_tasks {
-            println!("  {} - {} [agent: {:?}]", task.id, task.title, task.agent_type);
+            println!(
+                "  {} - {} [agent: {:?}]",
+                task.id, task.title, task.agent_type
+            );
         }
 
         println!("\nPending Tasks: {}", pending_tasks.len());
@@ -1772,8 +2096,14 @@ async fn show_config(json_mode: bool) -> Result<()> {
         println!("Goal timeout (s):   {}", config.goal_timeout_secs);
         println!("Auto-retry:         {}", config.auto_retry);
         println!("Max task retries:   {}", config.max_task_retries);
-        println!("Reconciliation (s): {:?}", config.reconciliation_interval_secs);
-        println!("Skip permissions:   {}", config.dangerously_skip_permissions);
+        println!(
+            "Reconciliation (s): {:?}",
+            config.reconciliation_interval_secs
+        );
+        println!(
+            "Skip permissions:   {}",
+            config.dangerously_skip_permissions
+        );
     }
 
     Ok(())
@@ -1785,18 +2115,21 @@ async fn show_escalations(json_mode: bool) -> Result<()> {
     let escalations = orchestrator.list_pending_escalations().await;
 
     if json_mode {
-        let output: Vec<serde_json::Value> = escalations.iter().map(|e| {
-            serde_json::json!({
-                "id": e.id.to_string(),
-                "goal_id": e.goal_id.map(|id| id.to_string()),
-                "task_id": e.task_id.map(|id| id.to_string()),
-                "reason": e.escalation.reason,
-                "urgency": e.escalation.urgency.as_str(),
-                "questions": e.escalation.questions,
-                "is_blocking": e.is_blocking(),
-                "created_at": e.created_at.to_rfc3339(),
+        let output: Vec<serde_json::Value> = escalations
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id.to_string(),
+                    "goal_id": e.goal_id.map(|id| id.to_string()),
+                    "task_id": e.task_id.map(|id| id.to_string()),
+                    "reason": e.escalation.reason,
+                    "urgency": e.escalation.urgency.as_str(),
+                    "questions": e.escalation.questions,
+                    "is_blocking": e.is_blocking(),
+                    "created_at": e.created_at.to_rfc3339(),
+                })
             })
-        }).collect();
+            .collect();
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else if escalations.is_empty() {
         println!("No pending escalations.");
@@ -1827,7 +2160,12 @@ async fn show_escalations(json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, json_mode: bool) -> Result<()> {
+async fn respond_to_escalation(
+    id: &str,
+    decision: &str,
+    message: Option<&str>,
+    json_mode: bool,
+) -> Result<()> {
     use crate::adapters::sqlite::create_pool;
     use crate::cli::id_resolver::resolve_event_id;
     use crate::domain::models::{EscalationDecision, HumanEscalationResponse};
@@ -1843,10 +2181,15 @@ async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, 
             let clarification = message.unwrap_or("").to_string();
             EscalationDecision::Clarify { clarification }
         }
-        "defer" => EscalationDecision::Defer { revisit_after: None },
-        other => return Err(anyhow::anyhow!(
-            "Unknown decision '{}'. Valid options: accept, reject, clarify, abort, defer", other
-        )),
+        "defer" => EscalationDecision::Defer {
+            revisit_after: None,
+        },
+        other => {
+            return Err(anyhow::anyhow!(
+                "Unknown decision '{}'. Valid options: accept, reject, clarify, abort, defer",
+                other
+            ));
+        }
     };
 
     let response = HumanEscalationResponse {
@@ -1862,21 +2205,27 @@ async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, 
     match orchestrator.respond_to_escalation(response, None).await {
         Ok(()) => {
             if json_mode {
-                println!("{}", serde_json::json!({
-                    "status": "ok",
-                    "escalation_id": id,
-                    "decision": decision,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "ok",
+                        "escalation_id": id,
+                        "decision": decision,
+                    })
+                );
             } else {
                 println!("Response recorded for escalation {}.", id);
             }
         }
         Err(e) => {
             if json_mode {
-                println!("{}", serde_json::json!({
-                    "status": "error",
-                    "error": e.to_string(),
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "error",
+                        "error": e.to_string(),
+                    })
+                );
             } else {
                 eprintln!("Error: {}", e);
             }
@@ -1930,15 +2279,18 @@ async fn federation_connect(
     yes: bool,
     json_mode: bool,
 ) -> Result<()> {
-    use crate::services::federation::FederationService;
     use crate::services::event_bus::{EventBus, EventBusConfig};
+    use crate::services::federation::FederationService;
 
     let config = crate::services::config::Config::load().unwrap_or_default();
     let fed_config = config.federation;
 
     if !fed_config.enabled {
         if json_mode {
-            println!("{}", serde_json::json!({"error": "Federation is not enabled in abathur.toml"}));
+            println!(
+                "{}",
+                serde_json::json!({"error": "Federation is not enabled in abathur.toml"})
+            );
         } else {
             println!("Federation is not enabled. Add [federation] enabled = true to abathur.toml");
         }
@@ -1955,7 +2307,8 @@ async fn federation_connect(
         .replace(':', "-")
         .replace('/', "");
 
-    svc.register_cerebrate(&cerebrate_id, &cerebrate_id, url).await;
+    svc.register_cerebrate(&cerebrate_id, &cerebrate_id, url)
+        .await;
 
     if !yes && !json_mode {
         println!("Connecting to cerebrate at {}...", url);
@@ -1967,11 +2320,14 @@ async fn federation_connect(
     match svc.connect(&cerebrate_id).await {
         Ok(()) => {
             if json_mode {
-                println!("{}", serde_json::json!({
-                    "status": "connected",
-                    "cerebrate_id": cerebrate_id,
-                    "url": url,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "connected",
+                        "cerebrate_id": cerebrate_id,
+                        "url": url,
+                    })
+                );
             } else {
                 println!("Connected to cerebrate: {}", cerebrate_id);
             }
@@ -1989,8 +2345,8 @@ async fn federation_connect(
 }
 
 async fn federation_disconnect(id: &str, json_mode: bool) -> Result<()> {
-    use crate::services::federation::FederationService;
     use crate::services::event_bus::{EventBus, EventBusConfig};
+    use crate::services::federation::FederationService;
 
     let config = crate::services::config::Config::load().unwrap_or_default();
     let fed_config = config.federation;
@@ -2006,7 +2362,10 @@ async fn federation_disconnect(id: &str, json_mode: bool) -> Result<()> {
         Ok(()) => {
             let _ = svc.save_connections(base_path).await;
             if json_mode {
-                println!("{}", serde_json::json!({"status": "disconnected", "cerebrate_id": id}));
+                println!(
+                    "{}",
+                    serde_json::json!({"status": "disconnected", "cerebrate_id": id})
+                );
             } else {
                 println!("Disconnected from cerebrate: {}", id);
             }
@@ -2024,8 +2383,8 @@ async fn federation_disconnect(id: &str, json_mode: bool) -> Result<()> {
 }
 
 async fn federation_cerebrates(id: Option<&str>, json_mode: bool) -> Result<()> {
-    use crate::services::federation::FederationService;
     use crate::services::event_bus::{EventBus, EventBusConfig};
+    use crate::services::federation::FederationService;
 
     let config = crate::services::config::Config::load().unwrap_or_default();
     let fed_config = config.federation;
@@ -2048,8 +2407,18 @@ async fn federation_cerebrates(id: Option<&str>, json_mode: bool) -> Result<()> 
                     println!("  Display name:  {}", status.display_name);
                     println!("  State:         {}", status.connection_state);
                     println!("  Load:          {:.1}%", status.load * 100.0);
-                    println!("  Delegations:   {}/{}", status.active_delegations, status.max_concurrent_delegations);
-                    println!("  Capabilities:  {}", if status.capabilities.is_empty() { "(none)".to_string() } else { status.capabilities.join(", ") });
+                    println!(
+                        "  Delegations:   {}/{}",
+                        status.active_delegations, status.max_concurrent_delegations
+                    );
+                    println!(
+                        "  Capabilities:  {}",
+                        if status.capabilities.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            status.capabilities.join(", ")
+                        }
+                    );
                     if let Some(url) = &status.url {
                         println!("  URL:           {}", url);
                     }
@@ -2060,7 +2429,10 @@ async fn federation_cerebrates(id: Option<&str>, json_mode: bool) -> Result<()> 
             }
             None => {
                 if json_mode {
-                    println!("{}", serde_json::json!({"error": format!("Cerebrate not found: {}", cerebrate_id)}));
+                    println!(
+                        "{}",
+                        serde_json::json!({"error": format!("Cerebrate not found: {}", cerebrate_id)})
+                    );
                 } else {
                     println!("Cerebrate not found: {}", cerebrate_id);
                 }
@@ -2081,7 +2453,10 @@ async fn federation_cerebrates(id: Option<&str>, json_mode: bool) -> Result<()> 
         if json_mode {
             println!("{}", serde_json::to_string_pretty(&cerebrates)?);
         } else {
-            println!("{:<20} {:<15} {:<8} {:<12} CAPABILITIES", "ID", "STATE", "LOAD", "ACTIVE/MAX");
+            println!(
+                "{:<20} {:<15} {:<8} {:<12} CAPABILITIES",
+                "ID", "STATE", "LOAD", "ACTIVE/MAX"
+            );
             println!("{}", "-".repeat(70));
             for c in &cerebrates {
                 println!(
@@ -2091,7 +2466,11 @@ async fn federation_cerebrates(id: Option<&str>, json_mode: bool) -> Result<()> 
                     c.load * 100.0,
                     c.active_delegations,
                     c.max_concurrent_delegations,
-                    if c.capabilities.is_empty() { "-".to_string() } else { c.capabilities.join(", ") }
+                    if c.capabilities.is_empty() {
+                        "-".to_string()
+                    } else {
+                        c.capabilities.join(", ")
+                    }
                 );
             }
         }
@@ -2101,8 +2480,8 @@ async fn federation_cerebrates(id: Option<&str>, json_mode: bool) -> Result<()> 
 }
 
 async fn federation_hive(json_mode: bool) -> Result<()> {
-    use crate::services::federation::FederationService;
     use crate::services::event_bus::{EventBus, EventBusConfig};
+    use crate::services::federation::FederationService;
 
     let config = crate::services::config::Config::load().unwrap_or_default();
     let fed_config = config.federation.clone();
@@ -2126,19 +2505,34 @@ async fn federation_hive(json_mode: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&tree)?);
     } else {
         println!("Federation Hive:");
-        println!("  {} ({}) [{}]", fed_config.display_name, fed_config.swarm_id, fed_config.role);
+        println!(
+            "  {} ({}) [{}]",
+            fed_config.display_name, fed_config.swarm_id, fed_config.role
+        );
         if cerebrates.is_empty() {
             println!("    (no cerebrates)");
         } else {
             for (i, c) in cerebrates.iter().enumerate() {
-                let prefix = if i == cerebrates.len() - 1 { "└─" } else { "├─" };
+                let prefix = if i == cerebrates.len() - 1 {
+                    "└─"
+                } else {
+                    "├─"
+                };
                 let state_icon = match c.connection_state {
                     crate::domain::models::a2a::ConnectionState::Connected => "●",
                     crate::domain::models::a2a::ConnectionState::Disconnected => "○",
                     crate::domain::models::a2a::ConnectionState::Unreachable => "✗",
                     _ => "◐",
                 };
-                println!("    {} {} {} [{}] ({}/{})", prefix, state_icon, c.display_name, c.connection_state, c.active_delegations, c.max_concurrent_delegations);
+                println!(
+                    "    {} {} {} [{}] ({}/{})",
+                    prefix,
+                    state_icon,
+                    c.display_name,
+                    c.connection_state,
+                    c.active_delegations,
+                    c.max_concurrent_delegations
+                );
             }
         }
     }
@@ -2184,18 +2578,12 @@ impl SignalYamlSpec {
     fn into_contract_signal(self) -> ContractSignal {
         match self {
             Self::BuildPassing => ContractSignal::BuildPassing,
-            Self::TestsPassing { min_pass_rate } => {
-                ContractSignal::TestsPassing { min_pass_rate }
-            }
-            Self::ConvergenceLevel { min_level } => {
-                ContractSignal::ConvergenceLevel { min_level }
-            }
+            Self::TestsPassing { min_pass_rate } => ContractSignal::TestsPassing { min_pass_rate },
+            Self::ConvergenceLevel { min_level } => ContractSignal::ConvergenceLevel { min_level },
             Self::TaskCompletionThreshold { min_completed } => {
                 ContractSignal::TaskCompletionThreshold { min_completed }
             }
-            Self::Custom { name, predicate } => {
-                ContractSignal::Custom { name, predicate }
-            }
+            Self::Custom { name, predicate } => ContractSignal::Custom { name, predicate },
         }
     }
 }
@@ -2285,7 +2673,8 @@ impl DagYamlSpec {
         }
 
         // Validate the constructed DAG.
-        dag.validate().map_err(|e| anyhow::anyhow!("DAG validation failed: {}", e))?;
+        dag.validate()
+            .map_err(|e| anyhow::anyhow!("DAG validation failed: {}", e))?;
 
         Ok(dag)
     }
@@ -2332,9 +2721,11 @@ async fn dag_create(file_path: &str, json_mode: bool) -> Result<()> {
 
         // Print a visual topology.
         for node in &dag.nodes {
-            let deps: Vec<String> = node.dependencies.iter().filter_map(|dep_id| {
-                dag.get_node(*dep_id).map(|d| d.label.clone())
-            }).collect();
+            let deps: Vec<String> = node
+                .dependencies
+                .iter()
+                .filter_map(|dep_id| dag.get_node(*dep_id).map(|d| d.label.clone()))
+                .collect();
 
             let dep_str = if deps.is_empty() {
                 "(root)".to_string()
@@ -2352,7 +2743,9 @@ async fn dag_create(file_path: &str, json_mode: bool) -> Result<()> {
         }
 
         println!();
-        println!("DAG is validated and ready. Use 'abathur swarm start --dag <path>' to begin execution.");
+        println!(
+            "DAG is validated and ready. Use 'abathur swarm start --dag <path>' to begin execution."
+        );
     }
 
     Ok(())
@@ -2378,9 +2771,11 @@ async fn dag_status(_json_mode: bool) -> Result<()> {
 /// Print DAG node status table.
 fn print_dag_nodes(dag: &crate::domain::models::swarm_dag::SwarmDag) {
     for node in &dag.nodes {
-        let deps: Vec<String> = node.dependencies.iter().filter_map(|dep_id| {
-            dag.get_node(*dep_id).map(|d| d.label.clone())
-        }).collect();
+        let deps: Vec<String> = node
+            .dependencies
+            .iter()
+            .filter_map(|dep_id| dag.get_node(*dep_id).map(|d| d.label.clone()))
+            .collect();
 
         let dep_str = if deps.is_empty() {
             "(root)".to_string()
@@ -2388,7 +2783,8 @@ fn print_dag_nodes(dag: &crate::domain::models::swarm_dag::SwarmDag) {
             format!("depends on: [{}]", deps.join(", "))
         };
 
-        let fed_str = node.federated_goal_id
+        let fed_str = node
+            .federated_goal_id
             .map(|id| format!(" [fed:{}]", id))
             .unwrap_or_default();
 
@@ -2402,4 +2798,3 @@ fn print_dag_nodes(dag: &crate::domain::models::swarm_dag::SwarmDag) {
         );
     }
 }
-

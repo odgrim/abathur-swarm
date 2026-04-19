@@ -44,34 +44,28 @@ impl WorktreeRepository for SqliteWorktreeRepository {
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Worktree>> {
-        let row: Option<WorktreeRow> = sqlx::query_as(
-            "SELECT * FROM worktrees WHERE id = ?"
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<WorktreeRow> = sqlx::query_as("SELECT * FROM worktrees WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
 
         row.map(|r| r.try_into()).transpose()
     }
 
     async fn get_by_task(&self, task_id: Uuid) -> DomainResult<Option<Worktree>> {
-        let row: Option<WorktreeRow> = sqlx::query_as(
-            "SELECT * FROM worktrees WHERE task_id = ?"
-        )
-        .bind(task_id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<WorktreeRow> = sqlx::query_as("SELECT * FROM worktrees WHERE task_id = ?")
+            .bind(task_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
 
         row.map(|r| r.try_into()).transpose()
     }
 
     async fn get_by_path(&self, path: &str) -> DomainResult<Option<Worktree>> {
-        let row: Option<WorktreeRow> = sqlx::query_as(
-            "SELECT * FROM worktrees WHERE path = ?"
-        )
-        .bind(path)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<WorktreeRow> = sqlx::query_as("SELECT * FROM worktrees WHERE path = ?")
+            .bind(path)
+            .fetch_optional(&self.pool)
+            .await?;
 
         row.map(|r| r.try_into()).transpose()
     }
@@ -91,7 +85,9 @@ impl WorktreeRepository for SqliteWorktreeRepository {
         .await?;
 
         if result.rows_affected() == 0 {
-            return Err(DomainError::ValidationFailed("Worktree not found".to_string()));
+            return Err(DomainError::ValidationFailed(
+                "Worktree not found".to_string(),
+            ));
         }
 
         Ok(())
@@ -104,19 +100,20 @@ impl WorktreeRepository for SqliteWorktreeRepository {
             .await?;
 
         if result.rows_affected() == 0 {
-            return Err(DomainError::ValidationFailed("Worktree not found".to_string()));
+            return Err(DomainError::ValidationFailed(
+                "Worktree not found".to_string(),
+            ));
         }
 
         Ok(())
     }
 
     async fn list_by_status(&self, status: WorktreeStatus) -> DomainResult<Vec<Worktree>> {
-        let rows: Vec<WorktreeRow> = sqlx::query_as(
-            "SELECT * FROM worktrees WHERE status = ? ORDER BY created_at DESC"
-        )
-        .bind(status.as_str())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<WorktreeRow> =
+            sqlx::query_as("SELECT * FROM worktrees WHERE status = ? ORDER BY created_at DESC")
+                .bind(status.as_str())
+                .fetch_all(&self.pool)
+                .await?;
 
         rows.into_iter().map(|r| r.try_into()).collect()
     }
@@ -142,11 +139,10 @@ impl WorktreeRepository for SqliteWorktreeRepository {
     }
 
     async fn count_by_status(&self) -> DomainResult<HashMap<WorktreeStatus, u64>> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT status, COUNT(*) FROM worktrees GROUP BY status"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT status, COUNT(*) FROM worktrees GROUP BY status")
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut counts = HashMap::new();
         for (status_str, count) in rows {
@@ -180,8 +176,9 @@ impl TryFrom<WorktreeRow> for Worktree {
         let id = super::parse_uuid(&row.id)?;
         let task_id = super::parse_uuid(&row.task_id)?;
 
-        let status = WorktreeStatus::from_str(&row.status)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid status: {}", row.status)))?;
+        let status = WorktreeStatus::from_str(&row.status).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid status: {}", row.status))
+        })?;
 
         let created_at = super::parse_datetime(&row.created_at)?;
         let updated_at = super::parse_datetime(&row.updated_at)?;

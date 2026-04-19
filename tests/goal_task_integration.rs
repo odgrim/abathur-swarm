@@ -15,19 +15,19 @@
 use std::sync::Arc;
 
 use abathur::adapters::sqlite::{
-    create_migrated_test_pool, SqliteGoalRepository, SqliteTaskRepository,
+    SqliteGoalRepository, SqliteTaskRepository, create_migrated_test_pool,
 };
 use abathur::domain::models::{
     Goal, GoalConstraint, GoalPriority, GoalStatus, Task, TaskPriority, TaskSource, TaskStatus,
 };
 use abathur::domain::ports::{GoalRepository, TaskRepository};
-use abathur::services::{
-    GoalContextService, GoalService, TaskService,
-};
+use abathur::services::{GoalContextService, GoalService, TaskService};
 
 /// Set up in-memory SQLite repos with all migrations applied.
 async fn setup_repos() -> (Arc<SqliteGoalRepository>, Arc<SqliteTaskRepository>) {
-    let pool = create_migrated_test_pool().await.expect("Failed to create test pool");
+    let pool = create_migrated_test_pool()
+        .await
+        .expect("Failed to create test pool");
 
     (
         Arc::new(SqliteGoalRepository::new(pool.clone())),
@@ -62,10 +62,7 @@ async fn test_goal_creation_with_domains() {
     assert_eq!(goal.name, "Code should be well-tested");
     assert_eq!(goal.status, GoalStatus::Active);
     assert_eq!(goal.priority, GoalPriority::High);
-    assert_eq!(
-        goal.applicability_domains,
-        vec!["testing", "code-quality"]
-    );
+    assert_eq!(goal.applicability_domains, vec!["testing", "code-quality"]);
     assert_eq!(goal.constraints.len(), 1);
 
     // Verify retrieval
@@ -213,10 +210,10 @@ async fn test_list_tasks_by_source() {
     let (_, task_repo) = setup_repos().await;
 
     // Create tasks with different sources
-    let human_task = Task::with_title("Human task", "Created by human")
-        .with_source(TaskSource::Human);
-    let system_task = Task::with_title("System task", "Created by system")
-        .with_source(TaskSource::System);
+    let human_task =
+        Task::with_title("Human task", "Created by human").with_source(TaskSource::Human);
+    let system_task =
+        Task::with_title("System task", "Created by system").with_source(TaskSource::System);
 
     task_repo.create(&human_task).await.unwrap();
     task_repo.create(&system_task).await.unwrap();
@@ -467,19 +464,21 @@ async fn test_format_goal_context_empty() {
 
 #[tokio::test]
 async fn test_format_goal_context_with_constraints() {
-    let goal = Goal::new("Well-tested code", "All code should have comprehensive tests")
-        .with_priority(GoalPriority::High)
-        .with_constraint(GoalConstraint::invariant(
-            "min-coverage",
-            "Test coverage must be at least 80%",
-        ))
-        .with_constraint(GoalConstraint::preference(
-            "test-style",
-            "Prefer property-based tests where applicable",
-        ));
+    let goal = Goal::new(
+        "Well-tested code",
+        "All code should have comprehensive tests",
+    )
+    .with_priority(GoalPriority::High)
+    .with_constraint(GoalConstraint::invariant(
+        "min-coverage",
+        "Test coverage must be at least 80%",
+    ))
+    .with_constraint(GoalConstraint::preference(
+        "test-style",
+        "Prefer property-based tests where applicable",
+    ));
 
-    let output =
-        GoalContextService::<SqliteGoalRepository>::format_goal_context(&[goal]);
+    let output = GoalContextService::<SqliteGoalRepository>::format_goal_context(&[goal]);
 
     // Verify structure
     assert!(output.contains("## Guiding Goals"), "Should have header");
@@ -491,7 +490,10 @@ async fn test_format_goal_context_with_constraints() {
         output.contains("All code should have comprehensive tests"),
         "Should have description"
     );
-    assert!(output.contains("Constraints:"), "Should have constraints section");
+    assert!(
+        output.contains("Constraints:"),
+        "Should have constraints section"
+    );
     assert!(
         output.contains("min-coverage"),
         "Should list constraint names"
@@ -523,7 +525,6 @@ async fn test_collect_constraints_deduplicates() {
     assert!(names.contains(&"budget"));
 }
 
-
 // =============================================================================
 // 7. EDGE CASES AND ADDITIONAL SCENARIOS
 // =============================================================================
@@ -552,8 +553,8 @@ async fn test_subtask_source_persisted() {
     let (_, task_repo) = setup_repos().await;
 
     let parent_id = uuid::Uuid::new_v4();
-    let task = Task::with_title("Subtask", "A child task")
-        .with_source(TaskSource::SubtaskOf(parent_id));
+    let task =
+        Task::with_title("Subtask", "A child task").with_source(TaskSource::SubtaskOf(parent_id));
 
     task_repo.create(&task).await.unwrap();
 
@@ -567,12 +568,11 @@ async fn test_multiple_goals_same_domain() {
     let ctx_service = GoalContextService::new(goal_repo.clone());
 
     // Create multiple goals in the same domain
-    let goal1 = Goal::new("Coverage goal", "High test coverage")
-        .with_applicability_domain("testing");
+    let goal1 =
+        Goal::new("Coverage goal", "High test coverage").with_applicability_domain("testing");
     goal_repo.create(&goal1).await.unwrap();
 
-    let goal2 = Goal::new("Speed goal", "Fast test execution")
-        .with_applicability_domain("testing");
+    let goal2 = Goal::new("Speed goal", "Fast test execution").with_applicability_domain("testing");
     goal_repo.create(&goal2).await.unwrap();
 
     // A testing task should pick up both goals
@@ -580,4 +580,3 @@ async fn test_multiple_goals_same_domain() {
     let goals = ctx_service.get_goals_for_task(&task).await.unwrap();
     assert_eq!(goals.len(), 2, "Should match both testing goals");
 }
-

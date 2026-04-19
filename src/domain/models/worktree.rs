@@ -94,7 +94,12 @@ pub struct Worktree {
 
 impl Worktree {
     /// Create a new worktree.
-    pub fn new(task_id: Uuid, path: impl Into<String>, branch: impl Into<String>, base_ref: impl Into<String>) -> Self {
+    pub fn new(
+        task_id: Uuid,
+        path: impl Into<String>,
+        branch: impl Into<String>,
+        base_ref: impl Into<String>,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
@@ -162,7 +167,10 @@ impl Worktree {
 
     /// Check if worktree can be cleaned up.
     pub fn can_cleanup(&self) -> bool {
-        matches!(self.status, WorktreeStatus::Merged | WorktreeStatus::Failed | WorktreeStatus::Completed)
+        matches!(
+            self.status,
+            WorktreeStatus::Merged | WorktreeStatus::Failed | WorktreeStatus::Completed
+        )
     }
 }
 

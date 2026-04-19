@@ -70,21 +70,27 @@ impl TaskDag {
         }
 
         // Find roots (nodes with no dependencies in this DAG)
-        let roots: Vec<Uuid> = nodes.iter()
+        let roots: Vec<Uuid> = nodes
+            .iter()
             .filter(|(_, node)| {
-                node.dependencies.is_empty() ||
-                node.dependencies.iter().all(|d| !nodes.contains_key(d))
+                node.dependencies.is_empty()
+                    || node.dependencies.iter().all(|d| !nodes.contains_key(d))
             })
             .map(|(id, _)| *id)
             .collect();
 
         // Find leaves (nodes with no dependents)
-        let leaves: Vec<Uuid> = nodes.iter()
+        let leaves: Vec<Uuid> = nodes
+            .iter()
             .filter(|(id, _)| !has_dependents.contains(id))
             .map(|(id, _)| *id)
             .collect();
 
-        Self { nodes, roots, leaves }
+        Self {
+            nodes,
+            roots,
+            leaves,
+        }
     }
 
     /// Check if the DAG contains a cycle.
@@ -101,7 +107,12 @@ impl TaskDag {
         false
     }
 
-    fn detect_cycle_dfs(&self, node_id: Uuid, visited: &mut HashSet<Uuid>, rec_stack: &mut HashSet<Uuid>) -> bool {
+    fn detect_cycle_dfs(
+        &self,
+        node_id: Uuid,
+        visited: &mut HashSet<Uuid>,
+        rec_stack: &mut HashSet<Uuid>,
+    ) -> bool {
         if rec_stack.contains(&node_id) {
             return true;
         }
@@ -136,7 +147,9 @@ impl TaskDag {
 
         // Calculate in-degrees (number of dependencies)
         for (id, node) in &self.nodes {
-            let deps_in_dag = node.dependencies.iter()
+            let deps_in_dag = node
+                .dependencies
+                .iter()
                 .filter(|d| self.nodes.contains_key(d))
                 .count();
             in_degree.insert(*id, deps_in_dag);
@@ -185,9 +198,11 @@ impl TaskDag {
 
         while !remaining.is_empty() {
             // Find all nodes whose dependencies are complete
-            let wave: Vec<Uuid> = remaining.iter()
+            let wave: Vec<Uuid> = remaining
+                .iter()
                 .filter(|id| {
-                    self.nodes.get(id)
+                    self.nodes
+                        .get(id)
                         .map(|node| node.is_ready(&completed))
                         .unwrap_or(false)
                 })
@@ -238,7 +253,8 @@ impl TaskDag {
         }
 
         // Find the node with maximum distance
-        let end_node = distances.iter()
+        let end_node = distances
+            .iter()
             .max_by_key(|&(_, &dist)| dist)
             .map(|(&id, _)| id);
 
@@ -266,9 +282,10 @@ impl TaskDag {
 
         while let Some(id) = queue.pop_front() {
             if result.insert(id)
-                && let Some(node) = self.nodes.get(&id) {
-                    queue.extend(&node.dependents);
-                }
+                && let Some(node) = self.nodes.get(&id)
+            {
+                queue.extend(&node.dependents);
+            }
         }
 
         result
@@ -285,9 +302,10 @@ impl TaskDag {
 
         while let Some(id) = queue.pop_front() {
             if result.insert(id)
-                && let Some(node) = self.nodes.get(&id) {
-                    queue.extend(&node.dependencies);
-                }
+                && let Some(node) = self.nodes.get(&id)
+            {
+                queue.extend(&node.dependencies);
+            }
         }
 
         result
@@ -396,10 +414,10 @@ mod tests {
         let id4 = Uuid::new_v4();
 
         let tasks = vec![
-            make_task(id1, "Task 1", vec![]),        // Wave 1
-            make_task(id2, "Task 2", vec![]),        // Wave 1
+            make_task(id1, "Task 1", vec![]),         // Wave 1
+            make_task(id2, "Task 2", vec![]),         // Wave 1
             make_task(id3, "Task 3", vec![id1, id2]), // Wave 2
-            make_task(id4, "Task 4", vec![id3]),     // Wave 3
+            make_task(id4, "Task 4", vec![id3]),      // Wave 3
         ];
 
         let dag = TaskDag::from_tasks(tasks);

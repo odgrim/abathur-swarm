@@ -10,16 +10,16 @@
 //! - **infrastructure**: Cold start, decay daemon, MCP servers, stats, verification
 //! - **helpers**: Utility functions for spawned tasks (auto-commit, post-completion)
 
-pub mod types;
-mod event_handling;
 mod agent_lifecycle;
+pub(crate) mod convergent_execution;
+mod event_handling;
 mod goal_processing;
 mod handler_registration;
-mod specialist_triggers;
-mod infrastructure;
 pub(crate) mod helpers;
-pub(crate) mod convergent_execution;
+mod infrastructure;
 pub mod middleware;
+mod specialist_triggers;
+pub mod types;
 
 // Re-export public types
 pub use types::{
@@ -27,27 +27,26 @@ pub use types::{
     SwarmEvent, SwarmStats, VerificationLevel,
 };
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use std::sync::atomic::AtomicU64;
+use tokio::sync::{RwLock, Semaphore, mpsc};
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{Goal, HumanEscalationEvent};
 use crate::domain::ports::{
-    AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository,
-    Substrate, TaskRepository, TrajectoryRepository, WorktreeRepository,
+    AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository, Substrate,
+    TaskRepository, TrajectoryRepository, WorktreeRepository,
 };
 use crate::services::{
-    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    AuditLogConfig, AuditLogService,
-    CircuitBreakerConfig, CircuitBreakerService,
-    DaemonHandle, EvolutionLoop,
+    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogConfig,
+    AuditLogService, CircuitBreakerConfig, CircuitBreakerService, DaemonHandle, EvolutionLoop,
     IntentVerifierConfig, IntentVerifierService,
     command_bus::CommandBus,
     dag_restructure::DagRestructureService,
     event_reactor::EventReactor,
     event_scheduler::EventScheduler,
     guardrails::{Guardrails, GuardrailsConfig},
+    supervise,
 };
 
 /// The main swarm orchestrator.
@@ -59,36 +58,30 @@ where
     A: AgentRepository + 'static,
     M: MemoryRepository + 'static,
 {
-    // Repository layer
+    // ---------------- Core dependencies (required) ----------------
     pub(super) goal_repo: Arc<G>,
     pub(super) task_repo: Arc<T>,
     pub(super) worktree_repo: Arc<W>,
     pub(super) agent_repo: Arc<A>,
-    pub(super) memory_repo: Option<Arc<M>>,
     pub(super) substrate: Arc<dyn Substrate>,
-
-    // Configuration
     pub(super) config: SwarmConfig,
 
-    // Runtime state
+    // ---------------- Runtime state ----------------
     pub(super) status: Arc<RwLock<OrchestratorStatus>>,
     pub(super) stats: Arc<RwLock<SwarmStats>>,
     pub(super) agent_semaphore: Arc<Semaphore>,
     pub(super) total_tokens: Arc<AtomicU64>,
+    pub(super) active_goals_cache: Arc<RwLock<Vec<Goal>>>,
+    pub(super) escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
 
-    // Integrated services
+    // ---------------- Core services (always present) ----------------
     pub(super) audit_log: Arc<AuditLogService>,
     pub(super) circuit_breaker: Arc<CircuitBreakerService>,
-    pub(super) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
     pub(super) evolution_loop: Arc<EvolutionLoop>,
-    pub(super) active_goals_cache: Arc<RwLock<Vec<Goal>>>,
     pub(super) restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
     pub(super) guardrails: Arc<Guardrails>,
-    /// Cancellation token for the hourly token-counter reset daemon.
-    pub(super) hourly_reset_cancel: Arc<RwLock<Option<tokio_util::sync::CancellationToken>>>,
-    pub(super) mcp_shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
-    pub(super) intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
-    pub(super) overmind: Option<Arc<crate::services::OvermindService>>,
+
+    // ---------------- Event plumbing ----------------
     pub(super) event_bus: Arc<crate::services::event_bus::EventBus>,
     pub(super) event_reactor: Arc<EventReactor>,
     pub(super) event_scheduler: Arc<EventScheduler>,
@@ -96,42 +89,59 @@ where
     pub(super) ready_task_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
     pub(super) specialist_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<uuid::Uuid>>>,
     pub(super) specialist_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
-    pub(super) escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
-    pub(super) federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
-    pub(super) federation_service: Option<Arc<crate::services::federation::FederationService>>,
-    pub(super) trigger_rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
-    pub(super) merge_request_repo: Option<Arc<dyn crate::domain::ports::MergeRequestRepository>>,
-    pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
-    /// Optional outbox repository for transactional event delivery.
-    pub(super) outbox_repo: Option<Arc<dyn crate::domain::ports::OutboxRepository>>,
+
+    // ---------------- Daemon handles ----------------
+    pub(super) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
+    /// Cancellation token for the hourly token-counter reset daemon.
+    pub(super) hourly_reset_cancel: Arc<RwLock<Option<tokio_util::sync::CancellationToken>>>,
+    pub(super) mcp_shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
     /// Optional handle to the outbox poller daemon.
-    pub(super) outbox_poller_handle: Arc<RwLock<Option<crate::services::outbox_poller::OutboxPollerHandle>>>,
+    pub(super) outbox_poller_handle:
+        Arc<RwLock<Option<crate::services::outbox_poller::OutboxPollerHandle>>>,
     /// Optional handle to the convergence poller daemon (federation).
-    pub(super) convergence_poller_handle: Arc<RwLock<Option<crate::services::federation::ConvergencePollerHandle>>>,
+    pub(super) convergence_poller_handle:
+        Arc<RwLock<Option<crate::services::federation::ConvergencePollerHandle>>>,
     /// Optional handle to the convergence publisher daemon (federation).
-    pub(super) convergence_publisher_handle: Arc<RwLock<Option<crate::services::federation::convergence_publisher::ConvergencePublisherHandle>>>,
+    pub(super) convergence_publisher_handle: Arc<
+        RwLock<
+            Option<crate::services::federation::convergence_publisher::ConvergencePublisherHandle>,
+        >,
+    >,
+
+    // ---------------- Optional services (progressive enhancement) ----------------
+    pub(super) memory_repo: Option<Arc<M>>,
+    pub(super) intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
+    pub(super) overmind: Option<Arc<crate::services::OvermindService>>,
+    pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
     /// Optional DB pool for services that need persistence (absence timers, command dedup).
     pub(super) pool: Option<sqlx::SqlitePool>,
+    /// Optional outbox repository for transactional event delivery.
+    pub(super) outbox_repo: Option<Arc<dyn crate::domain::ports::OutboxRepository>>,
+    pub(super) trigger_rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
+    pub(super) merge_request_repo: Option<Arc<dyn crate::domain::ports::MergeRequestRepository>>,
+    /// Optional adapter registry for external system integration.
+    pub(super) adapter_registry: Option<Arc<crate::services::adapter_registry::AdapterRegistry>>,
+    /// Optional budget tracker for budget-aware scheduling.
+    pub(super) budget_tracker: Option<Arc<crate::services::budget_tracker::BudgetTracker>>,
+    /// Optional cost-window service for quiet-hours scheduling.
+    pub(super) cost_window_service:
+        Option<Arc<crate::services::cost_window_service::CostWindowService>>,
 
-    // -- Convergence infrastructure --
+    // ---------------- Federation ----------------
+    pub(super) federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
+    pub(super) federation_service: Option<Arc<crate::services::federation::FederationService>>,
 
+    // ---------------- Convergence infrastructure ----------------
     /// Overseer cluster for convergent execution quality measurement.
     pub(super) overseer_cluster: Option<Arc<crate::services::overseers::OverseerClusterService>>,
     /// Trajectory repository for convergence state persistence.
     pub(super) trajectory_repo: Option<Arc<dyn TrajectoryRepository>>,
     /// Pre-built convergence engine config derived from SwarmConfig.
     /// Stored here to avoid recomputing on every convergent task spawn.
-    pub(super) convergence_engine_config: Option<crate::domain::models::convergence::ConvergenceEngineConfig>,
+    pub(super) convergence_engine_config:
+        Option<crate::domain::models::convergence::ConvergenceEngineConfig>,
 
-    /// Optional adapter registry for external system integration.
-    pub(super) adapter_registry: Option<Arc<crate::services::adapter_registry::AdapterRegistry>>,
-
-    /// Optional budget tracker for budget-aware scheduling.
-    pub(super) budget_tracker: Option<Arc<crate::services::budget_tracker::BudgetTracker>>,
-
-    /// Optional cost-window service for quiet-hours scheduling.
-    pub(super) cost_window_service: Option<Arc<crate::services::cost_window_service::CostWindowService>>,
-
+    // ---------------- Middleware ----------------
     /// Pre-spawn middleware chain. Runs before substrate invocation for each
     /// ready task; can short-circuit or enrich the spawn context. Populated
     /// with the built-in middleware at construction; external callers may
@@ -174,52 +184,71 @@ where
         let (ready_tx, ready_rx) = tokio::sync::mpsc::channel(256);
         let (specialist_tx, specialist_rx) = tokio::sync::mpsc::channel(64);
         Self {
+            // ---------------- Core dependencies (required) ----------------
             goal_repo,
             task_repo,
             worktree_repo,
             agent_repo,
-            memory_repo: None,
             substrate,
             config,
+
+            // ---------------- Runtime state ----------------
             status: Arc::new(RwLock::new(OrchestratorStatus::Idle)),
             stats: Arc::new(RwLock::new(SwarmStats::default())),
             agent_semaphore: Arc::new(Semaphore::new(max_agents)),
             total_tokens: Arc::new(AtomicU64::new(0)),
+            active_goals_cache: Arc::new(RwLock::new(Vec::new())),
+            escalation_store: Arc::new(RwLock::new(Vec::new())),
+
+            // ---------------- Core services (always present) ----------------
             audit_log: Arc::new(AuditLogService::with_defaults()),
             circuit_breaker: Arc::new(CircuitBreakerService::with_defaults()),
-            decay_daemon_handle: Arc::new(RwLock::new(None)),
             evolution_loop: Arc::new(EvolutionLoop::with_default_config()),
-            active_goals_cache: Arc::new(RwLock::new(Vec::new())),
-            restructure_service: Arc::new(tokio::sync::Mutex::new(DagRestructureService::with_defaults())),
+            restructure_service: Arc::new(tokio::sync::Mutex::new(
+                DagRestructureService::with_defaults(),
+            )),
             guardrails: Arc::new(Guardrails::with_defaults()),
-            hourly_reset_cancel: Arc::new(RwLock::new(None)),
-            mcp_shutdown_tx: Arc::new(RwLock::new(None)),
-            intent_verifier: None,
-            overmind: None,
+
+            // ---------------- Event plumbing ----------------
             event_bus,
             event_reactor,
             event_scheduler,
-            escalation_store: Arc::new(RwLock::new(Vec::new())),
-            federation_client: None,
-            federation_service: None,
-            trigger_rule_repo: None,
-            merge_request_repo: None,
             ready_task_rx: Arc::new(tokio::sync::Mutex::new(ready_rx)),
             ready_task_tx: ready_tx,
             specialist_rx: Arc::new(tokio::sync::Mutex::new(specialist_rx)),
             specialist_tx,
-            command_bus: Arc::new(RwLock::new(None)),
-            outbox_repo: None,
+
+            // ---------------- Daemon handles ----------------
+            decay_daemon_handle: Arc::new(RwLock::new(None)),
+            hourly_reset_cancel: Arc::new(RwLock::new(None)),
+            mcp_shutdown_tx: Arc::new(RwLock::new(None)),
             outbox_poller_handle: Arc::new(RwLock::new(None)),
             convergence_poller_handle: Arc::new(RwLock::new(None)),
             convergence_publisher_handle: Arc::new(RwLock::new(None)),
+
+            // ---------------- Optional services (progressive enhancement) ----------------
+            memory_repo: None,
+            intent_verifier: None,
+            overmind: None,
+            command_bus: Arc::new(RwLock::new(None)),
             pool: None,
-            overseer_cluster: None,
-            trajectory_repo: None,
-            convergence_engine_config: None,
+            outbox_repo: None,
+            trigger_rule_repo: None,
+            merge_request_repo: None,
             adapter_registry: None,
             budget_tracker: None,
             cost_window_service: None,
+
+            // ---------------- Federation ----------------
+            federation_client: None,
+            federation_service: None,
+
+            // ---------------- Convergence infrastructure ----------------
+            overseer_cluster: None,
+            trajectory_repo: None,
+            convergence_engine_config: None,
+
+            // ---------------- Middleware ----------------
             pre_spawn_chain: Arc::new(RwLock::new(middleware::PreSpawnChain::new())),
             post_completion_chain: Arc::new(RwLock::new(middleware::PostCompletionChain::new())),
         }
@@ -248,19 +277,27 @@ where
     // -- Builder methods --
 
     /// Create orchestrator with a federation client for cross-swarm task delegation.
-    pub fn with_federation(mut self, federation_client: Arc<crate::adapters::mcp::FederationClient>) -> Self {
+    pub fn with_federation(
+        mut self,
+        federation_client: Arc<crate::adapters::mcp::FederationClient>,
+    ) -> Self {
         self.federation_client = Some(federation_client);
         self
     }
 
     /// Create orchestrator with a federation service for hierarchical swarm delegation.
-    pub fn with_federation_service(mut self, federation_service: Arc<crate::services::federation::FederationService>) -> Self {
+    pub fn with_federation_service(
+        mut self,
+        federation_service: Arc<crate::services::federation::FederationService>,
+    ) -> Self {
         self.federation_service = Some(federation_service);
         self
     }
 
     /// Get a reference to the federation service, if configured.
-    pub fn federation_service(&self) -> Option<&Arc<crate::services::federation::FederationService>> {
+    pub fn federation_service(
+        &self,
+    ) -> Option<&Arc<crate::services::federation::FederationService>> {
         self.federation_service.as_ref()
     }
 
@@ -360,7 +397,10 @@ where
     }
 
     /// Create orchestrator with a trigger rule repository for persisting fire state.
-    pub fn with_trigger_rule_repo(mut self, repo: Arc<dyn crate::domain::ports::TriggerRuleRepository>) -> Self {
+    pub fn with_trigger_rule_repo(
+        mut self,
+        repo: Arc<dyn crate::domain::ports::TriggerRuleRepository>,
+    ) -> Self {
         self.trigger_rule_repo = Some(repo);
         self
     }
@@ -386,7 +426,9 @@ where
     /// Provide a DB pool for services that need persistence (absence timers, command dedup,
     /// evolution loop refinement requests, and event outbox).
     pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
-        use crate::adapters::sqlite::{SqliteRefinementRepository, SqliteOutboxRepository, SqliteMergeRequestRepository};
+        use crate::adapters::sqlite::{
+            SqliteMergeRequestRepository, SqliteOutboxRepository, SqliteRefinementRepository,
+        };
         use crate::services::evolution_loop::EvolutionConfig;
 
         let refinement_repo = Arc::new(SqliteRefinementRepository::new(pool.clone()));
@@ -511,30 +553,128 @@ where
     }
 
     // ========================================================================
+    // Dependency Validation
+    // ========================================================================
+
+    /// Validate that every feature gated by `SwarmConfig` has its runtime
+    /// dependencies wired up.
+    ///
+    /// The orchestrator has many optional services that are toggled on/off via
+    /// builder methods (`with_trajectory_repo`, `with_overseer_cluster`, etc).
+    /// Several of those are required for features that are enabled by default
+    /// in `SwarmConfig`. Without this check, missing a `with_xxx(...)` call
+    /// silently degrades the feature to a no-op at runtime: convergent tasks
+    /// fall back to direct execution, merge-queue posts go nowhere, etc.
+    ///
+    /// This method is called at the top of [`run`] so misconfigurations fail
+    /// loudly at startup instead of silently at the first task that hits the
+    /// missing dependency.
+    ///
+    /// Only dependencies that have a clear config→dependency relationship are
+    /// checked here. "Progressive enhancement" services that are simply used
+    /// when present (budget tracker, adapter registry, overmind, pool, outbox,
+    /// command bus, trigger rule repo) are intentionally not validated.
+    pub fn validate_dependencies(&self) -> DomainResult<()> {
+        use crate::domain::errors::DomainError;
+
+        // Convergent execution: if convergence is enabled globally, the
+        // convergence engine needs trajectory storage, an overseer cluster
+        // for quality measurement, an intent verifier, and a memory repo.
+        // Without all four, convergent tasks silently fall back to direct
+        // execution (see goal_processing::spawn_task_agent).
+        if self.config.convergence_enabled {
+            if self.trajectory_repo.is_none() {
+                return Err(DomainError::ValidationFailed(
+                    "convergence_enabled=true but no trajectory repository wired. \
+                     Call .with_trajectory_repo(...) before run(), or set convergence_enabled=false."
+                        .into(),
+                ));
+            }
+            if self.overseer_cluster.is_none() {
+                return Err(DomainError::ValidationFailed(
+                    "convergence_enabled=true but no overseer cluster wired. \
+                     Call .with_overseer_cluster(...) before run(), or set convergence_enabled=false."
+                        .into(),
+                ));
+            }
+            if self.intent_verifier.is_none() {
+                return Err(DomainError::ValidationFailed(
+                    "convergence_enabled=true but no intent verifier wired. \
+                     Call .with_intent_verifier(...) before run(), or set convergence_enabled=false."
+                        .into(),
+                ));
+            }
+            if self.memory_repo.is_none() {
+                return Err(DomainError::ValidationFailed(
+                    "convergence_enabled=true but no memory repository wired. \
+                     Call .with_memory_repo(...) before run(), or set convergence_enabled=false."
+                        .into(),
+                ));
+            }
+        }
+
+        // Intent verification toggle: if this flag is set, we need the
+        // verifier service that runs it.
+        if self.config.enable_intent_verification && self.intent_verifier.is_none() {
+            return Err(DomainError::ValidationFailed(
+                "enable_intent_verification=true but no intent verifier wired. \
+                 Call .with_intent_verifier(...) before run(), or set enable_intent_verification=false."
+                    .into(),
+            ));
+        }
+
+        // Merge queue: if the config says to route completions through the
+        // two-stage merge queue, the merge-request repo must be present.
+        // Without it, merge_queue middleware and conflict-specialist triggers
+        // all silently no-op.
+        if self.config.use_merge_queue && self.merge_request_repo.is_none() {
+            return Err(DomainError::ValidationFailed(
+                "use_merge_queue=true but no merge request repository wired. \
+                 Call .with_pool(...) (which wires the SQLite backed repo) before run(), \
+                 or set use_merge_queue=false."
+                    .into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
     // Main Orchestration Loop
     // ========================================================================
 
     /// Start the orchestrator and run the main loop.
     pub async fn run(&self, event_tx: mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+        // Fail-fast on misconfiguration: if a feature toggle is on but its
+        // runtime dependency is missing, refuse to start rather than letting
+        // the feature silently no-op at runtime. Runs before any status
+        // mutation or event publication so a failure leaves the orchestrator
+        // in the Idle state.
+        self.validate_dependencies()?;
+
         {
             let mut status = self.status.write().await;
             *status = OrchestratorStatus::Running;
         }
         let _ = event_tx.send(SwarmEvent::Started).await;
-        self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-            crate::services::event_bus::EventSeverity::Info,
-            crate::services::event_bus::EventPayload::OrchestratorStarted,
-        )).await;
+        self.event_bus
+            .publish(crate::services::event_factory::orchestrator_event(
+                crate::services::event_bus::EventSeverity::Info,
+                crate::services::event_bus::EventPayload::OrchestratorStarted,
+            ))
+            .await;
 
         // Spawn bridge: forward EventBus events to legacy event_tx channel for TUI/logging
         {
             let mut bus_rx = self.event_bus.subscribe();
             let bridge_tx = event_tx.clone();
-            tokio::spawn(async move {
+            supervise("eventbus_swarm_bridge", async move {
                 loop {
                     match bus_rx.recv().await {
                         Ok(unified_event) => {
-                            if let Some(swarm_event) = SwarmEvent::from_event_payload(&unified_event.payload) {
+                            if let Some(swarm_event) =
+                                SwarmEvent::from_event_payload(&unified_event.payload)
+                            {
                                 let _ = bridge_tx.send(swarm_event).await;
                             }
                         }
@@ -550,11 +690,16 @@ where
         }
 
         // Log swarm startup
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStarted,
-            format!("Swarm orchestrator started with max {} agents", self.config.max_agents),
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                format!(
+                    "Swarm orchestrator started with max {} agents",
+                    self.config.max_agents
+                ),
+            )
+            .await;
 
         // Check for origin remote — warn early if running without one
         self.check_remote_at_startup();
@@ -563,45 +708,48 @@ where
         if self.memory_repo.is_some() {
             match self.cold_start().await {
                 Ok(Some(report)) => {
-                    self.audit_log.info(
-                        AuditCategory::Memory,
-                        AuditAction::MemoryStored,
-                        format!(
-                            "Cold start completed: {} memories created, project type: {}",
-                            report.memories_created, report.project_type
-                        ),
-                    ).await;
+                    self.audit_log
+                        .info(
+                            AuditCategory::Memory,
+                            AuditAction::MemoryStored,
+                            format!(
+                                "Cold start completed: {} memories created, project type: {}",
+                                report.memories_created, report.project_type
+                            ),
+                        )
+                        .await;
                 }
                 Ok(None) => {
                     // Memory already populated, skip cold start
                 }
                 Err(e) => {
-                    self.audit_log.log(
-                        AuditEntry::new(
+                    self.audit_log
+                        .log(AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::System,
                             AuditAction::SwarmStarted,
                             AuditActor::System,
                             format!("Cold start failed (non-fatal): {}", e),
-                        ),
-                    ).await;
+                        ))
+                        .await;
                 }
             }
         }
 
         // Start memory decay daemon if memory repo is available
         if self.memory_repo.is_some()
-            && let Err(e) = self.start_decay_daemon().await {
-                self.audit_log.log(
-                    AuditEntry::new(
-                        AuditLevel::Warning,
-                        AuditCategory::System,
-                        AuditAction::SwarmStarted,
-                        AuditActor::System,
-                        format!("Failed to start decay daemon (non-fatal): {}", e),
-                    ),
-                ).await;
-            }
+            && let Err(e) = self.start_decay_daemon().await
+        {
+            self.audit_log
+                .log(AuditEntry::new(
+                    AuditLevel::Warning,
+                    AuditCategory::System,
+                    AuditAction::SwarmStarted,
+                    AuditActor::System,
+                    format!("Failed to start decay daemon (non-fatal): {}", e),
+                ))
+                .await;
+        }
 
         // Start hourly token counter reset task
         {
@@ -616,15 +764,15 @@ where
 
         // Refresh active goals cache for agent context
         if let Err(e) = self.refresh_active_goals_cache().await {
-            self.audit_log.log(
-                AuditEntry::new(
+            self.audit_log
+                .log(AuditEntry::new(
                     AuditLevel::Warning,
                     AuditCategory::System,
                     AuditAction::SwarmStarted,
                     AuditActor::System,
                     format!("Failed to cache active goals: {}", e),
-                ),
-            ).await;
+                ))
+                .await;
         }
 
         // Seed baseline agent templates (DB is sole source, hardcoded as bootstrap)
@@ -634,31 +782,47 @@ where
             // Use routing-aware seeding when all_workflows is populated; otherwise fall
             // back to single-workflow seeding (legacy / empty config path).
             let seed_result = if !self.config.all_workflows.is_empty() {
-                agent_service.seed_baseline_agents_with_workflows(&self.config.all_workflows, self.config.overmind_max_turns).await
+                agent_service
+                    .seed_baseline_agents_with_workflows(
+                        &self.config.all_workflows,
+                        self.config.overmind_max_turns,
+                    )
+                    .await
             } else {
-                agent_service.seed_baseline_agents_with_workflow(self.config.workflow_template.as_ref(), self.config.overmind_max_turns).await
+                agent_service
+                    .seed_baseline_agents_with_workflow(
+                        self.config.workflow_template.as_ref(),
+                        self.config.overmind_max_turns,
+                    )
+                    .await
             };
             match seed_result {
                 Ok(seeded) if !seeded.is_empty() => {
-                    self.audit_log.info(
-                        AuditCategory::Agent,
-                        AuditAction::AgentSpawned,
-                        format!("Seeded {} baseline agent templates: {}", seeded.len(), seeded.join(", ")),
-                    ).await;
+                    self.audit_log
+                        .info(
+                            AuditCategory::Agent,
+                            AuditAction::AgentSpawned,
+                            format!(
+                                "Seeded {} baseline agent templates: {}",
+                                seeded.len(),
+                                seeded.join(", ")
+                            ),
+                        )
+                        .await;
                 }
                 Ok(_) => {
                     // All agents already exist
                 }
                 Err(e) => {
-                    self.audit_log.log(
-                        AuditEntry::new(
+                    self.audit_log
+                        .log(AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::Agent,
                             AuditAction::AgentSpawned,
                             AuditActor::System,
                             format!("Failed to seed agent templates (non-fatal): {}", e),
-                        ),
-                    ).await;
+                        ))
+                        .await;
                 }
             }
         }
@@ -667,61 +831,66 @@ where
         if self.memory_repo.is_some() {
             match self.run_startup_triage().await {
                 Ok(true) => {
-                    self.audit_log.info(
-                        AuditCategory::Memory,
-                        AuditAction::MemoryStored,
-                        "Startup codebase triage completed — profile stored in memory",
-                    ).await;
+                    self.audit_log
+                        .info(
+                            AuditCategory::Memory,
+                            AuditAction::MemoryStored,
+                            "Startup codebase triage completed — profile stored in memory",
+                        )
+                        .await;
                 }
                 Ok(false) => {
                     // Codebase profile already exists, skip triage
                 }
                 Err(e) => {
-                    self.audit_log.log(
-                        AuditEntry::new(
+                    self.audit_log
+                        .log(AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::System,
                             AuditAction::SwarmStarted,
                             AuditActor::System,
                             format!("Startup triage failed (non-fatal): {}", e),
-                        ),
-                    ).await;
+                        ))
+                        .await;
                 }
             }
         }
 
         // Register existing agent templates with A2A gateway for discovery
         if self.config.mcp_servers.a2a_gateway.is_some()
-            && let Err(e) = self.register_all_agent_templates().await {
-                self.audit_log.log(
-                    AuditEntry::new(
-                        AuditLevel::Warning,
-                        AuditCategory::System,
-                        AuditAction::SwarmStarted,
-                        AuditActor::System,
-                        format!("Failed to register agent templates with A2A gateway: {}", e),
-                    ),
-                ).await;
-            }
+            && let Err(e) = self.register_all_agent_templates().await
+        {
+            self.audit_log
+                .log(AuditEntry::new(
+                    AuditLevel::Warning,
+                    AuditCategory::System,
+                    AuditAction::SwarmStarted,
+                    AuditActor::System,
+                    format!("Failed to register agent templates with A2A gateway: {}", e),
+                ))
+                .await;
+        }
 
         // Wait for MCP servers to become healthy before entering the main loop.
         // If servers never come up, abort startup rather than spawning agents
         // into an environment where they can't reach the orchestration APIs.
         if let Err(e) = self.await_mcp_readiness().await {
-            self.audit_log.log(
-                AuditEntry::new(
+            self.audit_log
+                .log(AuditEntry::new(
                     AuditLevel::Error,
                     AuditCategory::System,
                     AuditAction::SwarmStarted,
                     AuditActor::System,
                     format!("Aborting orchestrator: {}", e),
-                ),
-            ).await;
+                ))
+                .await;
             let _ = event_tx.send(SwarmEvent::Stopped).await;
-            self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-                crate::services::event_bus::EventSeverity::Info,
-                crate::services::event_bus::EventPayload::OrchestratorStopped,
-            )).await;
+            self.event_bus
+                .publish(crate::services::event_factory::orchestrator_event(
+                    crate::services::event_bus::EventSeverity::Info,
+                    crate::services::event_bus::EventPayload::OrchestratorStopped,
+                ))
+                .await;
             return Err(e);
         }
 
@@ -731,11 +900,13 @@ where
         // Register built-in event handlers and schedules BEFORE starting
         // the reactor, so handlers are ready when it begins subscribing.
         self.register_builtin_handlers().await;
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStarted,
-            "Registered built-in event handlers",
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                "Registered built-in event handlers",
+            )
+            .await;
 
         // Register default pre-spawn / post-completion middleware chains.
         // These preserve the logic previously hardcoded inline in
@@ -743,84 +914,96 @@ where
         // that registered extra middleware via `with_*_middleware` keep those
         // (they were registered earlier and retain their position).
         self.register_builtin_middleware().await;
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStarted,
-            "Registered built-in lifecycle middleware",
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                "Registered built-in lifecycle middleware",
+            )
+            .await;
 
         // Load persisted circuit breaker states (after handler registration)
         self.event_reactor.load_circuit_breaker_states().await;
 
         self.register_builtin_schedules().await;
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStarted,
-            "Registered built-in scheduled events",
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                "Registered built-in scheduled events",
+            )
+            .await;
 
         // Start EventReactor (handlers are already registered)
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStarted,
-            "Starting EventReactor for reactive event handling",
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                "Starting EventReactor for reactive event handling",
+            )
+            .await;
         let reactor_handle = self.event_reactor.start();
 
         // Load persistent scheduler state from DB before starting
         self.event_scheduler.initialize_from_store().await;
 
         // Start EventScheduler
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStarted,
-            "Starting EventScheduler for time-based events",
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                "Starting EventScheduler for time-based events",
+            )
+            .await;
         let scheduler_handle = self.event_scheduler.start();
 
         // Replay missed events from the event store
         match self.event_reactor.replay_missed_events().await {
             Ok(count) if count > 0 => {
-                self.audit_log.info(
-                    AuditCategory::System,
-                    AuditAction::SwarmStarted,
-                    format!("Replayed {} missed events from event store", count),
-                ).await;
+                self.audit_log
+                    .info(
+                        AuditCategory::System,
+                        AuditAction::SwarmStarted,
+                        format!("Replayed {} missed events from event store", count),
+                    )
+                    .await;
             }
             Ok(_) => {}
             Err(e) => {
-                self.audit_log.log(
-                    AuditEntry::new(
+                self.audit_log
+                    .log(AuditEntry::new(
                         AuditLevel::Warning,
                         AuditCategory::System,
                         AuditAction::SwarmStarted,
                         AuditActor::System,
                         format!("Failed to replay missed events (non-fatal): {}", e),
-                    ),
-                ).await;
+                    ))
+                    .await;
             }
         }
 
         // Run startup reconciliation to fix inconsistent state
         match self.run_startup_reconciliation().await {
             Ok(count) if count > 0 => {
-                self.audit_log.info(
-                    AuditCategory::System,
-                    AuditAction::SwarmStarted,
-                    format!("Startup reconciliation: {} corrections applied", count),
-                ).await;
+                self.audit_log
+                    .info(
+                        AuditCategory::System,
+                        AuditAction::SwarmStarted,
+                        format!("Startup reconciliation: {} corrections applied", count),
+                    )
+                    .await;
             }
             Ok(_) => {}
             Err(e) => {
-                self.audit_log.log(
-                    AuditEntry::new(
+                self.audit_log
+                    .log(AuditEntry::new(
                         AuditLevel::Warning,
                         AuditCategory::System,
                         AuditAction::SwarmStarted,
                         AuditActor::System,
                         format!("Startup reconciliation failed (non-fatal): {}", e),
-                    ),
-                ).await;
+                    ))
+                    .await;
             }
         }
 
@@ -833,13 +1016,12 @@ where
         let reconciliation_secs = self.config.reconciliation_interval_secs.unwrap_or(30);
         let loop_interval = tokio::time::Duration::from_secs(reconciliation_secs);
         let mut reconciliation_interval = tokio::time::interval(loop_interval);
-        reconciliation_interval
-            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        reconciliation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // Periodic cleanup for processed_commands table (Issue #59).
         // Every ~24h worth of timer ticks, prune entries older than 7 days.
         let cleanup_every_n_ticks: u64 = if reconciliation_secs > 0 {
-            (24 * 3600) / reconciliation_secs  // ~2880 ticks at 30s
+            (24 * 3600) / reconciliation_secs // ~2880 ticks at 30s
         } else {
             2880
         };
@@ -898,13 +1080,15 @@ where
                     task_id = %task_id,
                     "spawn_task_agent (primed) subsystem error (isolated)"
                 );
-                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-                    crate::services::event_bus::EventSeverity::Error,
-                    crate::services::event_bus::EventPayload::SubsystemError {
-                        subsystem: "spawn_task_agent".into(),
-                        error: e.to_string(),
-                    },
-                )).await;
+                self.event_bus
+                    .publish(crate::services::event_factory::orchestrator_event(
+                        crate::services::event_bus::EventSeverity::Error,
+                        crate::services::event_bus::EventPayload::SubsystemError {
+                            subsystem: "spawn_task_agent".into(),
+                            error: e.to_string(),
+                        },
+                    ))
+                    .await;
             }
 
             // Specialist wake consumed the signalling id from the channel
@@ -916,37 +1100,43 @@ where
                 && let Err(e) = self.process_specialist_triggers(&event_tx).await
             {
                 tracing::error!(error = %e, "process_specialist_triggers (primed) subsystem error (isolated)");
-                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-                    crate::services::event_bus::EventSeverity::Error,
-                    crate::services::event_bus::EventPayload::SubsystemError {
-                        subsystem: "process_specialist_triggers".into(),
-                        error: e.to_string(),
-                    },
-                )).await;
+                self.event_bus
+                    .publish(crate::services::event_factory::orchestrator_event(
+                        crate::services::event_bus::EventSeverity::Error,
+                        crate::services::event_bus::EventPayload::SubsystemError {
+                            subsystem: "process_specialist_triggers".into(),
+                            error: e.to_string(),
+                        },
+                    ))
+                    .await;
             }
 
             // Drain any remaining queued tasks (and the DB safety-net scan
             // inside drain_ready_tasks). Cheap when the channels are empty.
             if let Err(e) = self.drain_ready_tasks(&event_tx).await {
                 tracing::error!(error = %e, "drain_ready_tasks subsystem error (isolated)");
-                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-                    crate::services::event_bus::EventSeverity::Error,
-                    crate::services::event_bus::EventPayload::SubsystemError {
-                        subsystem: "drain_ready_tasks".into(),
-                        error: e.to_string(),
-                    },
-                )).await;
+                self.event_bus
+                    .publish(crate::services::event_factory::orchestrator_event(
+                        crate::services::event_bus::EventSeverity::Error,
+                        crate::services::event_bus::EventPayload::SubsystemError {
+                            subsystem: "drain_ready_tasks".into(),
+                            error: e.to_string(),
+                        },
+                    ))
+                    .await;
             }
 
             if let Err(e) = self.drain_specialist_tasks(&event_tx).await {
                 tracing::error!(error = %e, "drain_specialist_tasks subsystem error (isolated)");
-                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-                    crate::services::event_bus::EventSeverity::Error,
-                    crate::services::event_bus::EventPayload::SubsystemError {
-                        subsystem: "drain_specialist_tasks".into(),
-                        error: e.to_string(),
-                    },
-                )).await;
+                self.event_bus
+                    .publish(crate::services::event_factory::orchestrator_event(
+                        crate::services::event_bus::EventSeverity::Error,
+                        crate::services::event_bus::EventPayload::SubsystemError {
+                            subsystem: "drain_specialist_tasks".into(),
+                            error: e.to_string(),
+                        },
+                    ))
+                    .await;
             }
 
             // Timer-bound reconciliation. Gated to timer wakes so bursts of
@@ -961,23 +1151,33 @@ where
                 && let Err(e) = self.process_evolution_refinements(&event_tx).await
             {
                 tracing::error!(error = %e, "process_evolution_refinements subsystem error (isolated)");
-                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-                    crate::services::event_bus::EventSeverity::Error,
-                    crate::services::event_bus::EventPayload::SubsystemError {
-                        subsystem: "process_evolution_refinements".into(),
-                        error: e.to_string(),
-                    },
-                )).await;
+                self.event_bus
+                    .publish(crate::services::event_factory::orchestrator_event(
+                        crate::services::event_bus::EventSeverity::Error,
+                        crate::services::event_bus::EventPayload::SubsystemError {
+                            subsystem: "process_evolution_refinements".into(),
+                            error: e.to_string(),
+                        },
+                    ))
+                    .await;
             }
 
             // Auto-shutdown: if all goals and tasks have reached terminal state
             // for 2 consecutive timer ticks, initiate graceful shutdown.
             {
                 use crate::domain::ports::GoalFilter;
-                let all_goals = self.goal_repo.list(GoalFilter::default()).await.unwrap_or_default();
+                let all_goals = self
+                    .goal_repo
+                    .list(GoalFilter::default())
+                    .await
+                    .unwrap_or_default();
                 if !all_goals.is_empty() && all_goals.iter().all(|g| g.is_terminal()) {
                     use crate::domain::ports::TaskFilter;
-                    let all_tasks = self.task_repo.list(TaskFilter::default()).await.unwrap_or_default();
+                    let all_tasks = self
+                        .task_repo
+                        .list(TaskFilter::default())
+                        .await
+                        .unwrap_or_default();
                     let has_active = all_tasks.iter().any(|t| t.status.is_active());
                     if !has_active {
                         idle_terminal_ticks += 1;
@@ -1026,11 +1226,13 @@ where
         scheduler_handle.abort();
 
         // Log swarm shutdown
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStopped,
-            "Swarm orchestrator stopped",
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStopped,
+                "Swarm orchestrator stopped",
+            )
+            .await;
 
         // Stop hourly token reset daemon if running
         if let Some(cancel) = self.hourly_reset_cancel.read().await.as_ref() {
@@ -1045,10 +1247,12 @@ where
         self.stop_embedded_mcp_servers().await;
 
         let _ = event_tx.send(SwarmEvent::Stopped).await;
-        self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-            crate::services::event_bus::EventSeverity::Info,
-            crate::services::event_bus::EventPayload::OrchestratorStopped,
-        )).await;
+        self.event_bus
+            .publish(crate::services::event_factory::orchestrator_event(
+                crate::services::event_bus::EventSeverity::Info,
+                crate::services::event_bus::EventPayload::OrchestratorStopped,
+            ))
+            .await;
         Ok(())
     }
 
@@ -1059,25 +1263,29 @@ where
         // Drain ready-task channel and spawn agents
         if let Err(e) = self.drain_ready_tasks(&tx).await {
             tracing::error!(error = %e, "tick: drain_ready_tasks subsystem error (isolated)");
-            self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-                crate::services::event_bus::EventSeverity::Error,
-                crate::services::event_bus::EventPayload::SubsystemError {
-                    subsystem: "drain_ready_tasks".into(),
-                    error: e.to_string(),
-                },
-            )).await;
+            self.event_bus
+                .publish(crate::services::event_factory::orchestrator_event(
+                    crate::services::event_bus::EventSeverity::Error,
+                    crate::services::event_bus::EventPayload::SubsystemError {
+                        subsystem: "drain_ready_tasks".into(),
+                        error: e.to_string(),
+                    },
+                ))
+                .await;
         }
 
         // Update stats
         if let Err(e) = self.update_stats(&tx).await {
             tracing::error!(error = %e, "tick: update_stats subsystem error (isolated)");
-            self.event_bus.publish(crate::services::event_factory::orchestrator_event(
-                crate::services::event_bus::EventSeverity::Error,
-                crate::services::event_bus::EventPayload::SubsystemError {
-                    subsystem: "update_stats".into(),
-                    error: e.to_string(),
-                },
-            )).await;
+            self.event_bus
+                .publish(crate::services::event_factory::orchestrator_event(
+                    crate::services::event_bus::EventSeverity::Error,
+                    crate::services::event_bus::EventPayload::SubsystemError {
+                        subsystem: "update_stats".into(),
+                        error: e.to_string(),
+                    },
+                ))
+                .await;
         }
 
         Ok(self.stats().await)
@@ -1091,10 +1299,11 @@ where
         while let Ok(task_id) = rx.try_recv() {
             // Fetch and validate task is still Ready
             if let Ok(Some(task)) = self.task_repo.get(task_id).await
-                && task.status == crate::domain::models::TaskStatus::Ready {
-                    self.spawn_task_agent(&task, event_tx).await?;
-                    spawned_ids.insert(task_id);
-                }
+                && task.status == crate::domain::models::TaskStatus::Ready
+            {
+                self.spawn_task_agent(&task, event_tx).await?;
+                spawned_ids.insert(task_id);
+            }
         }
 
         // Also pick up any ready tasks not yet signaled via the channel
@@ -1110,17 +1319,21 @@ where
     }
 
     /// Drain the specialist channel and trigger specialist processing.
-    async fn drain_specialist_tasks(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+    async fn drain_specialist_tasks(
+        &self,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
         let mut rx = self.specialist_rx.lock().await;
 
         while let Ok(task_id) = rx.try_recv() {
             // Validate task is still in a state that warrants specialist attention
             if let Ok(Some(task)) = self.task_repo.get(task_id).await
-                && task.status == crate::domain::models::TaskStatus::Failed {
-                    // Delegate to existing specialist processing
-                    self.process_specialist_triggers(event_tx).await?;
-                    break; // process_specialist_triggers handles all pending specialists
-                }
+                && task.status == crate::domain::models::TaskStatus::Failed
+            {
+                // Delegate to existing specialist processing
+                self.process_specialist_triggers(event_tx).await?;
+                break; // process_specialist_triggers handles all pending specialists
+            }
         }
 
         Ok(())
@@ -1135,8 +1348,8 @@ where
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_migrated_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository,
-        SqliteTaskRepository, SqliteWorktreeRepository,
+        SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
+        SqliteWorktreeRepository, create_migrated_test_pool,
     };
     use crate::adapters::substrates::MockSubstrate;
 
@@ -1159,15 +1372,34 @@ mod tests {
         let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
         let memory_repo = Arc::new(SqliteMemoryRepository::new(pool));
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
-        let mut config = SwarmConfig::default();
-        config.use_worktrees = false; // Disable worktrees for tests
+        // Disable worktrees for tests.
+        let config = SwarmConfig {
+            use_worktrees: false,
+            ..Default::default()
+        };
 
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-        let event_reactor = Arc::new(EventReactor::new(event_bus.clone(), ReactorConfig::default()));
-        let event_scheduler = Arc::new(EventScheduler::new(event_bus.clone(), SchedulerConfig::default()));
+        let event_reactor = Arc::new(EventReactor::new(
+            event_bus.clone(),
+            ReactorConfig::default(),
+        ));
+        let event_scheduler = Arc::new(EventScheduler::new(
+            event_bus.clone(),
+            SchedulerConfig::default(),
+        ));
 
-        SwarmOrchestrator::new(goal_repo, task_repo, worktree_repo, agent_repo, substrate, config, event_bus, event_reactor, event_scheduler)
-            .with_memory_repo(memory_repo)
+        SwarmOrchestrator::new(
+            goal_repo,
+            task_repo,
+            worktree_repo,
+            agent_repo,
+            substrate,
+            config,
+            event_bus,
+            event_reactor,
+            event_scheduler,
+        )
+        .with_memory_repo(memory_repo)
     }
 
     #[tokio::test]
@@ -1197,5 +1429,164 @@ mod tests {
     async fn test_token_tracking() {
         let orchestrator = setup_orchestrator().await;
         assert_eq!(orchestrator.total_tokens(), 0);
+    }
+
+    // ------------------------------------------------------------------------
+    // validate_dependencies() — startup validation
+    // ------------------------------------------------------------------------
+
+    /// Build an orchestrator with the "low-fuss" config path — all
+    /// convergence / verification / merge-queue features disabled — so we can
+    /// validate individual feature toggles in isolation.
+    async fn setup_orchestrator_bare(
+        config: SwarmConfig,
+    ) -> SwarmOrchestrator<
+        SqliteGoalRepository,
+        SqliteTaskRepository,
+        SqliteWorktreeRepository,
+        SqliteAgentRepository,
+        SqliteMemoryRepository,
+    > {
+        use crate::services::event_bus::{EventBus, EventBusConfig};
+        use crate::services::event_reactor::{EventReactor, ReactorConfig};
+        use crate::services::event_scheduler::{EventScheduler, SchedulerConfig};
+
+        let pool = create_migrated_test_pool().await.unwrap();
+
+        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
+        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
+
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let event_reactor = Arc::new(EventReactor::new(
+            event_bus.clone(),
+            ReactorConfig::default(),
+        ));
+        let event_scheduler = Arc::new(EventScheduler::new(
+            event_bus.clone(),
+            SchedulerConfig::default(),
+        ));
+
+        SwarmOrchestrator::new(
+            goal_repo,
+            task_repo,
+            worktree_repo,
+            agent_repo,
+            substrate,
+            config,
+            event_bus,
+            event_reactor,
+            event_scheduler,
+        )
+    }
+
+    /// Config with all optional-feature toggles off, so validate_dependencies
+    /// passes without any `with_xxx` builder calls.
+    fn disabled_feature_config() -> SwarmConfig {
+        SwarmConfig {
+            use_worktrees: false,
+            convergence_enabled: false,
+            enable_intent_verification: false,
+            use_merge_queue: false,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_dependencies_all_off_passes() {
+        // With every feature toggle disabled, no dependencies are required,
+        // so validation should pass with a bare orchestrator.
+        let orchestrator = setup_orchestrator_bare(disabled_feature_config()).await;
+        let result = orchestrator.validate_dependencies();
+        assert!(
+            result.is_ok(),
+            "validate_dependencies should pass when all feature toggles are off, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_dependencies_convergence_missing_trajectory_fails() {
+        // convergence_enabled=true but no trajectory_repo → must fail with a
+        // message that names the missing dependency and the builder method.
+        let config = SwarmConfig {
+            use_worktrees: false,
+            convergence_enabled: true,
+            // Keep other features off so we isolate the trajectory_repo check.
+            enable_intent_verification: false,
+            use_merge_queue: false,
+            ..Default::default()
+        };
+        let orchestrator = setup_orchestrator_bare(config).await;
+
+        let err = orchestrator
+            .validate_dependencies()
+            .expect_err("expected validation to fail when trajectory_repo is missing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("trajectory repository"),
+            "error should name the missing dependency; got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("with_trajectory_repo"),
+            "error should name the builder method to call; got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_dependencies_merge_queue_missing_mr_repo_fails() {
+        // use_merge_queue=true but no merge_request_repo → must fail.
+        let config = SwarmConfig {
+            use_worktrees: false,
+            use_merge_queue: true,
+            // Keep convergence off so the merge-queue path is exercised in
+            // isolation.
+            convergence_enabled: false,
+            enable_intent_verification: false,
+            ..Default::default()
+        };
+        let orchestrator = setup_orchestrator_bare(config).await;
+
+        let err = orchestrator
+            .validate_dependencies()
+            .expect_err("expected validation to fail when merge_request_repo is missing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("merge request repository"),
+            "error should name the missing dependency; got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("use_merge_queue=true"),
+            "error should echo the config flag; got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_dependencies_intent_verification_missing_verifier_fails() {
+        // enable_intent_verification=true but no intent_verifier → must fail.
+        let config = SwarmConfig {
+            use_worktrees: false,
+            enable_intent_verification: true,
+            convergence_enabled: false,
+            use_merge_queue: false,
+            ..Default::default()
+        };
+        let orchestrator = setup_orchestrator_bare(config).await;
+
+        let err = orchestrator
+            .validate_dependencies()
+            .expect_err("expected validation to fail when intent_verifier is missing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("intent verifier"),
+            "error should name the missing dependency; got: {}",
+            msg
+        );
     }
 }

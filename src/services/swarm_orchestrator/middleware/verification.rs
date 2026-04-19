@@ -10,11 +10,11 @@ use async_trait::async_trait;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::TaskStatus;
-use crate::services::{
-    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    IntegrationVerifierService, VerifierConfig,
-};
 use crate::services::swarm_orchestrator::types::SwarmEvent;
+use crate::services::{
+    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, IntegrationVerifierService,
+    VerifierConfig,
+};
 
 use super::{PostCompletionContext, PostCompletionMiddleware};
 

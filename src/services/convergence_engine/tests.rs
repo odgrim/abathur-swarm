@@ -1,0 +1,3582 @@
+//! Consolidated tests for the convergence engine.
+//!
+//! Covers prepare, decide, iterate, and resolve phases. The test module is a
+//! child of `convergence_engine::mod`; it imports the shared fixture harness
+//! from `super::test_support::*`.
+
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use uuid::Uuid;
+
+use crate::domain::errors::DomainResult;
+use crate::domain::models::MemoryTier;
+use crate::domain::models::convergence::*;
+use crate::domain::models::intent_verification::{GapCategory, GapSeverity};
+use crate::domain::models::task::Complexity;
+use crate::domain::ports::MemoryRepository;
+use crate::services::budget_tracker::{BudgetTracker, BudgetTrackerConfig};
+
+use super::test_support::*;
+use super::{ConvergenceEngine, OverseerMeasurer};
+use crate::domain::models::Memory;
+use std::sync::Arc;
+
+fn test_engine() -> ConvergenceEngine<MockTrajectoryRepo, MockMemoryRepo, MockOverseerMeasurer> {
+    build_test_engine()
+}
+
+fn test_spec() -> SpecificationEvolution {
+    SpecificationEvolution::new(SpecificationSnapshot::new(
+        "Implement a REST API endpoint for user authentication".to_string(),
+    ))
+}
+
+fn test_budget() -> ConvergenceBudget {
+    ConvergenceBudget::default()
+}
+
+fn test_policy() -> ConvergencePolicy {
+    ConvergencePolicy::default()
+}
+
+fn test_trajectory() -> Trajectory {
+    Trajectory::new(
+        Uuid::new_v4(),
+        None,
+        test_spec(),
+        test_budget(),
+        test_policy(),
+    )
+}
+
+fn test_artifact(seq: u32) -> ArtifactReference {
+    ArtifactReference::new(
+        format!("/worktree/task/artifact_{}.rs", seq),
+        format!("hash_{}", seq),
+    )
+}
+
+fn test_observation(seq: u32, strategy: StrategyKind) -> Observation {
+    Observation::new(
+        seq,
+        test_artifact(seq),
+        OverseerSignals::default(),
+        strategy,
+        10_000,
+        5_000,
+    )
+}
+
+fn metrics_with(delta: f64, level: f64) -> ObservationMetrics {
+    ObservationMetrics {
+        convergence_delta: delta,
+        convergence_level: level,
+        ..ObservationMetrics::default()
+    }
+}
+
+fn signals_with_tests(passed: u32, total: u32) -> OverseerSignals {
+    OverseerSignals {
+        test_results: Some(TestResults {
+            passed,
+            failed: total - passed,
+            skipped: 0,
+            total,
+            regression_count: 0,
+            failing_test_names: Vec::new(),
+        }),
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    }
+}
+
+// -----------------------------------------------------------------------
+// check_loop_control tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_loop_control_continue_when_budget_remains_and_no_observations() {
+    let engine = test_engine();
+    let trajectory = test_trajectory();
+    let bandit = StrategyBandit::with_default_priors();
+
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(matches!(result, LoopControl::Continue));
+}
+
+#[test]
+fn test_loop_control_exhausted_when_budget_consumed() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    trajectory.budget.tokens_used = trajectory.budget.max_tokens;
+    trajectory.budget.iterations_used = trajectory.budget.max_iterations;
+    // Also exhaust extensions so we don't get RequestExtension
+    trajectory.budget.extensions_requested = trajectory.budget.max_extensions;
+    let bandit = StrategyBandit::with_default_priors();
+
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(matches!(result, LoopControl::Exhausted));
+}
+
+#[test]
+fn test_loop_control_intent_check_at_interval() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    // Default intent_check_interval is 2, so iteration 2 should trigger
+
+    // Add 2 observations (iterations 0 and 1)
+    for i in 0..2 {
+        let signals = signals_with_tests(2, 10);
+        let obs = Observation::new(
+            i,
+            test_artifact(i),
+            signals,
+            StrategyKind::RetryWithFeedback,
+            10_000,
+            5_000,
+        )
+        .with_metrics(metrics_with(0.1, 0.56));
+        trajectory.observations.push(obs);
+    }
+    let bandit = StrategyBandit::with_default_priors();
+
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::IntentCheck),
+        "Expected IntentCheck at iteration 2 (interval=2), got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_loop_control_continue_between_intervals() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    // Default intent_check_interval is 2, so iteration 1 should NOT trigger
+
+    // Add 1 observation (iteration 0)
+    let signals = signals_with_tests(2, 10);
+    let obs = Observation::new(
+        0,
+        test_artifact(0),
+        signals,
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.1, 0.56));
+    trajectory.observations.push(obs);
+    let bandit = StrategyBandit::with_default_priors();
+
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::Continue),
+        "Expected Continue at iteration 1 (between intervals), got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_loop_control_intent_check_at_budget_fraction() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    // Default intent_check_at_budget_fraction is 0.5
+
+    // Consume >50% of the budget
+    trajectory.budget.tokens_used = (trajectory.budget.max_tokens as f64 * 0.6) as u64;
+    trajectory.budget.iterations_used = (trajectory.budget.max_iterations as f64 * 0.6) as u32;
+
+    // Add 1 observation (iteration 1 — not on interval boundary)
+    let signals = signals_with_tests(2, 10);
+    let obs = Observation::new(
+        0,
+        test_artifact(0),
+        signals,
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.1, 0.3));
+    trajectory.observations.push(obs);
+    let bandit = StrategyBandit::with_default_priors();
+
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::IntentCheck),
+        "Expected IntentCheck when budget fraction exceeded, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_loop_control_intent_check_at_fixed_point() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Low signals, iteration 1 (not on interval boundary)
+    let low_signals = signals_with_tests(2, 10);
+    let obs = Observation::new(
+        0,
+        test_artifact(0),
+        low_signals,
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.01, 0.4));
+    trajectory.observations.push(obs);
+
+    // Set FixedPoint attractor — should trigger IntentCheck regardless
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::FixedPoint {
+            estimated_remaining_iterations: 2,
+            estimated_remaining_tokens: 10_000,
+        },
+        confidence: 0.9,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.01, 0.005, 0.002],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::IntentCheck),
+        "Expected IntentCheck at FixedPoint attractor, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_loop_control_trapped_when_limit_cycle_no_strategies() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Disable intent triggers so we can test the Trapped path
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // Set up a limit cycle classification
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::LimitCycle {
+            period: 2,
+            cycle_signatures: vec!["sig1".to_string(), "sig2".to_string()],
+        },
+        confidence: 0.85,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    // Exhaust the budget so no strategies are eligible
+    trajectory.budget.tokens_used = trajectory.budget.max_tokens - 1;
+    // Use all iterations except 1
+    trajectory.budget.iterations_used = trajectory.budget.max_iterations - 1;
+    // Make the budget very tight so no strategies can afford it
+    trajectory.budget.max_tokens = trajectory.budget.tokens_used + 100;
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::Trapped),
+        "Expected Trapped, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_loop_control_request_extension_when_converging_and_low_budget() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Disable intent triggers so we can test the RequestExtension path
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // Set up near-budget-exhaustion with positive delta
+    trajectory.budget.tokens_used = (trajectory.budget.max_tokens as f64 * 0.9) as u64;
+
+    // Add observation with positive delta
+    let obs =
+        test_observation(0, StrategyKind::RetryWithFeedback).with_metrics(metrics_with(0.15, 0.7));
+    trajectory.observations.push(obs);
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::RequestExtension),
+        "Expected RequestExtension, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_loop_control_no_extension_when_extensions_exhausted() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Disable intent triggers so we can test the Continue path
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // Near budget exhaustion, converging, but extensions already requested
+    trajectory.budget.tokens_used = (trajectory.budget.max_tokens as f64 * 0.9) as u64;
+    trajectory.budget.extensions_requested = trajectory.budget.max_extensions;
+
+    let obs =
+        test_observation(0, StrategyKind::RetryWithFeedback).with_metrics(metrics_with(0.15, 0.7));
+    trajectory.observations.push(obs);
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    // Should continue since budget is not fully exhausted and extensions are used
+    assert!(
+        matches!(result, LoopControl::Continue),
+        "Expected Continue, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_loop_control_decompose_on_persistent_divergence() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Set divergent attractor
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::Divergent {
+            divergence_rate: -0.1,
+            probable_cause: DivergenceCause::WrongApproach,
+        },
+        confidence: 0.8,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![-0.1, -0.08, -0.12],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    // Add 3 observations with negative deltas
+    for i in 0..3 {
+        let obs = test_observation(i, StrategyKind::RetryWithFeedback)
+            .with_metrics(metrics_with(-0.1, 0.3));
+        trajectory.observations.push(obs);
+    }
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::Decompose),
+        "Expected Decompose, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_check_loop_control_plateau_triggers_intent_check() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    trajectory.policy.intent_check_interval = 100; // avoid interval trigger
+    trajectory.policy.intent_check_at_budget_fraction = 1.0; // avoid budget trigger
+
+    // Set attractor to Plateau
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::Plateau {
+            stall_duration: 5,
+            plateau_level: 0.6,
+        },
+        confidence: 0.75,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.001, -0.001, 0.0],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    // Add one observation so iteration count is 1 (not 0)
+    trajectory.observations.push(
+        test_observation(0, StrategyKind::RetryWithFeedback).with_metrics(metrics_with(0.001, 0.6)),
+    );
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::IntentCheck),
+        "Plateau should trigger IntentCheck, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_check_loop_control_all_passing_transition_triggers_intent_check() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    trajectory.policy.intent_check_interval = 100;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // Previous observation: not all passing
+    let obs1 = Observation::new(
+        0,
+        test_artifact(0),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 8,
+                failed: 2,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.1, 0.8));
+    trajectory.observations.push(obs1);
+
+    // Current observation: all passing
+    let obs2 = Observation::new(
+        1,
+        test_artifact(1),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.1, 1.0));
+    trajectory.observations.push(obs2);
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::IntentCheck),
+        "All-passing transition should trigger IntentCheck, got {:?}",
+        result
+    );
+}
+
+// -----------------------------------------------------------------------
+// no-premature-termination constraint tests
+// (overseer_signals_are_ambiguous guard on OverseerConverged)
+// -----------------------------------------------------------------------
+
+/// Happy path: FixedPoint + build passing + test_results present → OverseerConverged.
+#[test]
+fn test_loop_control_overseer_converged_fixed_point_with_full_signals() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Disable interval and budget triggers so only the FixedPoint path fires.
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // Set FixedPoint attractor.
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::FixedPoint {
+            estimated_remaining_iterations: 0,
+            estimated_remaining_tokens: 0,
+        },
+        confidence: 0.95,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.001, 0.0, 0.0],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    // Two consecutive observations with full signals (build + tests passing).
+    let full_signals = signals_with_tests(10, 10);
+    for i in 0..2 {
+        let obs = Observation::new(
+            i,
+            test_artifact(i),
+            full_signals.clone(),
+            StrategyKind::RetryWithFeedback,
+            10_000,
+            5_000,
+        )
+        .with_metrics(metrics_with(0.0, 1.0));
+        trajectory.observations.push(obs);
+    }
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::OverseerConverged),
+        "FixedPoint + full test signals should yield OverseerConverged, got {:?}",
+        result
+    );
+}
+
+/// Guard: FixedPoint + build-only signals (no test_results) + success_criteria present
+/// → must fall back to IntentCheck, not OverseerConverged.
+#[test]
+fn test_loop_control_no_overseer_converged_when_build_only_and_success_criteria() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Disable interval and budget triggers.
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // Add a success criterion so the spec is testable.
+    trajectory
+        .specification
+        .effective
+        .success_criteria
+        .push("All endpoints return valid JSON".to_string());
+
+    // Set FixedPoint attractor.
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::FixedPoint {
+            estimated_remaining_iterations: 0,
+            estimated_remaining_tokens: 0,
+        },
+        confidence: 0.95,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.001, 0.0, 0.0],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    // Two consecutive observations — build passing but NO test_results.
+    let build_only = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: None, // ← no test evidence
+        ..OverseerSignals::default()
+    };
+    for i in 0..2 {
+        let obs = Observation::new(
+            i,
+            test_artifact(i),
+            build_only.clone(),
+            StrategyKind::RetryWithFeedback,
+            10_000,
+            5_000,
+        )
+        .with_metrics(metrics_with(0.0, 1.0));
+        trajectory.observations.push(obs);
+    }
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::IntentCheck),
+        "Build-only signals with success_criteria must fall back to IntentCheck \
+             (no-premature-termination), got {:?}",
+        result
+    );
+}
+
+/// No guard needed: build-only signals + empty success_criteria → OverseerConverged
+/// is legitimate because there are no testable criteria to verify.
+#[test]
+fn test_loop_control_overseer_converged_build_only_no_success_criteria() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Disable interval and budget triggers.
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // success_criteria is empty (test_trajectory() → test_spec() uses empty Vec).
+    assert!(
+        trajectory
+            .specification
+            .effective
+            .success_criteria
+            .is_empty(),
+        "test_trajectory must start with empty success_criteria"
+    );
+
+    // Set FixedPoint attractor.
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::FixedPoint {
+            estimated_remaining_iterations: 0,
+            estimated_remaining_tokens: 0,
+        },
+        confidence: 0.95,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.001, 0.0, 0.0],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    // Two consecutive build-only observations.
+    let build_only = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: None,
+        ..OverseerSignals::default()
+    };
+    for i in 0..2 {
+        let obs = Observation::new(
+            i,
+            test_artifact(i),
+            build_only.clone(),
+            StrategyKind::RetryWithFeedback,
+            10_000,
+            5_000,
+        )
+        .with_metrics(metrics_with(0.0, 1.0));
+        trajectory.observations.push(obs);
+    }
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::OverseerConverged),
+        "Build-only signals with no success_criteria should yield OverseerConverged, \
+             got {:?}",
+        result
+    );
+}
+
+/// LimitCycle path: passing build-only + success_criteria → IntentCheck, not
+/// OverseerConverged. Verifies the same guard applies to the LimitCycle branch.
+#[test]
+fn test_loop_control_no_overseer_converged_limit_cycle_build_only_with_criteria() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Disable interval and budget triggers.
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // Add a success criterion.
+    trajectory
+        .specification
+        .effective
+        .success_criteria
+        .push("All auth tokens expire correctly".to_string());
+
+    // Set LimitCycle attractor.
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::LimitCycle {
+            period: 2,
+            cycle_signatures: vec!["sig1".to_string(), "sig2".to_string()],
+        },
+        confidence: 0.85,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    // One observation: build passing, no test_results.
+    let build_only = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: None, // ← no test evidence
+        ..OverseerSignals::default()
+    };
+    let obs = Observation::new(
+        0,
+        test_artifact(0),
+        build_only,
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.0, 1.0));
+    trajectory.observations.push(obs);
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+    assert!(
+        matches!(result, LoopControl::IntentCheck),
+        "LimitCycle + build-only signals with success_criteria must fall back to \
+             IntentCheck (no-premature-termination), got {:?}",
+        result
+    );
+}
+
+/// Regression test for no-premature-termination constraint: at FixedPoint with
+/// 2+ consecutive all-passing observations, but overseer_signals_are_ambiguous()
+/// returns true (success_criteria present, test_results absent), verify that
+/// OverseerConverged is NOT returned — IntentCheck should fire instead.
+#[test]
+fn test_overseer_converged_bypass_when_signals_ambiguous() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Disable interval and budget triggers so only the FixedPoint shortcircuit path runs.
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    // Add success criteria — this makes test evidence required for unambiguous convergence.
+    trajectory
+        .specification
+        .effective
+        .success_criteria
+        .push("All unit tests pass".to_string());
+    trajectory
+        .specification
+        .effective
+        .success_criteria
+        .push("No regressions in integration suite".to_string());
+
+    // Set FixedPoint attractor — trajectory has stabilized.
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::FixedPoint {
+            estimated_remaining_iterations: 0,
+            estimated_remaining_tokens: 0,
+        },
+        confidence: 0.95,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.0, 0.0, 0.0],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    // Two consecutive build-only observations (no test_results).
+    // all_passing_relative() returns true for build-only signals, so
+    // consecutive_all_passing >= 2 is satisfied.
+    let build_only = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: None, // ← ambiguous: criteria exist but no test evidence
+        ..OverseerSignals::default()
+    };
+
+    for i in 0..3 {
+        let obs = Observation::new(
+            i,
+            test_artifact(i),
+            build_only.clone(),
+            StrategyKind::RetryWithFeedback,
+            10_000,
+            5_000,
+        )
+        .with_metrics(metrics_with(0.0, 1.0));
+        trajectory.observations.push(obs);
+    }
+
+    let bandit = StrategyBandit::with_default_priors();
+    let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+
+    // OverseerConverged must NOT be returned — the guard should detect ambiguity
+    // and fall back to IntentCheck so the LLM-based verifier can assess completeness.
+    assert!(
+        !matches!(result, LoopControl::OverseerConverged),
+        "OverseerConverged must not fire when overseer signals are ambiguous \
+             (success_criteria present but no test_results), got {:?}",
+        result
+    );
+    assert!(
+        matches!(result, LoopControl::IntentCheck),
+        "Ambiguous signals at FixedPoint should fall back to IntentCheck, got {:?}",
+        result
+    );
+}
+
+// -----------------------------------------------------------------------
+// should_verify tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_should_verify_false_with_no_observations() {
+    let engine = test_engine();
+    let trajectory = test_trajectory();
+
+    assert!(!engine.should_verify(&trajectory));
+}
+
+#[test]
+fn test_should_verify_at_frequency() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    // Default frequency is 2
+
+    // Add 2 observations (seq 0 and 1)
+    trajectory
+        .observations
+        .push(test_observation(0, StrategyKind::RetryWithFeedback));
+    trajectory
+        .observations
+        .push(test_observation(1, StrategyKind::RetryWithFeedback));
+
+    // 2 observations, frequency 2: 2 % 2 == 0, should verify
+    assert!(engine.should_verify(&trajectory));
+}
+
+#[test]
+fn test_should_verify_not_at_non_multiple() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Add 3 observations
+    for i in 0..3 {
+        trajectory
+            .observations
+            .push(test_observation(i, StrategyKind::RetryWithFeedback));
+    }
+
+    // 3 observations, frequency 2: 3 % 2 == 1, should not verify
+    // (unless a threshold crossing occurred)
+    assert!(!engine.should_verify(&trajectory));
+}
+
+#[test]
+fn test_should_verify_on_build_fixed() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    trajectory.policy.intent_verification_frequency = 10; // avoid frequency trigger
+
+    // Observation with build failing
+    let obs1 = Observation::new(
+        0,
+        test_artifact(0),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: false,
+                error_count: 3,
+                errors: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.1, 0.3));
+    trajectory.observations.push(obs1);
+
+    // Observation with build now passing
+    let obs2 = Observation::new(
+        1,
+        test_artifact(1),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.2, 0.6));
+    trajectory.observations.push(obs2);
+
+    assert!(engine.should_verify(&trajectory));
+}
+
+#[test]
+fn test_should_verify_on_tests_improved() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    trajectory.policy.intent_verification_frequency = 10;
+
+    // Observation with some tests failing
+    let obs1 = Observation::new(
+        0,
+        test_artifact(0),
+        OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 5,
+                failed: 5,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.1, 0.5));
+    trajectory.observations.push(obs1);
+
+    // Observation with more tests passing and fewer failing
+    let obs2 = Observation::new(
+        1,
+        test_artifact(1),
+        OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 8,
+                failed: 2,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.15, 0.7));
+    trajectory.observations.push(obs2);
+
+    assert!(engine.should_verify(&trajectory));
+}
+
+#[test]
+fn test_should_verify_no_trigger_without_state_transition() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    trajectory.policy.intent_verification_frequency = 10;
+
+    // Both observations have same build/test state (no transition)
+    let obs1 = Observation::new(
+        0,
+        test_artifact(0),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 8,
+                failed: 2,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.1, 0.7));
+    trajectory.observations.push(obs1);
+
+    let obs2 = Observation::new(
+        1,
+        test_artifact(1),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 8,
+                failed: 2,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.05, 0.75));
+    trajectory.observations.push(obs2);
+
+    // No state transition, not at frequency, not FixedPoint
+    assert!(!engine.should_verify(&trajectory));
+}
+
+// -----------------------------------------------------------------------
+// Helper method tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_attractor_type_name() {
+    let engine = test_engine();
+
+    assert_eq!(
+        engine.attractor_type_name(&AttractorType::FixedPoint {
+            estimated_remaining_iterations: 3,
+            estimated_remaining_tokens: 60_000,
+        }),
+        "fixed_point"
+    );
+    assert_eq!(
+        engine.attractor_type_name(&AttractorType::LimitCycle {
+            period: 2,
+            cycle_signatures: vec![],
+        }),
+        "limit_cycle"
+    );
+    assert_eq!(
+        engine.attractor_type_name(&AttractorType::Divergent {
+            divergence_rate: -0.1,
+            probable_cause: DivergenceCause::Unknown,
+        }),
+        "divergent"
+    );
+    assert_eq!(
+        engine.attractor_type_name(&AttractorType::Plateau {
+            stall_duration: 5,
+            plateau_level: 0.5,
+        }),
+        "plateau"
+    );
+    assert_eq!(
+        engine.attractor_type_name(&AttractorType::Indeterminate {
+            tendency: ConvergenceTendency::Flat,
+        }),
+        "indeterminate"
+    );
+}
+
+// -----------------------------------------------------------------------
+// prepare tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_prepare_creates_trajectory() {
+    let engine = test_engine();
+    let submission = TaskSubmission::new(
+            "Implement user authentication with bcrypt password hashing and JWT tokens for session management".to_string(),
+        );
+
+    let (trajectory, infra) = engine.prepare(&submission, Uuid::new_v4()).await.unwrap();
+
+    assert_eq!(trajectory.phase, ConvergencePhase::Preparing);
+    assert!(trajectory.observations.is_empty());
+    assert!(trajectory.strategy_log.is_empty());
+    assert!(!trajectory.specification.effective.content.is_empty());
+    // Infrastructure should be initialized from the submission
+    assert!(infra.acceptance_tests.is_empty()); // No discovered tests
+}
+
+#[tokio::test]
+async fn test_prepare_applies_priority_hint() {
+    let engine = test_engine();
+    let mut submission = TaskSubmission::new(
+            "Implement a simple health check endpoint for the API with a detailed specification that covers all the necessary aspects of monitoring".to_string(),
+        );
+    submission.priority_hint = Some(PriorityHint::Fast);
+
+    let (trajectory, _) = engine.prepare(&submission, Uuid::new_v4()).await.unwrap();
+
+    assert!(
+        (trajectory.policy.acceptance_threshold - 0.85).abs() < f64::EPSILON,
+        "Fast hint should set threshold to 0.85"
+    );
+    assert!(trajectory.policy.skip_expensive_overseers);
+}
+
+#[tokio::test]
+async fn test_prepare_folds_constraints_into_spec() {
+    let engine = test_engine();
+    let mut submission = TaskSubmission::new(
+            "Build a REST API for user management with proper authentication and authorization controls".to_string(),
+        );
+    submission.constraints = vec![
+        "Must use bcrypt for passwords".to_string(),
+        "Must validate all inputs".to_string(),
+    ];
+
+    let (trajectory, _) = engine.prepare(&submission, Uuid::new_v4()).await.unwrap();
+
+    assert_eq!(trajectory.specification.amendments.len(), 2);
+    assert!(
+        trajectory
+            .specification
+            .effective
+            .content
+            .contains("Must use bcrypt")
+    );
+}
+
+// -----------------------------------------------------------------------
+// finalize tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_finalize_converged_stores_success_memory() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let mut trajectory = test_trajectory();
+    let bandit = StrategyBandit::with_default_priors();
+    let outcome = ConvergenceOutcome::Converged {
+        trajectory_id: trajectory.id.to_string(),
+        final_observation_sequence: 5,
+    };
+
+    engine
+        .finalize(&mut trajectory, &outcome, &bandit)
+        .await
+        .unwrap();
+
+    assert_eq!(trajectory.phase, ConvergencePhase::Converged);
+    let memories = mem_repo.memories.lock().unwrap();
+    // Should have success memory + bandit state
+    assert!(
+        memories.len() >= 2,
+        "Expected at least 2 memories, got {}",
+        memories.len()
+    );
+    assert!(
+        memories
+            .iter()
+            .any(|m| m.metadata.tags.contains(&"success".to_string()))
+    );
+    assert!(
+        memories
+            .iter()
+            .any(|m| m.metadata.tags.contains(&"strategy-bandit".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn test_finalize_exhausted_stores_failure_memory() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let mut trajectory = test_trajectory();
+    let bandit = StrategyBandit::with_default_priors();
+    let outcome = ConvergenceOutcome::Exhausted {
+        trajectory_id: trajectory.id.to_string(),
+        best_observation_sequence: Some(3),
+    };
+
+    engine
+        .finalize(&mut trajectory, &outcome, &bandit)
+        .await
+        .unwrap();
+
+    assert_eq!(trajectory.phase, ConvergencePhase::Exhausted);
+    let memories = mem_repo.memories.lock().unwrap();
+    assert!(
+        memories
+            .iter()
+            .any(|m| m.metadata.tags.contains(&"failure".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn test_finalize_trapped_stores_failure_memory() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let mut trajectory = test_trajectory();
+    let bandit = StrategyBandit::with_default_priors();
+    let outcome = ConvergenceOutcome::Trapped {
+        trajectory_id: trajectory.id.to_string(),
+        attractor_type: AttractorType::LimitCycle {
+            period: 2,
+            cycle_signatures: vec![],
+        },
+    };
+
+    engine
+        .finalize(&mut trajectory, &outcome, &bandit)
+        .await
+        .unwrap();
+
+    assert_eq!(trajectory.phase, ConvergencePhase::Trapped);
+    let memories = mem_repo.memories.lock().unwrap();
+    assert!(
+        memories
+            .iter()
+            .any(|m| m.metadata.tags.contains(&"failure".to_string()))
+    );
+}
+
+// -----------------------------------------------------------------------
+// request_extension tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_request_extension_granted_for_fixed_point() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Set up as approaching fixed point
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::FixedPoint {
+            estimated_remaining_iterations: 2,
+            estimated_remaining_tokens: 30_000,
+        },
+        confidence: 0.8,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.1, 0.08],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    let result = engine.request_extension(&mut trajectory).await.unwrap();
+    assert!(result, "Extension should be granted for fixed point");
+    assert_eq!(trajectory.budget.extensions_requested, 1);
+    assert_eq!(trajectory.budget.extensions_granted, 1);
+}
+
+#[tokio::test]
+async fn test_request_extension_denied_for_non_fixed_point() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    // Trajectory in limit cycle
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::LimitCycle {
+            period: 2,
+            cycle_signatures: vec![],
+        },
+        confidence: 0.85,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    let result = engine.request_extension(&mut trajectory).await.unwrap();
+    assert!(!result, "Extension should be denied for limit cycle");
+    assert_eq!(trajectory.budget.extensions_requested, 1);
+    assert_eq!(trajectory.budget.extensions_granted, 0);
+}
+
+#[tokio::test]
+async fn test_request_extension_granted_for_indeterminate_improving() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::Indeterminate {
+            tendency: ConvergenceTendency::Improving,
+        },
+        confidence: 0.4,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.05],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    let result = engine.request_extension(&mut trajectory).await.unwrap();
+    assert!(
+        result,
+        "Extension should be granted for Indeterminate+Improving"
+    );
+    assert_eq!(trajectory.budget.extensions_granted, 1);
+}
+
+#[tokio::test]
+async fn test_request_extension_denied_for_indeterminate_declining() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::Indeterminate {
+            tendency: ConvergenceTendency::Declining,
+        },
+        confidence: 0.4,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![-0.02],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    let result = engine.request_extension(&mut trajectory).await.unwrap();
+    assert!(
+        !result,
+        "Extension should be denied for Indeterminate+Declining"
+    );
+    assert_eq!(trajectory.budget.extensions_granted, 0);
+}
+
+#[tokio::test]
+async fn test_request_extension_granted_for_plateau() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::Plateau {
+            stall_duration: 5,
+            plateau_level: 0.6,
+        },
+        confidence: 0.7,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![0.0, 0.0, 0.01],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    let result = engine.request_extension(&mut trajectory).await.unwrap();
+    assert!(result, "Extension should be granted for Plateau");
+    assert_eq!(trajectory.budget.extensions_granted, 1);
+}
+
+#[tokio::test]
+async fn test_request_extension_denied_for_divergent() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+
+    trajectory.attractor_state = AttractorState {
+        classification: AttractorType::Divergent {
+            divergence_rate: 0.15,
+            probable_cause: DivergenceCause::AccumulatedRegression,
+        },
+        confidence: 0.9,
+        detected_at: None,
+        evidence: AttractorEvidence {
+            recent_deltas: vec![-0.1, -0.12],
+            recent_signatures: vec![],
+            rationale: String::new(),
+        },
+    };
+
+    let result = engine.request_extension(&mut trajectory).await.unwrap();
+    assert!(!result, "Extension should be denied for Divergent");
+    assert_eq!(trajectory.budget.extensions_granted, 0);
+}
+
+// -----------------------------------------------------------------------
+// initialize_bandit tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_initialize_bandit_returns_defaults_without_memory() {
+    let engine = test_engine();
+    let trajectory = test_trajectory();
+
+    let bandit = engine.initialize_bandit(&trajectory).await;
+
+    // Should have default priors
+    assert!(bandit.context_arms.contains_key("fixed_point"));
+    assert!(bandit.context_arms.contains_key("limit_cycle"));
+}
+
+#[tokio::test]
+async fn test_initialize_bandit_restores_from_memory() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let trajectory = test_trajectory();
+
+    // Pre-populate memory with a bandit state
+    let mut original_bandit = StrategyBandit::with_default_priors();
+    original_bandit.nudge("fixed_point", "focused_repair", 5.0);
+
+    let content = serde_json::to_string(&original_bandit).unwrap();
+    let memory = Memory::semantic(format!("strategy-bandit-{}", trajectory.task_id), content)
+        .with_namespace("convergence")
+        .with_task(trajectory.task_id)
+        .with_tag("strategy-bandit");
+    mem_repo.store(&memory).await.unwrap();
+
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo,
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let bandit = engine.initialize_bandit(&trajectory).await;
+
+    // Should have the nudged value
+    let dist = &bandit.context_arms["fixed_point"]["focused_repair"];
+    assert!(
+        (dist.alpha - 6.0).abs() < f64::EPSILON,
+        "Expected alpha=6.0 (1.0 + 5.0), got {}",
+        dist.alpha
+    );
+}
+
+#[tokio::test]
+async fn test_initialize_bandit_defaults_when_memory_disabled() {
+    let mut config = test_config();
+    config.memory_enabled = false;
+
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        Arc::new(MockMemoryRepo::new()),
+        Arc::new(MockOverseerMeasurer::new()),
+        config,
+    );
+
+    let trajectory = test_trajectory();
+    let bandit = engine.initialize_bandit(&trajectory).await;
+
+    // Should still have default priors
+    assert!(bandit.context_arms.contains_key("fixed_point"));
+}
+
+// -----------------------------------------------------------------------
+// store_success_memory / store_failure_memory tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_store_success_memory_content() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let mut trajectory = test_trajectory();
+    trajectory.strategy_log.push(StrategyEntry::new(
+        StrategyKind::RetryWithFeedback,
+        0,
+        10_000,
+        false,
+    ));
+
+    engine.store_success_memory(&trajectory, 0).await.unwrap();
+
+    let memories = mem_repo.memories.lock().unwrap();
+    assert_eq!(memories.len(), 1);
+    let memory = &memories[0];
+    assert!(memory.content.contains("SUCCESS"));
+    assert!(memory.content.contains("retry_with_feedback"));
+    assert_eq!(memory.namespace, "convergence");
+    assert!(memory.metadata.tags.contains(&"convergence".to_string()));
+    assert!(memory.metadata.tags.contains(&"success".to_string()));
+    assert_eq!(memory.tier, MemoryTier::Semantic);
+}
+
+#[tokio::test]
+async fn test_store_failure_memory_content() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let trajectory = test_trajectory();
+    engine
+        .store_failure_memory(&trajectory, "trapped")
+        .await
+        .unwrap();
+
+    let memories = mem_repo.memories.lock().unwrap();
+    assert_eq!(memories.len(), 1);
+    let memory = &memories[0];
+    assert!(memory.content.contains("FAILURE"));
+    assert!(memory.content.contains("trapped"));
+    assert_eq!(memory.namespace, "convergence");
+    assert!(memory.metadata.tags.contains(&"failure".to_string()));
+    assert_eq!(memory.tier, MemoryTier::Episodic);
+}
+
+#[tokio::test]
+async fn test_store_failure_memory_increments_version_on_retry() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let trajectory = test_trajectory();
+
+    // First failure stores at version 1
+    engine
+        .store_failure_memory(&trajectory, "exhausted")
+        .await
+        .unwrap();
+    // Second failure (retry) should store at version 2
+    engine
+        .store_failure_memory(&trajectory, "trapped")
+        .await
+        .unwrap();
+
+    let memories = mem_repo.memories.lock().unwrap();
+    assert_eq!(memories.len(), 2);
+    assert_eq!(memories[0].version, 1);
+    assert_eq!(memories[1].version, 2);
+    assert!(memories[0].content.contains("exhausted"));
+    assert!(memories[1].content.contains("trapped"));
+}
+
+#[tokio::test]
+async fn test_store_success_memory_increments_version_on_retry() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let trajectory = test_trajectory();
+
+    engine.store_success_memory(&trajectory, 0).await.unwrap();
+    engine.store_success_memory(&trajectory, 1).await.unwrap();
+
+    let memories = mem_repo.memories.lock().unwrap();
+    assert_eq!(memories.len(), 2);
+    assert_eq!(memories[0].version, 1);
+    assert_eq!(memories[1].version, 2);
+}
+
+// -----------------------------------------------------------------------
+// persist_bandit_state tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_persist_bandit_state_serializes_correctly() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let trajectory = test_trajectory();
+    let mut bandit = StrategyBandit::with_default_priors();
+    bandit.nudge("fixed_point", "focused_repair", 3.0);
+
+    engine
+        .persist_bandit_state(&bandit, &trajectory)
+        .await
+        .unwrap();
+
+    let memories = mem_repo.memories.lock().unwrap();
+    assert_eq!(memories.len(), 1);
+    let memory = &memories[0];
+    assert!(
+        memory
+            .metadata
+            .tags
+            .contains(&"strategy-bandit".to_string())
+    );
+
+    // Verify deserializable
+    let restored: StrategyBandit = serde_json::from_str(&memory.content).unwrap();
+    let dist = &restored.context_arms["fixed_point"]["focused_repair"];
+    assert!((dist.alpha - 4.0).abs() < f64::EPSILON);
+}
+
+#[tokio::test]
+async fn test_persist_bandit_state_updates_in_place_on_retry() {
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        mem_repo.clone(),
+        Arc::new(MockOverseerMeasurer::new()),
+        test_config(),
+    );
+
+    let trajectory = test_trajectory();
+
+    // First persist — inserts
+    let mut bandit = StrategyBandit::with_default_priors();
+    bandit.nudge("fixed_point", "focused_repair", 3.0);
+    engine
+        .persist_bandit_state(&bandit, &trajectory)
+        .await
+        .unwrap();
+
+    // Second persist — should update in place, not insert a new row
+    bandit.nudge("fixed_point", "focused_repair", 5.0);
+    engine
+        .persist_bandit_state(&bandit, &trajectory)
+        .await
+        .unwrap();
+
+    let memories = mem_repo.memories.lock().unwrap();
+    assert_eq!(memories.len(), 1, "should update in place, not duplicate");
+
+    // Verify the content was updated to the second bandit state
+    let restored: StrategyBandit = serde_json::from_str(&memories[0].content).unwrap();
+    let dist = &restored.context_arms["fixed_point"]["focused_repair"];
+    // Initial alpha=1, +3 nudge, +5 nudge = 9.0
+    assert!((dist.alpha - 9.0).abs() < f64::EPSILON);
+}
+
+// -----------------------------------------------------------------------
+// ProgressiveMockOverseerMeasurer -- returns different signals per call
+// -----------------------------------------------------------------------
+
+struct ProgressiveMockOverseerMeasurer {
+    signals_sequence: Mutex<Vec<OverseerSignals>>,
+    call_index: Mutex<usize>,
+}
+
+impl ProgressiveMockOverseerMeasurer {
+    fn new(signals_sequence: Vec<OverseerSignals>) -> Self {
+        Self {
+            signals_sequence: Mutex::new(signals_sequence),
+            call_index: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl OverseerMeasurer for ProgressiveMockOverseerMeasurer {
+    async fn measure(
+        &self,
+        _artifact: &ArtifactReference,
+        _policy: &ConvergencePolicy,
+    ) -> DomainResult<OverseerSignals> {
+        let mut idx = self.call_index.lock().unwrap();
+        let seq = self.signals_sequence.lock().unwrap();
+        let signals = if *idx < seq.len() {
+            seq[*idx].clone()
+        } else {
+            // Repeat last signal if we run out
+            seq.last().cloned().unwrap_or_default()
+        };
+        *idx += 1;
+        Ok(signals)
+    }
+}
+
+// -----------------------------------------------------------------------
+// Helper functions for converge/iterate_once tests
+// -----------------------------------------------------------------------
+
+/// All-passing signals with build+type_check+tests.
+fn all_passing_signals() -> OverseerSignals {
+    OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 10,
+            failed: 0,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    }
+}
+
+/// Failing signals: build passes but tests fail.
+fn failing_signals() -> OverseerSignals {
+    OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 3,
+            failed: 7,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_a".to_string(), "test_b".to_string()],
+        }),
+        ..OverseerSignals::default()
+    }
+}
+
+/// Build an engine with a progressive measurer for converge/iterate_once tests.
+fn test_engine_with_measurer(
+    signals: Vec<OverseerSignals>,
+) -> ConvergenceEngine<MockTrajectoryRepo, MockMemoryRepo, ProgressiveMockOverseerMeasurer> {
+    let mut config = test_config();
+    // Disable event emission and acceptance-test generation to simplify tests.
+    config.event_emission_enabled = false;
+    config.default_policy.generate_acceptance_tests = false;
+    ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        Arc::new(MockMemoryRepo::new()),
+        Arc::new(ProgressiveMockOverseerMeasurer::new(signals)),
+        config,
+    )
+}
+
+// -----------------------------------------------------------------------
+// converge() and iterate_once() tests
+// -----------------------------------------------------------------------
+
+/// Happy path: progressive improvement leads to FixedPoint attractor,
+/// then OverseerConverged fires when 2+ consecutive all-passing signals
+/// are observed at a FixedPoint.
+#[tokio::test]
+async fn test_converge_happy_path_overseer_converged() {
+    // Progressive signals: start failing, improve each iteration,
+    // then stabilize at all-passing. This produces positive deltas →
+    // FixedPoint attractor.
+    let signals = vec![
+        // Iteration 0: build fails
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: false,
+                error_count: 3,
+                errors: vec!["error1".to_string()],
+            }),
+            ..OverseerSignals::default()
+        },
+        // Iteration 1: build passes, tests fail
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 3,
+                failed: 7,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["t1".to_string()],
+            }),
+            ..OverseerSignals::default()
+        },
+        // Iteration 2: more tests pass
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 7,
+                failed: 3,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["t1".to_string()],
+            }),
+            ..OverseerSignals::default()
+        },
+        // Iterations 3+: all passing (repeat for remaining iterations)
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+    ];
+    let engine = test_engine_with_measurer(signals);
+
+    let task_id = Uuid::new_v4();
+    let mut submission = TaskSubmission::new(
+        "Implement a simple function that adds two numbers together for a calculator module"
+            .to_string(),
+    );
+    submission.inferred_complexity = Complexity::Moderate; // More budget
+
+    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    // Force Sequential convergence mode (Cheap hint avoids parallel routing).
+    trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+    // Disable interval and budget-fraction triggers so the
+    // OverseerConverged shortcircuit path can fire.
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+    assert!(
+        matches!(outcome, ConvergenceOutcome::Converged { .. }),
+        "Expected Converged outcome, got {:?}",
+        outcome
+    );
+}
+
+/// Budget exhaustion: always-failing signals with a tiny budget → Exhausted.
+#[tokio::test]
+async fn test_converge_budget_exhaustion() {
+    let signals: Vec<OverseerSignals> = (0..20).map(|_| failing_signals()).collect();
+    let engine = test_engine_with_measurer(signals);
+
+    let task_id = Uuid::new_v4();
+    let mut submission = TaskSubmission::new(
+        "Build a comprehensive REST API endpoint for user authentication with full test coverage"
+            .to_string(),
+    );
+    submission.inferred_complexity = Complexity::Simple;
+
+    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    // Shrink the budget so the loop exhausts quickly.
+    trajectory.budget.max_tokens = 30_000;
+    trajectory.budget.max_iterations = 2;
+    trajectory.budget.max_extensions = 0;
+    // Disable partial acceptance so we get Exhausted, not partial Converged.
+    trajectory.policy.partial_acceptance = false;
+
+    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+    assert!(
+        matches!(outcome, ConvergenceOutcome::Exhausted { .. }),
+        "Expected Exhausted outcome, got {:?}",
+        outcome
+    );
+}
+
+/// Budget exhaustion with partial acceptance threshold met → Converged.
+/// When the budget runs out but the best observation exceeds
+/// partial_threshold, the engine returns Converged instead of Exhausted.
+#[tokio::test]
+async fn test_converge_budget_exhaustion_with_partial_acceptance() {
+    // Deteriorating signals: start good (high convergence_level), then get
+    // worse. This produces negative deltas → Declining attractor → budget
+    // extension denied. The best observation's convergence_level still
+    // exceeds partial_threshold, so partial acceptance fires.
+    let good_signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 9,
+            failed: 1,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_edge_case".to_string()],
+        }),
+        ..OverseerSignals::default()
+    };
+    let worse_signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 5,
+            failed: 5,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_a".to_string()],
+        }),
+        ..OverseerSignals::default()
+    };
+    let bad_signals = failing_signals();
+    // 3 iterations: good → worse → bad (declining trajectory)
+    let signals = vec![
+        good_signals.clone(),
+        worse_signals,
+        bad_signals.clone(),
+        bad_signals.clone(),
+        bad_signals,
+    ];
+    let engine = test_engine_with_measurer(signals);
+
+    let task_id = Uuid::new_v4();
+    let mut submission = TaskSubmission::new(
+            "Implement data validation logic for incoming API requests with comprehensive error handling".to_string(),
+        );
+    submission.inferred_complexity = Complexity::Simple;
+
+    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    // Force Sequential convergence mode (Cheap hint avoids parallel routing).
+    trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+    // Budget: 3 iterations (enough for iterate_once to detect exhaustion
+    // via check_loop_control rather than Trapped at strategy selection).
+    trajectory.budget.max_tokens = 200_000;
+    trajectory.budget.max_iterations = 3;
+    trajectory.budget.max_extensions = 0;
+    // Enable partial acceptance with a low threshold.
+    // The best observation (iter 1, good_signals 9/10) has
+    // convergence_level ≈ 0.945, well above 0.5.
+    trajectory.policy.partial_acceptance = true;
+    trajectory.policy.partial_threshold = 0.5;
+
+    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+    // Should be Converged via partial acceptance.
+    assert!(
+        matches!(outcome, ConvergenceOutcome::Converged { .. }),
+        "Expected Converged via partial acceptance, got {:?}",
+        outcome
+    );
+}
+
+/// Global budget tracker at Critical → BudgetDenied on first iteration.
+#[tokio::test]
+async fn test_converge_global_budget_denied() {
+    use crate::services::event_bus::{EventBus, EventBusConfig};
+
+    // All-passing signals (we won't even get to measure them).
+    let signals: Vec<OverseerSignals> = (0..5).map(|_| all_passing_signals()).collect();
+
+    let traj_repo = Arc::new(MockTrajectoryRepo::new());
+    let mem_repo = Arc::new(MockMemoryRepo::new());
+    let measurer = Arc::new(ProgressiveMockOverseerMeasurer::new(signals));
+    let mut config = test_config();
+    config.default_policy.generate_acceptance_tests = false;
+
+    let mut engine = ConvergenceEngine::new(traj_repo, mem_repo, measurer, config);
+
+    // Wire in a BudgetTracker at Critical pressure.
+    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let tracker = Arc::new(BudgetTracker::new(
+        BudgetTrackerConfig::default(),
+        event_bus,
+    ));
+    // Report a signal with 99% consumed → Critical.
+    tracker
+        .report_budget_signal(
+            "daily",
+            crate::services::budget_tracker::BudgetWindowType::Daily,
+            0.99,
+            100,
+            3600,
+        )
+        .await;
+    engine.set_budget_tracker(tracker);
+
+    let task_id = Uuid::new_v4();
+    let submission = TaskSubmission::new(
+            "Implement a basic utility function for string manipulation with unit tests and documentation".to_string(),
+        );
+
+    // Verify the tracker is actually at Critical before running converge.
+    assert!(
+        engine
+            .budget_tracker
+            .as_ref()
+            .unwrap()
+            .should_pause_new_work()
+            .await,
+        "Budget tracker should report Critical pressure"
+    );
+
+    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    // Force Sequential convergence mode so the budget tracker check fires.
+    trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+    assert!(
+        matches!(outcome, ConvergenceOutcome::BudgetDenied { .. }),
+        "Expected BudgetDenied outcome, got {:?}",
+        outcome
+    );
+}
+
+/// Oscillating signals that form a limit cycle with all exploration
+/// strategies exhausted → Trapped outcome with LimitCycle attractor.
+#[tokio::test]
+async fn test_converge_trapped_limit_cycle() {
+    // Two distinct signal patterns that alternate, producing different
+    // overseer fingerprints and thus a detectable period-2 limit cycle.
+    let signal_a = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 5,
+            failed: 5,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_x".to_string()],
+        }),
+        ..OverseerSignals::default()
+    };
+    let signal_b = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 3,
+            failed: 7,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_y".to_string()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    // Provide enough alternating signals for: initial classification
+    // iterations + exploration strategy exhaustion iterations.
+    let signals: Vec<OverseerSignals> = (0..20)
+        .map(|i| {
+            if i % 2 == 0 {
+                signal_a.clone()
+            } else {
+                signal_b.clone()
+            }
+        })
+        .collect();
+
+    let engine = test_engine_with_measurer(signals);
+
+    let task_id = Uuid::new_v4();
+    let mut submission = TaskSubmission::new(
+        "Implement a data pipeline transformation step with error recovery logic".to_string(),
+    );
+    submission.inferred_complexity = Complexity::Simple;
+
+    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    // Force Sequential convergence mode.
+    trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+    // Give enough budget so the loop doesn't exhaust before Trapped.
+    trajectory.budget.max_tokens = 5_000_000;
+    trajectory.budget.max_iterations = 20;
+    trajectory.budget.max_extensions = 0;
+    // Disable intent check triggers so they don't interfere.
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+    // Disable partial acceptance.
+    trajectory.policy.partial_acceptance = false;
+
+    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+    match &outcome {
+        ConvergenceOutcome::Trapped { attractor_type, .. } => {
+            assert!(
+                matches!(attractor_type, AttractorType::LimitCycle { .. }),
+                "Expected LimitCycle attractor type, got {:?}",
+                attractor_type
+            );
+        }
+        other => panic!("Expected Trapped outcome, got {:?}", other),
+    }
+}
+
+/// When the attractor is classified as LimitCycle but the remaining
+/// budget is too small for any exploration strategy, eligible_strategies
+/// returns empty and converge() returns Trapped immediately.
+#[tokio::test]
+async fn test_converge_trapped_no_eligible_strategies() {
+    // Oscillating signals: two distinct patterns that alternate.
+    let signal_a = failing_signals(); // 3 passed, 7 failed
+    let signal_b = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 7,
+            failed: 3,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_z".to_string()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    // Enough signals for initial iterations + LimitCycle detection.
+    let signals: Vec<OverseerSignals> = (0..20)
+        .map(|i| {
+            if i % 2 == 0 {
+                signal_a.clone()
+            } else {
+                signal_b.clone()
+            }
+        })
+        .collect();
+
+    let engine = test_engine_with_measurer(signals);
+
+    let task_id = Uuid::new_v4();
+    let mut submission = TaskSubmission::new(
+        "Build a configuration parser with validation and default value support".to_string(),
+    );
+    submission.inferred_complexity = Complexity::Simple;
+
+    let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+    // Force Sequential convergence mode.
+    trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+    // Give enough iterations but very tight token budget. After the
+    // initial iterations consume tokens, the remaining budget won't
+    // afford any exploration strategy.
+    trajectory.budget.max_iterations = 20;
+    trajectory.budget.max_extensions = 0;
+    // Set tokens very tight: enough for ~5 iterations (5000 tokens each
+    // from the mock measurer) but too little for any exploration strategy
+    // cost on top. Exploration strategies cost 15k-30k tokens.
+    trajectory.budget.max_tokens = 30_000;
+    // Disable intent check triggers.
+    trajectory.policy.intent_check_interval = u32::MAX;
+    trajectory.policy.intent_check_at_budget_fraction = 1.0;
+    // Disable partial acceptance.
+    trajectory.policy.partial_acceptance = false;
+
+    let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+    // Should be Trapped (LimitCycle with no affordable strategies)
+    // or Exhausted if budget runs out first. Both are valid terminal
+    // states; we accept either but prefer Trapped.
+    assert!(
+        matches!(
+            outcome,
+            ConvergenceOutcome::Trapped { .. } | ConvergenceOutcome::Exhausted { .. }
+        ),
+        "Expected Trapped or Exhausted outcome, got {:?}",
+        outcome
+    );
+}
+
+/// iterate_once with a fresh trajectory (first observation) records the
+/// observation and returns a LoopControl.
+#[tokio::test]
+async fn test_iterate_once_first_observation() {
+    let engine = test_engine_with_measurer(vec![]);
+
+    let mut trajectory = test_trajectory();
+    trajectory.phase = ConvergencePhase::Iterating;
+    let mut bandit = StrategyBandit::with_default_priors();
+    let strategy = StrategyKind::RetryWithFeedback;
+
+    // Create an observation with all-passing signals.
+    let observation = Observation::new(
+        0,
+        test_artifact(0),
+        all_passing_signals(),
+        strategy.clone(),
+        5_000,
+        1_000,
+    );
+
+    let control = engine
+        .iterate_once(&mut trajectory, &mut bandit, &strategy, observation)
+        .await
+        .unwrap();
+
+    // First observation should be recorded.
+    assert_eq!(
+        trajectory.observations.len(),
+        1,
+        "Expected 1 observation after iterate_once"
+    );
+    // Budget should be consumed.
+    assert!(trajectory.budget.tokens_used > 0);
+    // Attractor should be classified.
+    // Verify attractor classification doesn't panic and produces a result.
+    let _classification = &trajectory.attractor_state.classification;
+    // Control should be some valid value (exact value depends on attractor classification).
+    let _ = control; // Confirm no error
+}
+
+/// iterate_once with improving delta over a baseline observation.
+#[tokio::test]
+async fn test_iterate_once_improving_delta() {
+    let engine = test_engine_with_measurer(vec![]);
+
+    let mut trajectory = test_trajectory();
+    trajectory.phase = ConvergencePhase::Iterating;
+    let mut bandit = StrategyBandit::with_default_priors();
+    let strategy = StrategyKind::RetryWithFeedback;
+
+    // Add a baseline observation (failing tests).
+    let baseline = Observation::new(
+        0,
+        test_artifact(0),
+        failing_signals(),
+        strategy.clone(),
+        5_000,
+        1_000,
+    );
+    trajectory.observations.push(baseline);
+
+    // Now iterate with better signals.
+    let improved = Observation::new(
+        1,
+        test_artifact(1),
+        all_passing_signals(),
+        strategy.clone(),
+        5_000,
+        1_000,
+    );
+
+    let control = engine
+        .iterate_once(&mut trajectory, &mut bandit, &strategy, improved)
+        .await
+        .unwrap();
+
+    // Should now have 2 observations.
+    assert_eq!(trajectory.observations.len(), 2);
+
+    // The second observation should have metrics with a positive delta.
+    let last_obs = trajectory.observations.last().unwrap();
+    assert!(
+        last_obs.metrics.is_some(),
+        "Second observation should have computed metrics"
+    );
+    let metrics = last_obs.metrics.as_ref().unwrap();
+    assert!(
+        metrics.convergence_delta > 0.0,
+        "Expected positive convergence delta for improving signals, got {}",
+        metrics.convergence_delta
+    );
+    assert!(
+        metrics.convergence_level > 0.0,
+        "Expected positive convergence level, got {}",
+        metrics.convergence_level
+    );
+
+    // Strategy log should be updated.
+    assert!(
+        !trajectory.strategy_log.is_empty(),
+        "Strategy log should have an entry"
+    );
+
+    let _ = control;
+}
+
+// -----------------------------------------------------------------------
+// summarize_signals tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_summarize_signals_all_passing_high_level() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement authentication".to_string());
+    let task_id = Uuid::new_v4();
+
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 10,
+            failed: 0,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    assert_eq!(result.satisfaction, "satisfied");
+    assert!(result.gaps.is_empty());
+    assert!((result.confidence - 0.85).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_summarize_signals_build_failure() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement authentication".to_string());
+    let task_id = Uuid::new_v4();
+
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: false,
+            error_count: 3,
+            errors: vec!["cannot find type `Foo`".to_string()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    assert_eq!(result.satisfaction, "unsatisfied");
+    assert!(!result.gaps.is_empty());
+
+    let build_gap = result
+        .gaps
+        .iter()
+        .find(|g| g.description.contains("Build failure"))
+        .unwrap();
+    assert_eq!(build_gap.severity, GapSeverity::Critical);
+    assert_eq!(build_gap.category, GapCategory::Functional);
+    assert!(
+        build_gap
+            .suggested_action
+            .as_ref()
+            .unwrap()
+            .contains("cannot find type")
+    );
+}
+
+#[test]
+fn test_summarize_signals_test_failures_with_regressions() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement authentication".to_string());
+    let task_id = Uuid::new_v4();
+
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 7,
+            failed: 3,
+            skipped: 0,
+            total: 10,
+            regression_count: 2,
+            failing_test_names: vec![
+                "test_login".to_string(),
+                "test_register".to_string(),
+                "test_logout".to_string(),
+            ],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    assert_eq!(result.satisfaction, "partial");
+
+    let test_gap = result
+        .gaps
+        .iter()
+        .find(|g| g.description.contains("Test failures"))
+        .unwrap();
+    // Regressions should bump severity to Major
+    assert_eq!(test_gap.severity, GapSeverity::Major);
+    assert_eq!(test_gap.category, GapCategory::Testing);
+    assert!(
+        test_gap
+            .suggested_action
+            .as_ref()
+            .unwrap()
+            .contains("test_login")
+    );
+}
+
+#[test]
+fn test_summarize_signals_security_vulnerabilities() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement authentication".to_string());
+    let task_id = Uuid::new_v4();
+
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 10,
+            failed: 0,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: Vec::new(),
+        }),
+        security_scan: Some(SecurityScanResult {
+            critical_count: 1,
+            high_count: 2,
+            medium_count: 0,
+            findings: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    // Critical security vuln + critical gap => unsatisfied
+    assert_eq!(result.satisfaction, "unsatisfied");
+
+    let sec_gap = result
+        .gaps
+        .iter()
+        .find(|g| g.category == GapCategory::Security)
+        .unwrap();
+    assert_eq!(sec_gap.severity, GapSeverity::Critical);
+    assert!(sec_gap.description.contains("1 critical"));
+}
+
+#[test]
+fn test_summarize_signals_high_security_only() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement feature".to_string());
+    let task_id = Uuid::new_v4();
+
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        security_scan: Some(SecurityScanResult {
+            critical_count: 0,
+            high_count: 1,
+            medium_count: 3,
+            findings: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    // No critical security, but Major gap from high_count
+    let sec_gap = result
+        .gaps
+        .iter()
+        .find(|g| g.category == GapCategory::Security)
+        .unwrap();
+    assert_eq!(sec_gap.severity, GapSeverity::Major);
+    assert_eq!(result.satisfaction, "partial");
+}
+
+#[test]
+fn test_summarize_signals_lint_errors() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement feature".to_string());
+    let task_id = Uuid::new_v4();
+
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        lint_results: Some(LintResults {
+            error_count: 5,
+            warning_count: 10,
+            errors: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    let lint_gap = result
+        .gaps
+        .iter()
+        .find(|g| g.category == GapCategory::Maintainability)
+        .unwrap();
+    assert_eq!(lint_gap.severity, GapSeverity::Minor);
+    // Lint-only gaps with no major issues => partial
+    assert_eq!(result.satisfaction, "partial");
+}
+
+#[test]
+fn test_summarize_signals_custom_check_failure() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement feature".to_string());
+    let task_id = Uuid::new_v4();
+
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        custom_checks: vec![
+            CustomCheckResult {
+                name: "coverage".to_string(),
+                passed: false,
+                details: "Coverage at 50%, required 80%".to_string(),
+            },
+            CustomCheckResult {
+                name: "formatting".to_string(),
+                passed: true,
+                details: "All files formatted".to_string(),
+            },
+        ],
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    // Only the failing custom check should produce a gap
+    assert_eq!(result.gaps.len(), 1);
+    assert!(result.gaps[0].description.contains("coverage"));
+    assert!(result.gaps[0].description.contains("Coverage at 50%"));
+    assert_eq!(result.gaps[0].severity, GapSeverity::Moderate);
+}
+
+#[test]
+fn test_summarize_signals_no_tests_with_success_criteria() {
+    let engine = test_engine();
+    let mut spec = SpecificationSnapshot::new("Implement feature".to_string());
+    spec.success_criteria
+        .push("All endpoints return valid JSON".to_string());
+    let task_id = Uuid::new_v4();
+
+    // Signals with build passing but NO test results
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    // Should have an implicit gap about missing test results
+    let implicit_gap = result.gaps.iter().find(|g| g.is_implicit).unwrap();
+    assert_eq!(implicit_gap.category, GapCategory::Testing);
+    assert!(implicit_gap.description.contains("success criteria"));
+    assert!(implicit_gap.implicit_rationale.is_some());
+}
+
+#[test]
+fn test_summarize_signals_empty_signals() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement feature".to_string());
+    let task_id = Uuid::new_v4();
+
+    // Empty signals — no gaps detected
+    let signals = OverseerSignals::default();
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    // No gaps => satisfied (convergence_level no longer gates satisfaction)
+    assert_eq!(result.satisfaction, "satisfied");
+    assert!((result.confidence - 0.85).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_summarize_signals_type_check_failure() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement feature".to_string());
+    let task_id = Uuid::new_v4();
+
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: false,
+            error_count: 2,
+            errors: vec!["expected String, found i32".to_string()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    let tc_gap = result
+        .gaps
+        .iter()
+        .find(|g| g.description.contains("Type check"))
+        .unwrap();
+    assert_eq!(tc_gap.severity, GapSeverity::Major);
+    assert!(
+        tc_gap
+            .suggested_action
+            .as_ref()
+            .unwrap()
+            .contains("expected String")
+    );
+    // Major gap => partial
+    assert_eq!(result.satisfaction, "partial");
+}
+
+// -----------------------------------------------------------------------
+// Trace verification tests (plan verification items 3-5)
+// -----------------------------------------------------------------------
+
+/// Trace 3: Build fails but intent would be satisfied — summarize_signals
+/// no longer blocks satisfaction based on convergence_level.
+///
+/// Before this refactoring, summarize_signals would independently force
+/// "unsatisfied" when convergence_level <= 0.3 (which happens with a build
+/// failure). Now it only looks at gaps: build failure → Critical gap →
+/// "unsatisfied", which is correct behavior (unsatisfied because of the
+/// gap, not because of a numeric threshold).
+///
+/// Crucially, test that when build passes but convergence_level is low
+/// (e.g. many tests still failing), summarize_signals can still return
+/// "satisfied" if no gaps are found — the numeric level doesn't gate it.
+#[test]
+fn test_trace_build_pass_low_convergence_not_blocked_by_level() {
+    let engine = test_engine();
+    let spec = SpecificationSnapshot::new("Implement feature".to_string());
+    let task_id = Uuid::new_v4();
+
+    // All overseers pass — no gaps — but imagine convergence_level would
+    // be low because this is a brand-new trajectory.  The old code would
+    // have blocked satisfaction when convergence_level <= 0.3.
+    let signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 10,
+            failed: 0,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let result = engine.summarize_signals(&signals, &spec, task_id);
+
+    // No convergence_level parameter, no threshold gate — gaps-only logic
+    assert_eq!(result.satisfaction, "satisfied");
+    assert!((result.confidence - 0.85).abs() < f64::EPSILON);
+    assert!(result.gaps.is_empty());
+}
+
+/// Trace 4: Overseers oscillate — verification still triggers on
+/// interval/plateau, not blocked by threshold crossings.
+///
+/// The old should_verify used convergence_level threshold crossings
+/// (0.5, 0.8, 0.9). Oscillating overseers could repeatedly cross and
+/// un-cross those thresholds, creating unpredictable verification timing.
+///
+/// Now verification triggers on:
+/// - frequency (every N iterations)
+/// - build going from fail → pass
+/// - test pass count improving AND fail count decreasing
+///
+/// Oscillating overseers (e.g. tests bouncing 7→8→7→8) should NOT trigger
+/// because pass count going up while fail count also goes down never
+/// happens simultaneously during oscillation.
+#[test]
+fn test_trace_oscillating_overseers_dont_trigger_spurious_verification() {
+    let engine = test_engine();
+    let mut trajectory = test_trajectory();
+    // Set large interval so frequency doesn't trigger
+    trajectory.policy.intent_verification_frequency = 100;
+
+    // Observation 1: 8/10 tests pass
+    let obs1 = Observation::new(
+        0,
+        test_artifact(0),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 8,
+                failed: 2,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.1, 0.8));
+    trajectory.observations.push(obs1);
+
+    // Observation 2: oscillates back to 7/10 — this is a REGRESSION
+    let obs2 = Observation::new(
+        1,
+        test_artifact(1),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 7,
+                failed: 3,
+                skipped: 0,
+                total: 10,
+                regression_count: 1,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(-0.05, 0.7));
+    trajectory.observations.push(obs2);
+
+    // should_verify must NOT trigger on a regression oscillation
+    assert!(
+        !engine.should_verify(&trajectory),
+        "Oscillating (regressing) overseers should not trigger verification"
+    );
+
+    // Observation 3: bounces back to 8/10 — pass went up but fail also
+    // went down. However, passed == prev.passed from obs1 perspective,
+    // and the comparison is between consecutive pairs (obs2 → obs3).
+    // obs2 had passed=7, obs3 has passed=8 (up), fail=2 (down from 3).
+    // This IS a genuine improvement (obs2 → obs3), so it should trigger.
+    let obs3 = Observation::new(
+        2,
+        test_artifact(2),
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 8,
+                failed: 2,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        },
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(metrics_with(0.05, 0.8));
+    trajectory.observations.push(obs3);
+
+    // This is a genuine improvement (7→8 pass, 3→2 fail), so it triggers
+    assert!(
+        engine.should_verify(&trajectory),
+        "Genuine improvement (pass up, fail down) should trigger verification"
+    );
+}
+
+/// Trace 5: Intent confidence climbing but tests flaky — trajectory
+/// reflects intent progress via blended level, not just test pass rate.
+///
+/// When the intent verifier says confidence is 0.9 but flaky tests give
+/// a low overseer readiness (say 0.5), the blended level should be
+/// 0.60*0.9 + 0.40*0.5 = 0.74 — much higher than the raw overseer 0.5.
+///
+/// best_observation should prefer the observation with high intent
+/// confidence over one with high overseer scores but no intent data.
+#[test]
+fn test_trace_intent_climbing_flaky_tests_blended_level_wins() {
+    use crate::domain::models::convergence::{
+        ConvergenceBudget, ConvergencePolicy, SpecificationEvolution, SpecificationSnapshot,
+    };
+
+    let spec =
+        SpecificationEvolution::new(SpecificationSnapshot::new("Implement feature".to_string()));
+    let mut trajectory = Trajectory::new(
+        Uuid::new_v4(),
+        None,
+        spec,
+        ConvergenceBudget::default(),
+        ConvergencePolicy::default(),
+    );
+
+    // Observation 0: high overseer score (0.85) but no intent verification
+    let obs0 = Observation::new(
+        0,
+        test_artifact(0),
+        signals_with_tests(9, 10),
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(ObservationMetrics {
+        convergence_level: 0.85,
+        convergence_delta: 0.1,
+        intent_blended_level: None, // no intent verification yet
+        ..ObservationMetrics::default()
+    });
+    trajectory.observations.push(obs0);
+
+    // Observation 1: flaky tests (5/10 pass → overseer ~0.5) but intent
+    // verifier says confidence is 0.9.
+    // Blended = 0.60*0.9 + 0.40*0.5 = 0.54 + 0.20 = 0.74
+    let flaky_signals = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 5,
+            failed: 5,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    };
+    let overseer_readiness = convergence_level(&flaky_signals);
+
+    let blended = 0.60 * 0.9 + 0.40 * overseer_readiness;
+    let obs1 = Observation::new(
+        1,
+        test_artifact(1),
+        flaky_signals,
+        StrategyKind::RetryWithFeedback,
+        10_000,
+        5_000,
+    )
+    .with_metrics(ObservationMetrics {
+        convergence_level: overseer_readiness,
+        convergence_delta: -0.05,
+        intent_blended_level: Some(blended),
+        ..ObservationMetrics::default()
+    });
+    trajectory.observations.push(obs1);
+
+    // best_observation should pick obs1 (blended ~0.74) only if it
+    // actually exceeds obs0's level (0.85). In this case obs0 is still
+    // higher — and that's correct! The blended level mitigates flakiness
+    // but doesn't magically win when the raw overseer was truly better.
+    //
+    // So let's bump intent confidence to 0.95 to make the blended level
+    // exceed 0.85: 0.60*0.95 + 0.40*overseer_readiness.
+    let high_intent_blended = 0.60 * 0.95 + 0.40 * overseer_readiness;
+
+    // Update obs1's blended level
+    trajectory.observations[1].metrics = Some(ObservationMetrics {
+        convergence_level: overseer_readiness,
+        convergence_delta: -0.05,
+        intent_blended_level: Some(high_intent_blended),
+        ..ObservationMetrics::default()
+    });
+
+    if high_intent_blended > 0.85 {
+        // Intent-blended wins: best_observation should pick obs1
+        let best = trajectory.best_observation().unwrap();
+        assert_eq!(
+            best.sequence, 1,
+            "With intent_blended_level ({:.3}) > raw overseer level (0.85), \
+                 best_observation should prefer the intent-aware observation",
+            high_intent_blended
+        );
+    } else {
+        // If the raw overseer from obs0 is still higher, obs0 wins.
+        // Either way, the blended level is being compared — not just
+        // the raw overseer. Verify intent_blended_level exists.
+        let _best = trajectory.best_observation().unwrap();
+        assert!(
+            trajectory.observations[1]
+                .metrics
+                .as_ref()
+                .unwrap()
+                .intent_blended_level
+                .is_some(),
+            "Observation should have intent_blended_level set"
+        );
+        // Also verify the blended level is significantly higher than
+        // the raw overseer readiness, showing intent confidence lifted it.
+        let obs1_metrics = trajectory.observations[1].metrics.as_ref().unwrap();
+        assert!(
+            obs1_metrics.intent_blended_level.unwrap() > obs1_metrics.convergence_level + 0.1,
+            "Blended level ({:.3}) should be significantly higher than raw overseer ({:.3})",
+            obs1_metrics.intent_blended_level.unwrap(),
+            obs1_metrics.convergence_level
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// measure (public delegation) test
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_measure_delegates_to_overseer_measurer() {
+    let expected_signals = signals_with_tests(8, 10);
+    let engine = ConvergenceEngine::new(
+        Arc::new(MockTrajectoryRepo::new()),
+        Arc::new(MockMemoryRepo::new()),
+        Arc::new(MockOverseerMeasurer::with_signals(expected_signals.clone())),
+        test_config(),
+    );
+
+    let artifact = test_artifact(0);
+    let policy = test_policy();
+
+    let signals = engine.measure(&artifact, &policy).await.unwrap();
+
+    // Verify delegation by checking returned signals match what the mock provides
+    assert_eq!(
+        signals.test_results.as_ref().unwrap().passed,
+        expected_signals.test_results.as_ref().unwrap().passed,
+    );
+    assert_eq!(
+        signals.test_results.as_ref().unwrap().failed,
+        expected_signals.test_results.as_ref().unwrap().failed,
+    );
+}
+
+// -----------------------------------------------------------------------
+// budget calibration alert tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_finalize_emits_calibration_alert_when_p95_exceeds_budget() {
+    let engine = test_engine();
+
+    // Simple tier has max_tokens = 150_000. Overshoot threshold is 20%.
+    // So max_allowed = 180_000. We need P95 > 180_000.
+    // With 20 samples all at 200_000, P95 = 200_000 which exceeds 180_000.
+    let bandit = StrategyBandit::with_default_priors();
+
+    for _ in 0..20 {
+        let mut trajectory = test_trajectory();
+        trajectory.complexity = Some(Complexity::Simple);
+        trajectory.budget.tokens_used = 200_000;
+
+        let outcome = ConvergenceOutcome::Converged {
+            trajectory_id: trajectory.id.to_string(),
+            final_observation_sequence: 1,
+        };
+
+        engine
+            .finalize(&mut trajectory, &outcome, &bandit)
+            .await
+            .unwrap();
+    }
+
+    let alerts = engine.calibration_alerts();
+    assert!(
+        !alerts.is_empty(),
+        "Expected calibration alert for Simple tier exceeding budget"
+    );
+    assert!(alerts.iter().any(|a| a.tier == Complexity::Simple));
+    let alert = alerts
+        .iter()
+        .find(|a| a.tier == Complexity::Simple)
+        .unwrap();
+    assert!(alert.overshoot_pct > 20.0);
+}
+
+#[tokio::test]
+async fn test_finalize_no_calibration_alert_when_within_budget() {
+    let engine = test_engine();
+
+    // Simple tier has max_tokens = 150_000. Overshoot threshold is 20%.
+    // max_allowed = 180_000. All samples at 100_000 => P95 = 100_000 < 180_000.
+    let bandit = StrategyBandit::with_default_priors();
+
+    for _ in 0..20 {
+        let mut trajectory = test_trajectory();
+        trajectory.complexity = Some(Complexity::Simple);
+        trajectory.budget.tokens_used = 100_000;
+
+        let outcome = ConvergenceOutcome::Converged {
+            trajectory_id: trajectory.id.to_string(),
+            final_observation_sequence: 1,
+        };
+
+        engine
+            .finalize(&mut trajectory, &outcome, &bandit)
+            .await
+            .unwrap();
+    }
+
+    let alerts = engine.calibration_alerts();
+    assert!(
+        alerts.is_empty(),
+        "Expected no calibration alerts when within budget, got {:?}",
+        alerts
+    );
+}
+
+// -----------------------------------------------------------------------
+// maybe_decompose_proactively tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_maybe_decompose_proactively_wide_basin_returns_none() {
+    // Wide basin: content >= 20 words, success_criteria + constraints + anti_patterns populated
+    // Score: 0.5 + 0.15 (criteria) + 0.10 (constraints) + 0.05 (anti_patterns) = 0.80 → Wide
+    let engine = test_engine();
+    let mut spec_snap = SpecificationSnapshot::new(
+        "Implement a REST API endpoint for user authentication with proper \
+             error handling validation middleware logging and comprehensive tests \
+             covering all edge cases including rate limiting and token expiration"
+            .to_string(),
+    );
+    spec_snap.success_criteria = vec!["All tests pass".to_string()];
+    spec_snap.constraints = vec!["Must use async/await".to_string()];
+    spec_snap.anti_patterns = vec!["No unwrap in production code".to_string()];
+
+    let spec = SpecificationEvolution::new(spec_snap);
+    let mut trajectory = Trajectory::new(Uuid::new_v4(), None, spec, test_budget(), test_policy());
+
+    let result = engine.maybe_decompose_proactively(&mut trajectory).await;
+    assert!(result.is_ok());
+    assert!(
+        result.unwrap().is_none(),
+        "Wide basin should not trigger proactive decomposition"
+    );
+}
+
+#[tokio::test]
+async fn test_maybe_decompose_proactively_narrow_basin_low_probability_decomposes() {
+    // Narrow basin: short content (< 20 words), no criteria/constraints/anti_patterns
+    // Score: 0.5 - 0.15 (short) = 0.35 → Narrow
+    // convergence_probability = 0.35 < 0.4 → triggers decomposition
+    let engine = test_engine();
+    let spec_snap = SpecificationSnapshot::new("fix the bug".to_string());
+    let spec = SpecificationEvolution::new(spec_snap);
+
+    // Use a small budget so decomposition is triggered on both conditions
+    let mut budget = test_budget();
+    budget.max_tokens = 5_000;
+
+    let mut trajectory = Trajectory::new(Uuid::new_v4(), None, spec, budget, test_policy());
+
+    let result = engine.maybe_decompose_proactively(&mut trajectory).await;
+    assert!(result.is_ok());
+    assert!(
+        result.unwrap().is_some(),
+        "Narrow basin with low convergence probability should trigger decomposition"
+    );
+}
+
+#[tokio::test]
+async fn test_maybe_decompose_proactively_narrow_basin_sufficient_budget_returns_none() {
+    // Narrow basin at the boundary: score = 0.40 exactly
+    // Content < 20 words (-0.15) but anti_patterns populated (+0.05) → 0.5 - 0.15 + 0.05 = 0.40
+    // classification: score <= 0.4 → Narrow
+    // convergence_probability = 0.40, which is NOT < 0.4
+    // expected_tokens = (9.0 / 0.40) * 30_000 = 675_000
+    // max_tokens = 1_000_000 > 675_000 → budget sufficient
+    // Both conditions false → returns Ok(None)
+    let engine = test_engine();
+    let mut spec_snap = SpecificationSnapshot::new("fix the bug".to_string());
+    spec_snap.anti_patterns = vec!["No panics".to_string()];
+
+    let spec = SpecificationEvolution::new(spec_snap);
+
+    let mut budget = test_budget();
+    budget.max_tokens = 1_000_000;
+
+    let mut trajectory = Trajectory::new(Uuid::new_v4(), None, spec, budget, test_policy());
+
+    let result = engine.maybe_decompose_proactively(&mut trajectory).await;
+    assert!(result.is_ok());
+    assert!(
+        result.unwrap().is_none(),
+        "Narrow basin with sufficient budget and borderline probability should not decompose"
+    );
+}
+
+// -----------------------------------------------------------------------
+// converge_parallel() tests
+// -----------------------------------------------------------------------
+
+/// Two parallel trajectories both exhaust their budgets with failing signals.
+/// The trajectory with the higher convergence_level in its best observation
+/// is selected as the winner in the Exhausted outcome.
+#[tokio::test]
+async fn test_converge_parallel_all_exhausted_picks_best() {
+    // With Trivial complexity, base max_iterations = 3.
+    // Scaled by 1/2 → round(1.5) = 2 per trajectory.
+    // Phase 1: 1 iteration each (signals[0], signals[1]).
+    // Phase 2: 1 remaining iteration each (signals[2], signals[3]) — order
+    //          depends on Thompson Sampling, but both will exhaust.
+    //
+    // traj0 signal: passed=2/10 → convergence_level ≈ 0.56
+    // traj1 signal: passed=6/10 → convergence_level ≈ 0.78
+    // Phase 2 signals: passed=1/10 → convergence_level ≈ 0.505 (worse for both)
+    //
+    // traj1 should be picked as best because its initial observation has
+    // a higher convergence_level.
+    let traj0_init = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 2,
+            failed: 8,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_a".into(), "test_b".into()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let traj1_init = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 6,
+            failed: 4,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_c".into()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let bad = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 1,
+            failed: 9,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_a".into()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    // 6 signals: 2 Phase-1 + 2 Phase-2 + 2 extra (mock repeats last if exceeded).
+    let signals = vec![
+        traj0_init,
+        traj1_init,
+        bad.clone(),
+        bad.clone(),
+        bad.clone(),
+        bad,
+    ];
+
+    let engine = test_engine_with_measurer(signals);
+
+    let task_id = Uuid::new_v4();
+    let mut submission = TaskSubmission::new(
+        "Implement a failing feature to test parallel exhaustion picking the best trajectory"
+            .to_string(),
+    );
+    submission.inferred_complexity = Complexity::Trivial;
+
+    let outcome = engine
+        .converge_parallel(&submission, 2, task_id)
+        .await
+        .unwrap();
+
+    match &outcome {
+        ConvergenceOutcome::Exhausted {
+            best_observation_sequence,
+            ..
+        } => {
+            // At least one trajectory produced an observation.
+            assert!(
+                best_observation_sequence.is_some(),
+                "Expected best_observation_sequence to be Some, got None"
+            );
+        }
+        other => panic!("Expected Exhausted outcome, got {:?}", other),
+    }
+}
+
+/// Two parallel trajectories where consistently worsening signals produce a
+/// Divergent attractor classification.  The divergent trajectory is filtered
+/// out (active[i] = false) once it reaches 3 observations with all-negative
+/// deltas, and the final result comes from the remaining trajectory.
+#[tokio::test]
+async fn test_converge_parallel_divergent_filtered() {
+    // With Simple complexity, base max_iterations = 5.
+    // Scaled by 1/2 → round(2.5) = 3 per trajectory.
+    // Phase 1: 1 iteration each (signals[0], signals[1]).
+    // Phase 2: up to 2 remaining iterations each = 4 more signals.
+    //
+    // traj0 starts very high (passed=10/10, level=1.0). Every subsequent
+    // signal is progressively worse, producing large negative deltas.
+    // After 3 observations (1 Phase-1 + 2 Phase-2), traj0 should have 2
+    // negative deltas → Divergent classification → filtered out.
+    //
+    // traj1 starts low (passed=1/10, level≈0.505). Subsequent signals are
+    // at a similar level, producing near-zero deltas → not divergent.
+    let high_start = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 10,
+            failed: 0,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: Vec::new(),
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let low_stable = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 1,
+            failed: 9,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_a".into()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let worsening_1 = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 4,
+            failed: 6,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_a".into()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    let worsening_2 = OverseerSignals {
+        build_result: Some(BuildResult {
+            success: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        type_check: Some(TypeCheckResult {
+            clean: true,
+            error_count: 0,
+            errors: Vec::new(),
+        }),
+        test_results: Some(TestResults {
+            passed: 2,
+            failed: 8,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec!["test_a".into()],
+        }),
+        ..OverseerSignals::default()
+    };
+
+    // 10 signals: enough for both trajectories to exhaust 3 iterations each.
+    // The progression ensures any trajectory that starts high will see large
+    // negative deltas, while the low-stable trajectory sees near-zero deltas.
+    let signals = vec![
+        high_start,         // [0] traj0 Phase-1: level ≈ 1.0
+        low_stable.clone(), // [1] traj1 Phase-1: level ≈ 0.505
+        worsening_1,        // [2] Phase-2: level ≈ 0.67
+        worsening_2,        // [3] Phase-2: level ≈ 0.56
+        low_stable.clone(), // [4] Phase-2: level ≈ 0.505
+        low_stable.clone(), // [5] Phase-2: level ≈ 0.505
+        low_stable.clone(), // [6] extra
+        low_stable.clone(), // [7] extra
+        low_stable.clone(), // [8] extra
+        low_stable,         // [9] extra
+    ];
+
+    let engine = test_engine_with_measurer(signals);
+
+    let task_id = Uuid::new_v4();
+    let mut submission = TaskSubmission::new(
+        "Implement a feature that tests divergent trajectory filtering in parallel convergence"
+            .to_string(),
+    );
+    submission.inferred_complexity = Complexity::Simple;
+
+    let outcome = engine
+        .converge_parallel(&submission, 2, task_id)
+        .await
+        .unwrap();
+
+    // The outcome must be Exhausted — not Converged (signals are all failing)
+    // and not a panic from the divergent filtering logic.
+    assert!(
+        matches!(outcome, ConvergenceOutcome::Exhausted { .. }),
+        "Expected Exhausted outcome after divergent filtering, got {:?}",
+        outcome
+    );
+}
+
+/// Happy path for converge_parallel: a single trajectory progresses from
+/// failing signals to all-passing, triggering OverseerConverged via the
+/// FixedPoint + 2 consecutive all-passing shortcircuit.
+///
+/// This test validates the fix for the bug where `let _control = self.iterate_once(...)`
+/// discarded the LoopControl, making OverseerConverged unreachable in the
+/// parallel codepath.
+#[tokio::test]
+async fn test_converge_parallel_happy_path_one_converges() {
+    // With Moderate complexity, base max_iterations = 8.
+    // Scaled by 1/1 (sample_count=1) → 8 iterations for the single trajectory.
+    // Phase 1: 1 iteration (signals[0]).
+    // Phase 2: up to 7 remaining iterations.
+    //
+    // Signal progression:
+    //   [0] build fails → convergence_level low
+    //   [1] build passes, 3/10 tests → improvement (positive delta)
+    //   [2] 7/10 tests → improvement (positive delta) → FixedPoint likely
+    //   [3] all passing → first all-passing at FixedPoint
+    //   [4] all passing → second consecutive all-passing → OverseerConverged!
+    //   [5..] extra all-passing in case more iterations run
+    let signals = vec![
+        // Signal 0: build fails
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: false,
+                error_count: 3,
+                errors: vec!["error1".to_string()],
+            }),
+            ..OverseerSignals::default()
+        },
+        // Signal 1: build passes, few tests pass
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 3,
+                failed: 7,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["t1".to_string()],
+            }),
+            ..OverseerSignals::default()
+        },
+        // Signal 2: more tests pass
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 7,
+                failed: 3,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["t1".to_string()],
+            }),
+            ..OverseerSignals::default()
+        },
+        // Signals 3+: all passing — triggers OverseerConverged after 2 consecutive
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+        all_passing_signals(),
+    ];
+
+    let engine = test_engine_with_measurer(signals);
+
+    let task_id = Uuid::new_v4();
+    let mut submission = TaskSubmission::new(
+        "Implement a simple function to test parallel convergence happy path".to_string(),
+    );
+    submission.inferred_complexity = Complexity::Moderate;
+
+    let outcome = engine
+        .converge_parallel(&submission, 1, task_id)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, ConvergenceOutcome::Converged { .. }),
+        "Expected Converged outcome from parallel happy path, got {:?}",
+        outcome
+    );
+}

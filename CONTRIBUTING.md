@@ -32,34 +32,28 @@ cargo build --release  # optimized binary at target/release/abathur
 
 ## Running Tests
 
-### Unit and integration tests (fast, no external dependencies)
+All non-ignored tests run **offline against an in-memory SQLite database** (`sqlite::memory:`) — no credentials, network, or filesystem state are required.
+
+### What each invocation runs
 
 ```bash
-cargo test
+cargo test --lib                              # Unit tests (inline #[cfg(test)] modules). Offline, no credentials.
+cargo test --test integration_test            # Integration tests: goal/task/memory/agent lifecycle. Offline, no credentials.
+cargo test --test e2e_swarm_integration_test  # Full swarm E2E. Most tests run offline against a mock substrate;
+                                              # 4 tests marked #[ignore] spawn a real Claude CLI and are skipped by default.
 ```
 
-All unit and integration tests use an in-memory SQLite database (`sqlite::memory:`) — no file system side-effects or network connections required.
+Other integration test files (`cli_integration_test`, `convergence_integration_test`, `event_system_integration`, `goal_task_integration`, `workflow_engine_integration`, `federation_integration_test`, `e2e_workflow_test`) all run offline with no credentials.
 
-### Run a specific test file
+### Real agent tests (opt-in)
 
-```bash
-cargo test --test integration_test               # Goal/task/memory/agent lifecycle
-cargo test --test cli_integration_test           # All CLI commands (uses real binary via assert_cmd)
-cargo test --test convergence_integration_test   # Convergence engine behaviour
-cargo test --test e2e_swarm_integration_test     # Full swarm E2E (mock agents)
-cargo test --test event_system_integration       # Event bus and reactor
-cargo test --test goal_task_integration          # Goal↔task tracing
-```
-
-### Real agent E2E tests (requires Claude CLI)
-
-These tests are marked `#[ignore]` by default and actually spawn Claude agents:
+The `#[ignore]`-marked tests in `tests/e2e_swarm_integration_test.rs` actually invoke the `claude` CLI and require it to be installed and authenticated (either via `ANTHROPIC_API_KEY` or the Claude CLI's own login). Run them explicitly:
 
 ```bash
 # Run only the ignored real-agent tests
 ANTHROPIC_API_KEY=your_key cargo test --test e2e_swarm_integration_test -- --ignored
 
-# Include ignored tests alongside all others
+# Include ignored tests alongside the offline ones
 ABATHUR_REAL_E2E=1 cargo test --test e2e_swarm_integration_test -- --include-ignored
 ```
 

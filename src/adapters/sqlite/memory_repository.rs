@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{AccessorId, Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType};
+use crate::domain::models::{
+    AccessorId, Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType,
+};
 use crate::domain::ports::MemoryRepository;
 
 #[derive(Clone)]
@@ -51,7 +53,7 @@ impl MemoryRepository for SqliteMemoryRepository {
 
         // Update FTS index
         let fts_q = sqlx::query(
-            "INSERT INTO memories_fts (memory_id, key, value, namespace) VALUES (?, ?, ?, ?)"
+            "INSERT INTO memories_fts (memory_id, key, value, namespace) VALUES (?, ?, ?, ?)",
         )
         .bind(memory.id.to_string())
         .bind(&memory.key)
@@ -63,10 +65,7 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Memory>> {
-        let get_q = sqlx::query_as(
-            "SELECT * FROM memories WHERE id = ?"
-        )
-        .bind(id.to_string());
+        let get_q = sqlx::query_as("SELECT * FROM memories WHERE id = ?").bind(id.to_string());
         let row: Option<MemoryRow> = exec_tx!(&self.pool, get_q, fetch_optional)?;
 
         row.map(|r| r.try_into()).transpose()
@@ -74,7 +73,7 @@ impl MemoryRepository for SqliteMemoryRepository {
 
     async fn get_by_key(&self, key: &str, namespace: &str) -> DomainResult<Option<Memory>> {
         let get_key_q = sqlx::query_as(
-            "SELECT * FROM memories WHERE key = ? AND namespace = ? ORDER BY version DESC LIMIT 1"
+            "SELECT * FROM memories WHERE key = ? AND namespace = ? ORDER BY version DESC LIMIT 1",
         )
         .bind(key)
         .bind(namespace);
@@ -92,7 +91,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                memory_type = ?, tier = ?, metadata = ?, access_count = ?,
                version = ?, updated_at = ?, last_accessed_at = ?, expires_at = ?,
                distinct_accessors = ?
-               WHERE id = ?"#
+               WHERE id = ?"#,
         )
         .bind(&memory.namespace)
         .bind(&memory.key)
@@ -115,12 +114,12 @@ impl MemoryRepository for SqliteMemoryRepository {
         }
 
         // Update FTS index
-        let fts_del_q = sqlx::query("DELETE FROM memories_fts WHERE memory_id = ?")
-            .bind(memory.id.to_string());
+        let fts_del_q =
+            sqlx::query("DELETE FROM memories_fts WHERE memory_id = ?").bind(memory.id.to_string());
         exec_tx!(&self.pool, fts_del_q, execute)?;
 
         let fts_ins_q = sqlx::query(
-            "INSERT INTO memories_fts (memory_id, key, value, namespace) VALUES (?, ?, ?, ?)"
+            "INSERT INTO memories_fts (memory_id, key, value, namespace) VALUES (?, ?, ?, ?)",
         )
         .bind(memory.id.to_string())
         .bind(&memory.key)
@@ -133,12 +132,11 @@ impl MemoryRepository for SqliteMemoryRepository {
 
     async fn delete(&self, id: Uuid) -> DomainResult<()> {
         // Delete from FTS first
-        let fts_del_q = sqlx::query("DELETE FROM memories_fts WHERE memory_id = ?")
-            .bind(id.to_string());
+        let fts_del_q =
+            sqlx::query("DELETE FROM memories_fts WHERE memory_id = ?").bind(id.to_string());
         exec_tx!(&self.pool, fts_del_q, execute)?;
 
-        let delete_q = sqlx::query("DELETE FROM memories WHERE id = ?")
-            .bind(id.to_string());
+        let delete_q = sqlx::query("DELETE FROM memories WHERE id = ?").bind(id.to_string());
         let result = exec_tx!(&self.pool, delete_q, execute)?;
 
         if result.rows_affected() == 0 {
@@ -184,7 +182,12 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(super::rows_into_lossy(rows, "memories.query"))
     }
 
-    async fn search(&self, query: &str, namespace: Option<&str>, limit: usize) -> DomainResult<Vec<Memory>> {
+    async fn search(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: usize,
+    ) -> DomainResult<Vec<Memory>> {
         let sanitized = sanitize_fts5_query(query);
 
         // If sanitization produced an empty query, return empty results immediately
@@ -225,19 +228,18 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn list_by_tier(&self, tier: MemoryTier) -> DomainResult<Vec<Memory>> {
-        let rows: Vec<MemoryRow> = sqlx::query_as(
-            "SELECT * FROM memories WHERE tier = ? ORDER BY last_accessed_at DESC"
-        )
-        .bind(tier.as_str())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<MemoryRow> =
+            sqlx::query_as("SELECT * FROM memories WHERE tier = ? ORDER BY last_accessed_at DESC")
+                .bind(tier.as_str())
+                .fetch_all(&self.pool)
+                .await?;
 
         Ok(super::rows_into_lossy(rows, "memories.list_by_tier"))
     }
 
     async fn list_by_namespace(&self, namespace: &str) -> DomainResult<Vec<Memory>> {
         let rows: Vec<MemoryRow> = sqlx::query_as(
-            "SELECT * FROM memories WHERE namespace = ? ORDER BY last_accessed_at DESC"
+            "SELECT * FROM memories WHERE namespace = ? ORDER BY last_accessed_at DESC",
         )
         .bind(namespace)
         .fetch_all(&self.pool)
@@ -249,7 +251,7 @@ impl MemoryRepository for SqliteMemoryRepository {
     async fn get_expired(&self) -> DomainResult<Vec<Memory>> {
         let now = chrono::Utc::now().to_rfc3339();
         let rows: Vec<MemoryRow> = sqlx::query_as(
-            "SELECT * FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?"
+            "SELECT * FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",
         )
         .bind(&now)
         .fetch_all(&self.pool)
@@ -264,32 +266,31 @@ impl MemoryRepository for SqliteMemoryRepository {
         // Delete from FTS first
         sqlx::query(
             r#"DELETE FROM memories_fts WHERE memory_id IN
-               (SELECT id FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?)"#
+               (SELECT id FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?)"#,
         )
         .bind(&now)
         .execute(&self.pool)
         .await?;
 
         // Delete from main table
-        let result = sqlx::query(
-            "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?"
-        )
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?")
+                .bind(&now)
+                .execute(&self.pool)
+                .await?;
 
         Ok(result.rows_affected())
     }
 
     async fn get_decayed(&self, threshold: f32) -> DomainResult<Vec<Memory>> {
         // We can't compute decay in SQL easily, so fetch all and filter
-        let rows: Vec<MemoryRow> = sqlx::query_as(
-            "SELECT * FROM memories WHERE tier != 'semantic'"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<MemoryRow> =
+            sqlx::query_as("SELECT * FROM memories WHERE tier != 'semantic'")
+                .fetch_all(&self.pool)
+                .await?;
 
-        let memories: Vec<Memory> = rows.into_iter()
+        let memories: Vec<Memory> = rows
+            .into_iter()
             .filter_map(|r| r.try_into().ok())
             .filter(|m: &Memory| m.decay_factor() < threshold)
             .collect();
@@ -302,14 +303,15 @@ impl MemoryRepository for SqliteMemoryRepository {
         let rows: Vec<MemoryRow> = sqlx::query_as(
             r#"SELECT * FROM memories
                WHERE metadata LIKE ?
-               ORDER BY last_accessed_at DESC"#
+               ORDER BY last_accessed_at DESC"#,
         )
         .bind(format!("%{}%", task_id_str))
         .fetch_all(&self.pool)
         .await?;
 
         // Filter to only those actually matching task_id in metadata
-        let memories: Vec<Memory> = rows.into_iter()
+        let memories: Vec<Memory> = rows
+            .into_iter()
             .filter_map(|r| r.try_into().ok())
             .filter(|m: &Memory| m.metadata.task_id == Some(task_id))
             .collect();
@@ -322,13 +324,14 @@ impl MemoryRepository for SqliteMemoryRepository {
         let rows: Vec<MemoryRow> = sqlx::query_as(
             r#"SELECT * FROM memories
                WHERE metadata LIKE ?
-               ORDER BY last_accessed_at DESC"#
+               ORDER BY last_accessed_at DESC"#,
         )
         .bind(format!("%{}%", goal_id_str))
         .fetch_all(&self.pool)
         .await?;
 
-        let memories: Vec<Memory> = rows.into_iter()
+        let memories: Vec<Memory> = rows
+            .into_iter()
             .filter_map(|r| r.try_into().ok())
             .filter(|m: &Memory| m.metadata.goal_id == Some(goal_id))
             .collect();
@@ -337,11 +340,10 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn count_by_tier(&self) -> DomainResult<HashMap<MemoryTier, u64>> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT tier, COUNT(*) FROM memories GROUP BY tier"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT tier, COUNT(*) FROM memories GROUP BY tier")
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut counts = HashMap::new();
         for (tier_str, count) in rows {
@@ -404,13 +406,13 @@ impl TryFrom<MemoryRow> for Memory {
     fn try_from(row: MemoryRow) -> Result<Self, Self::Error> {
         let id = super::parse_uuid(&row.id)?;
 
-        let tier = row.tier
+        let tier = row
+            .tier
             .as_deref()
             .and_then(MemoryTier::from_str)
             .unwrap_or(MemoryTier::Working);
 
-        let memory_type = MemoryType::from_str(&row.memory_type)
-            .unwrap_or(MemoryType::Fact);
+        let memory_type = MemoryType::from_str(&row.memory_type).unwrap_or(MemoryType::Fact);
 
         let metadata: MemoryMetadata = super::parse_json_or_default(row.metadata)?;
 
@@ -463,8 +465,7 @@ mod tests {
     async fn test_store_and_get_memory() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::working("test_key", "test content")
-            .with_namespace("test");
+        let memory = Memory::working("test_key", "test content").with_namespace("test");
 
         repo.store(&memory).await.unwrap();
 
@@ -477,8 +478,7 @@ mod tests {
     async fn test_get_by_key() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::episodic("lookup_key", "some value")
-            .with_namespace("test");
+        let memory = Memory::episodic("lookup_key", "some value").with_namespace("test");
 
         repo.store(&memory).await.unwrap();
 
@@ -512,7 +512,9 @@ mod tests {
 
         repo.store(&Memory::working("w1", "content")).await.unwrap();
         repo.store(&Memory::working("w2", "content")).await.unwrap();
-        repo.store(&Memory::semantic("s1", "content")).await.unwrap();
+        repo.store(&Memory::semantic("s1", "content"))
+            .await
+            .unwrap();
 
         let counts = repo.count_by_tier().await.unwrap();
         assert_eq!(*counts.get(&MemoryTier::Working).unwrap_or(&0), 2);
@@ -589,7 +591,10 @@ mod tests {
     #[test]
     fn test_sanitize_fts5_mixed_reserved_and_normal() {
         let result = sanitize_fts5_query("find AND memory OR context NOT stale");
-        assert_eq!(result, "\"find\" \"AND\" \"memory\" \"OR\" \"context\" \"NOT\" \"stale\"");
+        assert_eq!(
+            result,
+            "\"find\" \"AND\" \"memory\" \"OR\" \"context\" \"NOT\" \"stale\""
+        );
     }
 
     // ---- Integration tests: search through FTS5 with reserved words ----
@@ -598,8 +603,7 @@ mod tests {
     async fn test_search_empty_query_returns_empty() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::working("k1", "some content")
-            .with_namespace("test");
+        let memory = Memory::working("k1", "some content").with_namespace("test");
         repo.store(&memory).await.unwrap();
 
         let results = repo.search("", None, 10).await.unwrap();
@@ -610,8 +614,7 @@ mod tests {
     async fn test_search_whitespace_query_returns_empty() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::working("k1", "some content")
-            .with_namespace("test");
+        let memory = Memory::working("k1", "some content").with_namespace("test");
         repo.store(&memory).await.unwrap();
 
         let results = repo.search("   ", None, 10).await.unwrap();
@@ -623,75 +626,85 @@ mod tests {
         let repo = setup_test_repo().await;
 
         // Store a memory whose content literally contains "AND"
-        let memory = Memory::working("reserved_and", "this AND that together")
-            .with_namespace("test");
+        let memory =
+            Memory::working("reserved_and", "this AND that together").with_namespace("test");
         repo.store(&memory).await.unwrap();
 
         // Searching for "AND" should NOT crash — it should just work
         let results = repo.search("AND", None, 10).await.unwrap();
         // FTS5 will look for the literal token "and" (case-insensitive)
         // The memory content contains "AND" so it should match
-        assert!(!results.is_empty(), "search for reserved word AND should not crash and should find matching content");
+        assert!(
+            !results.is_empty(),
+            "search for reserved word AND should not crash and should find matching content"
+        );
     }
 
     #[tokio::test]
     async fn test_search_with_reserved_word_or() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::working("reserved_or", "use OR logic here")
-            .with_namespace("test");
+        let memory = Memory::working("reserved_or", "use OR logic here").with_namespace("test");
         repo.store(&memory).await.unwrap();
 
         let results = repo.search("OR", None, 10).await.unwrap();
-        assert!(!results.is_empty(), "search for reserved word OR should not crash");
+        assert!(
+            !results.is_empty(),
+            "search for reserved word OR should not crash"
+        );
     }
 
     #[tokio::test]
     async fn test_search_with_reserved_word_not() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::working("reserved_not", "do NOT forget this")
-            .with_namespace("test");
+        let memory = Memory::working("reserved_not", "do NOT forget this").with_namespace("test");
         repo.store(&memory).await.unwrap();
 
         let results = repo.search("NOT", None, 10).await.unwrap();
-        assert!(!results.is_empty(), "search for reserved word NOT should not crash");
+        assert!(
+            !results.is_empty(),
+            "search for reserved word NOT should not crash"
+        );
     }
 
     #[tokio::test]
     async fn test_search_with_reserved_word_near() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::working("reserved_near", "look NEAR the edge")
-            .with_namespace("test");
+        let memory = Memory::working("reserved_near", "look NEAR the edge").with_namespace("test");
         repo.store(&memory).await.unwrap();
 
         let results = repo.search("NEAR", None, 10).await.unwrap();
-        assert!(!results.is_empty(), "search for reserved word NEAR should not crash");
+        assert!(
+            !results.is_empty(),
+            "search for reserved word NEAR should not crash"
+        );
     }
 
     #[tokio::test]
     async fn test_search_with_column_prefix_syntax() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::working("col_prefix", "key: value pairs are common")
-            .with_namespace("test");
+        let memory =
+            Memory::working("col_prefix", "key: value pairs are common").with_namespace("test");
         repo.store(&memory).await.unwrap();
 
         // "key:" would normally be interpreted as a column filter; sanitization prevents that
         let results = repo.search("key:", None, 10).await.unwrap();
         // Should not crash, regardless of whether it finds matches
-        assert!(results.is_empty() || !results.is_empty(), "search with column prefix should not crash");
+        assert!(
+            results.is_empty() || !results.is_empty(),
+            "search with column prefix should not crash"
+        );
     }
 
     #[tokio::test]
     async fn test_search_with_namespace_filter() {
         let repo = setup_test_repo().await;
 
-        let memory_a = Memory::working("ns_a", "convergence loop feedback")
-            .with_namespace("alpha");
-        let memory_b = Memory::working("ns_b", "convergence loop feedback")
-            .with_namespace("beta");
+        let memory_a = Memory::working("ns_a", "convergence loop feedback").with_namespace("alpha");
+        let memory_b = Memory::working("ns_b", "convergence loop feedback").with_namespace("beta");
         repo.store(&memory_a).await.unwrap();
         repo.store(&memory_b).await.unwrap();
 
@@ -704,12 +717,15 @@ mod tests {
     async fn test_search_normal_query_still_works() {
         let repo = setup_test_repo().await;
 
-        let memory = Memory::working("normal_search", "the quick brown fox jumps")
-            .with_namespace("test");
+        let memory =
+            Memory::working("normal_search", "the quick brown fox jumps").with_namespace("test");
         repo.store(&memory).await.unwrap();
 
         let results = repo.search("quick brown", None, 10).await.unwrap();
-        assert!(!results.is_empty(), "normal multi-word search should still find content");
+        assert!(
+            !results.is_empty(),
+            "normal multi-word search should still find content"
+        );
         assert_eq!(results[0].key, "normal_search");
     }
 
@@ -723,6 +739,9 @@ mod tests {
 
         // This query mixes reserved words with normal words — previously would crash
         let results = repo.search("find AND memory", None, 10).await.unwrap();
-        assert!(!results.is_empty(), "mixed reserved + normal term search should not crash");
+        assert!(
+            !results.is_empty(),
+            "mixed reserved + normal term search should not crash"
+        );
     }
 }

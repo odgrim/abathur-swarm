@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use thiserror::Error;
 use std::time::Duration;
+use thiserror::Error;
 use uuid::Uuid;
 
 use super::event_bus::{EventCategory, EventSeverity, SequenceNumber, UnifiedEvent};
@@ -174,28 +174,44 @@ pub trait EventStore: Send + Sync {
     }
 
     /// Get a single event by sequence number.
-    async fn get_by_sequence(&self, sequence: SequenceNumber) -> Result<Option<UnifiedEvent>, EventStoreError> {
-        let events = self.query(
-            EventQuery::new()
-                .since_sequence(sequence)
-                .until_sequence(sequence)
-                .limit(1)
-        ).await?;
+    async fn get_by_sequence(
+        &self,
+        sequence: SequenceNumber,
+    ) -> Result<Option<UnifiedEvent>, EventStoreError> {
+        let events = self
+            .query(
+                EventQuery::new()
+                    .since_sequence(sequence)
+                    .until_sequence(sequence)
+                    .limit(1),
+            )
+            .await?;
         Ok(events.into_iter().next())
     }
 
     /// Get events since a sequence number (for replay).
-    async fn replay_since(&self, sequence: SequenceNumber) -> Result<Vec<UnifiedEvent>, EventStoreError> {
-        self.query(EventQuery::new().since_sequence(sequence).ascending()).await
+    async fn replay_since(
+        &self,
+        sequence: SequenceNumber,
+    ) -> Result<Vec<UnifiedEvent>, EventStoreError> {
+        self.query(EventQuery::new().since_sequence(sequence).ascending())
+            .await
     }
 
     /// Get the last processed sequence number for a handler.
-    async fn get_watermark(&self, _handler_name: &str) -> Result<Option<SequenceNumber>, EventStoreError> {
+    async fn get_watermark(
+        &self,
+        _handler_name: &str,
+    ) -> Result<Option<SequenceNumber>, EventStoreError> {
         Ok(None)
     }
 
     /// Set the last processed sequence number for a handler.
-    async fn set_watermark(&self, _handler_name: &str, _seq: SequenceNumber) -> Result<(), EventStoreError> {
+    async fn set_watermark(
+        &self,
+        _handler_name: &str,
+        _seq: SequenceNumber,
+    ) -> Result<(), EventStoreError> {
         Ok(())
     }
 
@@ -209,7 +225,11 @@ pub trait EventStore: Send + Sync {
     ///
     /// Returns a list of (gap_start, gap_end) pairs representing missing
     /// sequence ranges. Used by ReconciliationHandler to detect lost events.
-    async fn detect_sequence_gaps(&self, _from: u64, _to: u64) -> Result<Vec<(u64, u64)>, EventStoreError> {
+    async fn detect_sequence_gaps(
+        &self,
+        _from: u64,
+        _to: u64,
+    ) -> Result<Vec<(u64, u64)>, EventStoreError> {
         Ok(vec![])
     }
 
@@ -227,7 +247,10 @@ pub trait EventStore: Send + Sync {
 
     /// Get dead letter entries that are ready for retry (resolved_at IS NULL,
     /// retry_count < max_retries, next_retry_at <= now).
-    async fn get_retryable_dead_letters(&self, _limit: u32) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+    async fn get_retryable_dead_letters(
+        &self,
+        _limit: u32,
+    ) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
         Ok(vec![])
     }
 
@@ -237,14 +260,20 @@ pub trait EventStore: Send + Sync {
     }
 
     /// Increment retry count and set next_retry_at for a dead letter entry.
-    async fn increment_dead_letter_retry(&self, _id: &str, _next_retry_at: DateTime<Utc>) -> Result<(), EventStoreError> {
+    async fn increment_dead_letter_retry(
+        &self,
+        _id: &str,
+        _next_retry_at: DateTime<Utc>,
+    ) -> Result<(), EventStoreError> {
         Ok(())
     }
 
     // -- Circuit breaker persistence --
 
     /// Load all persisted circuit breaker states.
-    async fn load_circuit_breaker_states(&self) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
+    async fn load_circuit_breaker_states(
+        &self,
+    ) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
         Ok(vec![])
     }
 
@@ -308,7 +337,10 @@ pub trait EventStore: Send + Sync {
     }
 
     /// List active webhooks matching a category filter.
-    async fn list_active_webhooks_for_category(&self, _category: &str) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+    async fn list_active_webhooks_for_category(
+        &self,
+        _category: &str,
+    ) -> Result<Vec<WebhookSubscription>, EventStoreError> {
         Ok(vec![])
     }
 
@@ -318,7 +350,11 @@ pub trait EventStore: Send + Sync {
     }
 
     /// Update the last delivered sequence for a webhook.
-    async fn update_webhook_sequence(&self, _id: &str, _sequence: u64) -> Result<(), EventStoreError> {
+    async fn update_webhook_sequence(
+        &self,
+        _id: &str,
+        _sequence: u64,
+    ) -> Result<(), EventStoreError> {
         Ok(())
     }
 }
@@ -392,37 +428,45 @@ impl EventStore for InMemoryEventStore {
             .iter()
             .filter(|e| {
                 if let Some(seq) = query.since_sequence
-                    && e.sequence < seq {
-                        return false;
-                    }
+                    && e.sequence < seq
+                {
+                    return false;
+                }
                 if let Some(seq) = query.until_sequence
-                    && e.sequence > seq {
-                        return false;
-                    }
+                    && e.sequence > seq
+                {
+                    return false;
+                }
                 if let Some(goal_id) = query.goal_id
-                    && e.goal_id != Some(goal_id) {
-                        return false;
-                    }
+                    && e.goal_id != Some(goal_id)
+                {
+                    return false;
+                }
                 if let Some(task_id) = query.task_id
-                    && e.task_id != Some(task_id) {
-                        return false;
-                    }
+                    && e.task_id != Some(task_id)
+                {
+                    return false;
+                }
                 if let Some(corr_id) = query.correlation_id
-                    && e.correlation_id != Some(corr_id) {
-                        return false;
-                    }
+                    && e.correlation_id != Some(corr_id)
+                {
+                    return false;
+                }
                 if let Some(category) = query.category
-                    && e.category != category {
-                        return false;
-                    }
+                    && e.category != category
+                {
+                    return false;
+                }
                 if let Some(since) = query.since_time
-                    && e.timestamp < since {
-                        return false;
-                    }
+                    && e.timestamp < since
+                {
+                    return false;
+                }
                 if let Some(until) = query.until_time
-                    && e.timestamp > until {
-                        return false;
-                    }
+                    && e.timestamp > until
+                {
+                    return false;
+                }
                 true
             })
             .cloned()
@@ -466,9 +510,10 @@ impl EventStore for InMemoryEventStore {
             }
             // Never prune events at or above the minimum handler watermark
             if let Some(wm) = min_watermark
-                && e.sequence >= wm {
-                    return true;
-                }
+                && e.sequence >= wm
+            {
+                return true;
+            }
             false
         });
         Ok((original_len - events.len()) as u64)
@@ -476,12 +521,19 @@ impl EventStore for InMemoryEventStore {
 
     // === Watermarks ===
 
-    async fn get_watermark(&self, handler_name: &str) -> Result<Option<SequenceNumber>, EventStoreError> {
+    async fn get_watermark(
+        &self,
+        handler_name: &str,
+    ) -> Result<Option<SequenceNumber>, EventStoreError> {
         let watermarks = self.watermarks.read().await;
         Ok(watermarks.get(handler_name).copied())
     }
 
-    async fn set_watermark(&self, handler_name: &str, seq: SequenceNumber) -> Result<(), EventStoreError> {
+    async fn set_watermark(
+        &self,
+        handler_name: &str,
+        seq: SequenceNumber,
+    ) -> Result<(), EventStoreError> {
         let mut watermarks = self.watermarks.write().await;
         watermarks.insert(handler_name.to_string(), seq);
         Ok(())
@@ -494,7 +546,11 @@ impl EventStore for InMemoryEventStore {
 
     // === Sequence Gap Detection ===
 
-    async fn detect_sequence_gaps(&self, from: u64, to: u64) -> Result<Vec<(u64, u64)>, EventStoreError> {
+    async fn detect_sequence_gaps(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<(u64, u64)>, EventStoreError> {
         let events = self.events.read().await;
         let present: std::collections::HashSet<u64> = events
             .iter()
@@ -545,7 +601,10 @@ impl EventStore for InMemoryEventStore {
         Ok(())
     }
 
-    async fn get_retryable_dead_letters(&self, limit: u32) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+    async fn get_retryable_dead_letters(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
         let dead_letters = self.dead_letters.read().await;
         let now = Utc::now();
         let result: Vec<_> = dead_letters
@@ -569,7 +628,11 @@ impl EventStore for InMemoryEventStore {
         Ok(())
     }
 
-    async fn increment_dead_letter_retry(&self, id: &str, next_retry_at: DateTime<Utc>) -> Result<(), EventStoreError> {
+    async fn increment_dead_letter_retry(
+        &self,
+        id: &str,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<(), EventStoreError> {
         let mut dead_letters = self.dead_letters.write().await;
         if let Some(dl) = dead_letters.iter_mut().find(|dl| dl.id == id) {
             dl.retry_count += 1;
@@ -606,7 +669,9 @@ impl EventStore for InMemoryEventStore {
 
     // === Circuit Breakers ===
 
-    async fn load_circuit_breaker_states(&self) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
+    async fn load_circuit_breaker_states(
+        &self,
+    ) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
         let cbs = self.circuit_breakers.read().await;
         Ok(cbs.clone())
     }
@@ -682,13 +747,14 @@ impl EventStore for InMemoryEventStore {
         Ok(())
     }
 
-    async fn list_active_webhooks_for_category(&self, category: &str) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+    async fn list_active_webhooks_for_category(
+        &self,
+        category: &str,
+    ) -> Result<Vec<WebhookSubscription>, EventStoreError> {
         let webhooks = self.webhooks.read().await;
         let result: Vec<_> = webhooks
             .iter()
-            .filter(|w| {
-                w.active && w.filter_category.as_deref().is_none_or(|c| c == category)
-            })
+            .filter(|w| w.active && w.filter_category.as_deref().is_none_or(|c| c == category))
             .cloned()
             .collect();
         Ok(result)
@@ -705,7 +771,11 @@ impl EventStore for InMemoryEventStore {
         Ok(())
     }
 
-    async fn update_webhook_sequence(&self, id: &str, sequence: u64) -> Result<(), EventStoreError> {
+    async fn update_webhook_sequence(
+        &self,
+        id: &str,
+        sequence: u64,
+    ) -> Result<(), EventStoreError> {
         let mut webhooks = self.webhooks.write().await;
         if let Some(w) = webhooks.iter_mut().find(|w| w.id == id) {
             w.last_delivered_sequence = sequence;
@@ -745,7 +815,10 @@ mod tests {
         let all = store.query(EventQuery::new()).await.unwrap();
         assert_eq!(all.len(), 3);
 
-        let since = store.query(EventQuery::new().since_sequence(SequenceNumber(1))).await.unwrap();
+        let since = store
+            .query(EventQuery::new().since_sequence(SequenceNumber(1)))
+            .await
+            .unwrap();
         assert_eq!(since.len(), 2);
     }
 
@@ -757,11 +830,17 @@ mod tests {
             store.append(&make_test_event(i)).await.unwrap();
         }
 
-        let page1 = store.query(EventQuery::new().limit(3).ascending()).await.unwrap();
+        let page1 = store
+            .query(EventQuery::new().limit(3).ascending())
+            .await
+            .unwrap();
         assert_eq!(page1.len(), 3);
         assert_eq!(page1[0].sequence.0, 0);
 
-        let page2 = store.query(EventQuery::new().limit(3).offset(3).ascending()).await.unwrap();
+        let page2 = store
+            .query(EventQuery::new().limit(3).offset(3).ascending())
+            .await
+            .unwrap();
         assert_eq!(page2.len(), 3);
         assert_eq!(page2[0].sequence.0, 3);
     }
@@ -777,6 +856,9 @@ mod tests {
         store.append(&make_test_event(10)).await.unwrap();
 
         assert_eq!(store.count().await.unwrap(), 2);
-        assert_eq!(store.latest_sequence().await.unwrap(), Some(SequenceNumber(10)));
+        assert_eq!(
+            store.latest_sequence().await.unwrap(),
+            Some(SequenceNumber(10))
+        );
     }
 }

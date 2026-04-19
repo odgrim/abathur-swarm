@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{TaskStatus, WorktreeStatus};
-use crate::domain::ports::{GoalRepository, MergeRequestRepository, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{
+    GoalRepository, MergeRequestRepository, TaskRepository, WorktreeRepository,
+};
 use crate::services::integration_verifier::{IntegrationVerifierService, VerificationResult};
 
 /// Stage of the merge process.
@@ -88,7 +90,10 @@ impl MergeStatus {
 
     /// Whether this status is terminal (no further transitions expected).
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::VerificationFailed)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::VerificationFailed
+        )
     }
 }
 
@@ -128,7 +133,12 @@ pub struct MergeRequest {
 }
 
 impl MergeRequest {
-    pub fn new_stage1(task_id: Uuid, source_branch: String, target_branch: String, workdir: String) -> Self {
+    pub fn new_stage1(
+        task_id: Uuid,
+        source_branch: String,
+        target_branch: String,
+        workdir: String,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
@@ -148,7 +158,12 @@ impl MergeRequest {
         }
     }
 
-    pub fn new_stage2(task_id: Uuid, source_branch: String, target_branch: String, workdir: String) -> Self {
+    pub fn new_stage2(
+        task_id: Uuid,
+        source_branch: String,
+        target_branch: String,
+        workdir: String,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
@@ -464,13 +479,20 @@ where
     ) -> DomainResult<Uuid> {
         tracing::info!(%task_id, source_branch = %agent_branch, target_branch = %task_branch, "queueing stage 1 merge");
         // Get worktree for this task
-        let worktree = self.worktree_repo.get_by_task(task_id).await?
-            .ok_or_else(|| DomainError::ValidationFailed(
-                format!("No worktree found for task {}", task_id)
-            ))?;
+        let worktree = self
+            .worktree_repo
+            .get_by_task(task_id)
+            .await?
+            .ok_or_else(|| {
+                DomainError::ValidationFailed(format!("No worktree found for task {}", task_id))
+            })?;
 
         // Validate workdir is under the allowed base to prevent path traversal
-        validate_workdir(&worktree.path, &self.config.repo_path, &self.config.allowed_workdir_base)?;
+        validate_workdir(
+            &worktree.path,
+            &self.config.repo_path,
+            &self.config.allowed_workdir_base,
+        )?;
 
         // Validate branch names to prevent git flag injection
         validate_branch_name(agent_branch)?;
@@ -500,7 +522,11 @@ where
         tracing::info!(%task_id, %source_branch, %target_branch, "queueing merge-back: subtask → feature branch");
 
         // Validate workdir is under the allowed base to prevent path traversal
-        validate_workdir(target_workdir, &self.config.repo_path, &self.config.allowed_workdir_base)?;
+        validate_workdir(
+            target_workdir,
+            &self.config.repo_path,
+            &self.config.allowed_workdir_base,
+        )?;
 
         // Validate branch names to prevent git flag injection
         validate_branch_name(source_branch)?;
@@ -522,13 +548,20 @@ where
     pub async fn queue_stage2(&self, task_id: Uuid) -> DomainResult<Uuid> {
         tracing::info!(%task_id, "queueing stage 2 merge: task → main");
         // Get worktree for this task
-        let worktree = self.worktree_repo.get_by_task(task_id).await?
-            .ok_or_else(|| DomainError::ValidationFailed(
-                format!("No worktree found for task {}", task_id)
-            ))?;
+        let worktree = self
+            .worktree_repo
+            .get_by_task(task_id)
+            .await?
+            .ok_or_else(|| {
+                DomainError::ValidationFailed(format!("No worktree found for task {}", task_id))
+            })?;
 
         // Validate workdir is under the allowed base to prevent path traversal
-        validate_workdir(&worktree.path, &self.config.repo_path, &self.config.allowed_workdir_base)?;
+        validate_workdir(
+            &worktree.path,
+            &self.config.repo_path,
+            &self.config.allowed_workdir_base,
+        )?;
 
         // Validate branch names to prevent git flag injection
         validate_branch_name(&worktree.branch)?;
@@ -561,8 +594,14 @@ where
         };
 
         // Skip if another merge to the same target branch is already in progress
-        let in_progress = self.merge_repo.list_by_status(MergeStatus::InProgress).await?;
-        if in_progress.iter().any(|r| r.target_branch == request.target_branch) {
+        let in_progress = self
+            .merge_repo
+            .list_by_status(MergeStatus::InProgress)
+            .await?;
+        if in_progress
+            .iter()
+            .any(|r| r.target_branch == request.target_branch)
+        {
             tracing::debug!(
                 target_branch = %request.target_branch,
                 "skipping merge — another merge to same target is in progress"
@@ -591,13 +630,20 @@ where
     #[instrument(skip(self, request), fields(task_id = %request.task_id, source = %request.source_branch, target = %request.target_branch))]
     async fn process_stage1(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
         // Validate workdir is under the allowed base to prevent path traversal
-        validate_workdir(&request.workdir, &self.config.repo_path, &self.config.allowed_workdir_base)?;
+        validate_workdir(
+            &request.workdir,
+            &self.config.repo_path,
+            &self.config.allowed_workdir_base,
+        )?;
 
         // Verify workdir still exists
         if !std::path::Path::new(&request.workdir).exists() {
             tracing::error!(task_id = %request.task_id, workdir = %request.workdir, "workdir does not exist");
             request.status = MergeStatus::Failed;
-            request.error = Some(format!("Working directory no longer exists: {}", request.workdir));
+            request.error = Some(format!(
+                "Working directory no longer exists: {}",
+                request.workdir
+            ));
             request.updated_at = Utc::now();
             return Ok(MergeResult {
                 request_id: request.id,
@@ -610,11 +656,13 @@ where
         }
 
         // Check for conflicts first
-        let conflict_check = self.check_merge_conflicts(
-            &request.workdir,
-            &request.source_branch,
-            &request.target_branch,
-        ).await?;
+        let conflict_check = self
+            .check_merge_conflicts(
+                &request.workdir,
+                &request.source_branch,
+                &request.target_branch,
+            )
+            .await?;
 
         if conflict_check.1 {
             tracing::warn!(task_id = %request.task_id, conflict_count = conflict_check.0.len(), "stage 1 merge: conflicts detected");
@@ -638,7 +686,14 @@ where
         }
 
         // Perform the merge
-        match self.git_merge(&request.workdir, &request.source_branch, &request.target_branch).await {
+        match self
+            .git_merge(
+                &request.workdir,
+                &request.source_branch,
+                &request.target_branch,
+            )
+            .await
+        {
             Ok(commit_sha) => {
                 tracing::info!(task_id = %request.task_id, %commit_sha, "stage 1 merge completed successfully");
                 request.status = MergeStatus::Completed;
@@ -711,7 +766,10 @@ where
                 .args(["merge-tree", "--write-tree", &target, &source])
                 .current_dir(&repo_path)
                 .output()
-                .map_err(|e| DomainError::ValidationFailed(format!("git merge-tree failed to run: {}", e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("git merge-tree failed to run: {}", e),
+                })?;
 
             let stdout = String::from_utf8_lossy(&merge_tree.stdout).to_string();
 
@@ -723,7 +781,10 @@ where
 
             if !merge_tree.status.success() {
                 let stderr = String::from_utf8_lossy(&merge_tree.stderr);
-                return Err(DomainError::ValidationFailed(format!("git merge-tree failed: {}", stderr)));
+                return Err(DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("git merge-tree failed: {}", stderr),
+                });
             }
 
             let tree_sha = stdout.lines().next().unwrap_or("").trim().to_string();
@@ -734,7 +795,10 @@ where
                     .args(["rev-parse", &target])
                     .current_dir(&repo_path)
                     .output()
-                    .map_err(|e| DomainError::ValidationFailed(format!("rev-parse target: {}", e)))?;
+                    .map_err(|e| DomainError::ExternalServiceError {
+                        service: "git".to_string(),
+                        reason: format!("rev-parse target: {}", e),
+                    })?;
                 String::from_utf8_lossy(&out.stdout).trim().to_string()
             };
             let source_sha = {
@@ -742,35 +806,64 @@ where
                     .args(["rev-parse", &source])
                     .current_dir(&repo_path)
                     .output()
-                    .map_err(|e| DomainError::ValidationFailed(format!("rev-parse source: {}", e)))?;
+                    .map_err(|e| DomainError::ExternalServiceError {
+                        service: "git".to_string(),
+                        reason: format!("rev-parse source: {}", e),
+                    })?;
                 String::from_utf8_lossy(&out.stdout).trim().to_string()
             };
 
             // Create merge commit from the tree
             let merge_msg = format!("Merge {} into {}", source, target);
             let commit = Command::new("git")
-                .args(["commit-tree", &tree_sha, "-p", &target_sha, "-p", &source_sha, "-m", &merge_msg])
+                .args([
+                    "commit-tree",
+                    &tree_sha,
+                    "-p",
+                    &target_sha,
+                    "-p",
+                    &source_sha,
+                    "-m",
+                    &merge_msg,
+                ])
                 .current_dir(&repo_path)
                 .output()
-                .map_err(|e| DomainError::ValidationFailed(format!("git commit-tree failed: {}", e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("git commit-tree failed: {}", e),
+                })?;
 
             if !commit.status.success() {
                 let stderr = String::from_utf8_lossy(&commit.stderr);
-                return Err(DomainError::ValidationFailed(format!("git commit-tree: {}", stderr)));
+                return Err(DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("git commit-tree: {}", stderr),
+                });
             }
 
             let commit_sha = String::from_utf8_lossy(&commit.stdout).trim().to_string();
 
             // Atomically update the branch ref (CAS prevents races)
             let update = Command::new("git")
-                .args(["update-ref", &format!("refs/heads/{}", target), &commit_sha, &target_sha])
+                .args([
+                    "update-ref",
+                    &format!("refs/heads/{}", target),
+                    &commit_sha,
+                    &target_sha,
+                ])
                 .current_dir(&repo_path)
                 .output()
-                .map_err(|e| DomainError::ValidationFailed(format!("git update-ref failed: {}", e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("git update-ref failed: {}", e),
+                })?;
 
             if !update.status.success() {
                 let stderr = String::from_utf8_lossy(&update.stderr);
-                return Err(DomainError::ValidationFailed(format!("git update-ref: {}", stderr)));
+                return Err(DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("git update-ref: {}", stderr),
+                });
             }
 
             // Sync main worktree to match the updated branch tip
@@ -780,7 +873,9 @@ where
                 .output();
 
             Ok((Some(commit_sha), vec![]))
-        }).await.map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))??;
+        })
+        .await
+        .map_err(|e| DomainError::ExecutionFailed(format!("spawn_blocking panicked: {}", e)))??;
 
         match plumbing_result {
             (None, conflict_files) => {
@@ -844,7 +939,10 @@ where
                 .args(["merge-tree", "--write-tree", &target, &source])
                 .current_dir(&workdir)
                 .output()
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("Failed to run git: {}", e),
+                })?;
 
             // Exit code 0 = clean merge, 1 = conflicts, ≥2 = git error.
             // Requires Git 2.38+ for --write-tree support.
@@ -857,26 +955,24 @@ where
                 }
                 _ => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(DomainError::ValidationFailed(format!(
-                        "git merge-tree failed (exit {:?}): {}",
-                        output.status.code(),
-                        stderr
-                    )))
+                    Err(DomainError::ExternalServiceError {
+                        service: "git".to_string(),
+                        reason: format!(
+                            "git merge-tree failed (exit {:?}): {}",
+                            output.status.code(),
+                            stderr
+                        ),
+                    })
                 }
             }
         })
         .await
-        .map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))?
+        .map_err(|e| DomainError::ExecutionFailed(format!("spawn_blocking panicked: {}", e)))?
     }
 
     /// Perform a git merge.
     #[instrument(skip(self), fields(%workdir, %source, %target))]
-    async fn git_merge(
-        &self,
-        workdir: &str,
-        source: &str,
-        target: &str,
-    ) -> DomainResult<String> {
+    async fn git_merge(&self, workdir: &str, source: &str, target: &str) -> DomainResult<String> {
         let workdir = workdir.to_string();
         let source = source.to_string();
         let target = target.to_string();
@@ -889,11 +985,17 @@ where
                 .args(["checkout", &target])
                 .current_dir(&workdir)
                 .output()
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("Failed to run git: {}", e),
+                })?;
 
             if !checkout.status.success() {
                 let stderr = String::from_utf8_lossy(&checkout.stderr);
-                return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
+                return Err(DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("Git checkout failed: {}", stderr),
+                });
             }
 
             // Merge source into target
@@ -902,7 +1004,10 @@ where
                 .args(["merge", "--no-ff", &source, "-m", &merge_msg])
                 .current_dir(&workdir)
                 .output()
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("Failed to run git: {}", e),
+                })?;
 
             if !merge.status.success() {
                 // Abort the merge if it failed
@@ -912,7 +1017,10 @@ where
                     .output();
 
                 let stderr = String::from_utf8_lossy(&merge.stderr);
-                return Err(DomainError::ValidationFailed(format!("Git merge failed: {}", stderr)));
+                return Err(DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("Git merge failed: {}", stderr),
+                });
             }
 
             // Get the merge commit SHA
@@ -920,19 +1028,28 @@ where
                 .args(["rev-parse", "HEAD"])
                 .current_dir(&workdir)
                 .output()
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("Failed to run git: {}", e),
+                })?;
 
-            let commit_sha = String::from_utf8_lossy(&rev_parse.stdout).trim().to_string();
+            let commit_sha = String::from_utf8_lossy(&rev_parse.stdout)
+                .trim()
+                .to_string();
             Ok(commit_sha)
         })
         .await
-        .map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))?
+        .map_err(|e| DomainError::ExecutionFailed(format!("spawn_blocking panicked: {}", e)))?
     }
 
     /// Get the current queue (non-terminal requests).
     pub async fn get_queue(&self) -> Vec<MergeRequest> {
         let mut result = Vec::new();
-        for status in [MergeStatus::Queued, MergeStatus::InProgress, MergeStatus::Conflict] {
+        for status in [
+            MergeStatus::Queued,
+            MergeStatus::InProgress,
+            MergeStatus::Conflict,
+        ] {
             if let Ok(reqs) = self.merge_repo.list_by_status(status).await {
                 result.extend(reqs);
             }
@@ -943,7 +1060,11 @@ where
     /// Get merge history (terminal requests).
     pub async fn get_history(&self, _limit: usize) -> Vec<MergeRequest> {
         let mut result = Vec::new();
-        for status in [MergeStatus::Completed, MergeStatus::Failed, MergeStatus::VerificationFailed] {
+        for status in [
+            MergeStatus::Completed,
+            MergeStatus::Failed,
+            MergeStatus::VerificationFailed,
+        ] {
             if let Ok(reqs) = self.merge_repo.list_by_status(status).await {
                 result.extend(reqs);
             }
@@ -955,9 +1076,18 @@ where
     pub async fn get_stats(&self) -> MergeQueueStats {
         let mut stats = MergeQueueStats::default();
 
-        for status in [MergeStatus::Queued, MergeStatus::InProgress, MergeStatus::Completed,
-                       MergeStatus::Failed, MergeStatus::Conflict, MergeStatus::VerificationFailed] {
-            let count = self.merge_repo.list_by_status(status).await
+        for status in [
+            MergeStatus::Queued,
+            MergeStatus::InProgress,
+            MergeStatus::Completed,
+            MergeStatus::Failed,
+            MergeStatus::Conflict,
+            MergeStatus::VerificationFailed,
+        ] {
+            let count = self
+                .merge_repo
+                .list_by_status(status)
+                .await
                 .map(|v| v.len())
                 .unwrap_or(0);
             match status {
@@ -991,7 +1121,12 @@ where
     /// Cancel a queued merge request.
     pub async fn cancel(&self, id: Uuid) -> DomainResult<bool> {
         tracing::info!(merge_request_id = %id, "cancelling merge request");
-        if let Some(mut req) = self.merge_repo.get(id).await?.filter(|r| r.status == MergeStatus::Queued) {
+        if let Some(mut req) = self
+            .merge_repo
+            .get(id)
+            .await?
+            .filter(|r| r.status == MergeStatus::Queued)
+        {
             req.status = MergeStatus::Failed;
             req.error = Some("Cancelled".to_string());
             req.updated_at = Utc::now();
@@ -1008,13 +1143,19 @@ where
         while let Some(result) = self.process_next().await? {
             results.push(result);
         }
-        tracing::info!(processed_count = results.len(), "finished processing all merge requests");
+        tracing::info!(
+            processed_count = results.len(),
+            "finished processing all merge requests"
+        );
         Ok(results)
     }
 
     /// Queue Stage 2 merge for a task if all its subtasks are complete.
     pub async fn queue_stage2_if_ready(&self, task_id: Uuid) -> DomainResult<Option<Uuid>> {
-        let task = self.task_repo.get(task_id).await?
+        let task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         // Check if task is complete
@@ -1034,11 +1175,12 @@ where
 
         // Check worktree exists and is completed
         if let Some(worktree) = self.worktree_repo.get_by_task(task_id).await?
-            && worktree.status == WorktreeStatus::Completed {
-                tracing::info!(%task_id, "task ready for stage 2 — merge queued");
-                let id = self.queue_stage2(task_id).await?;
-                return Ok(Some(id));
-            }
+            && worktree.status == WorktreeStatus::Completed
+        {
+            tracing::info!(%task_id, "task ready for stage 2 — merge queued");
+            let id = self.queue_stage2(task_id).await?;
+            return Ok(Some(id));
+        }
 
         Ok(None)
     }
@@ -1051,7 +1193,11 @@ where
             return vec![];
         }
 
-        let conflicts = match self.merge_repo.list_unresolved_conflicts(self.config.max_retries).await {
+        let conflicts = match self
+            .merge_repo
+            .list_unresolved_conflicts(self.config.max_retries)
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Failed to query unresolved conflicts: {}", e);
@@ -1059,8 +1205,9 @@ where
             }
         };
 
-        conflicts.into_iter().map(|req| {
-            ConflictResolutionRequest {
+        conflicts
+            .into_iter()
+            .map(|req| ConflictResolutionRequest {
                 merge_request_id: req.id,
                 task_id: req.task_id,
                 source_branch: req.source_branch,
@@ -1069,8 +1216,8 @@ where
                 conflict_files: req.conflict_files,
                 detected_at: req.updated_at,
                 attempts: req.attempts,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Mark a conflict as resolved and retry the merge.
@@ -1078,7 +1225,10 @@ where
     /// Should be called after a specialist agent has resolved the conflicts
     /// in the working directory. Looks up the merge request from persistent
     /// storage, so it works even across ephemeral MergeQueue instances.
-    pub async fn retry_after_conflict_resolution(&self, merge_request_id: Uuid) -> DomainResult<bool> {
+    pub async fn retry_after_conflict_resolution(
+        &self,
+        merge_request_id: Uuid,
+    ) -> DomainResult<bool> {
         tracing::info!(merge_request_id = %merge_request_id, "re-queuing merge request after conflict resolution");
 
         let mut request = match self.merge_repo.get(merge_request_id).await? {
@@ -1184,8 +1334,12 @@ mod tests {
     #[test]
     fn test_merge_status_str_roundtrip() {
         for status in [
-            MergeStatus::Queued, MergeStatus::InProgress, MergeStatus::Completed,
-            MergeStatus::Failed, MergeStatus::Conflict, MergeStatus::VerificationFailed,
+            MergeStatus::Queued,
+            MergeStatus::InProgress,
+            MergeStatus::Completed,
+            MergeStatus::Failed,
+            MergeStatus::Conflict,
+            MergeStatus::VerificationFailed,
         ] {
             let s = status.as_str();
             assert_eq!(MergeStatus::from_str(s), Some(status));
@@ -1320,11 +1474,7 @@ CONFLICT (add/add): Merge conflict in src/both_added.rs\n";
 
     #[test]
     fn test_validate_workdir_rejects_absolute_outside_base() {
-        let result = validate_workdir(
-            "/etc/passwd",
-            ".",
-            ".abathur/worktrees",
-        );
+        let result = validate_workdir("/etc/passwd", ".", ".abathur/worktrees");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1371,7 +1521,11 @@ CONFLICT (add/add): Merge conflict in src/both_added.rs\n";
         // Cleanup
         std::fs::remove_dir_all(&tmp).ok();
 
-        assert!(result.is_ok(), "Expected Ok for safe non-existent path, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected Ok for safe non-existent path, got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1400,55 +1554,95 @@ CONFLICT (add/add): Merge conflict in src/both_added.rs\n";
     fn test_validate_branch_name_rejects_empty() {
         let result = validate_branch_name("");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
     }
 
     #[test]
     fn test_validate_branch_name_rejects_leading_hyphen() {
         let result = validate_branch_name("-Xours");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must start with an alphanumeric"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must start with an alphanumeric")
+        );
     }
 
     #[test]
     fn test_validate_branch_name_rejects_double_hyphen_flag() {
         let result = validate_branch_name("--strategy=recursive");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must start with an alphanumeric"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must start with an alphanumeric")
+        );
     }
 
     #[test]
     fn test_validate_branch_name_rejects_leading_dot() {
         let result = validate_branch_name(".hidden");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must start with an alphanumeric"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must start with an alphanumeric")
+        );
     }
 
     #[test]
     fn test_validate_branch_name_rejects_leading_slash() {
         let result = validate_branch_name("/absolute");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must start with an alphanumeric"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must start with an alphanumeric")
+        );
     }
 
     #[test]
     fn test_validate_branch_name_rejects_special_chars() {
         let result = validate_branch_name("branch~1");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid character"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid character")
+        );
     }
 
     #[test]
     fn test_validate_branch_name_rejects_spaces() {
         let result = validate_branch_name("my branch");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid character"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid character")
+        );
     }
 
     #[test]
     fn test_validate_branch_name_rejects_colon() {
         let result = validate_branch_name("refs:heads");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid character"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid character")
+        );
     }
 }

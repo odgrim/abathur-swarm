@@ -4,11 +4,9 @@
 //! source and selects the appropriate workflow spine at runtime based on task content.
 //! All other agents are created dynamically by the Overmind at runtime via MCP tools.
 
-use crate::domain::models::agent::{
-    AgentConstraint, AgentTemplate, AgentTier, ToolCapability,
-};
+use crate::domain::models::agent::{AgentConstraint, AgentTemplate, AgentTier, ToolCapability};
 use crate::domain::models::workflow_template::{
-    OutputDelivery, PhaseDependency, WorkspaceKind, WorkflowTemplate,
+    OutputDelivery, PhaseDependency, WorkflowTemplate, WorkspaceKind,
 };
 
 /// Create all baseline agents.
@@ -26,7 +24,11 @@ pub fn create_baseline_agents_with_workflow(
     workflow: Option<&WorkflowTemplate>,
     overmind_max_turns: Option<u32>,
 ) -> Vec<AgentTemplate> {
-    vec![create_overmind_with_workflow(workflow, overmind_max_turns), create_aggregator(), create_triage_agent()]
+    vec![
+        create_overmind_with_workflow(workflow, overmind_max_turns),
+        create_aggregator(),
+        create_triage_agent(),
+    ]
 }
 
 /// Create all baseline agents with awareness of all configured workflow spines.
@@ -34,8 +36,15 @@ pub fn create_baseline_agents_with_workflow(
 /// The single Overmind is seeded with a routing-aware prompt that describes all
 /// provided workflows and teaches the Overmind to select the appropriate spine
 /// based on task content at runtime.
-pub fn create_baseline_agents_with_workflows(workflows: &[WorkflowTemplate], overmind_max_turns: Option<u32>) -> Vec<AgentTemplate> {
-    vec![create_overmind_with_workflows(workflows, overmind_max_turns), create_aggregator(), create_triage_agent()]
+pub fn create_baseline_agents_with_workflows(
+    workflows: &[WorkflowTemplate],
+    overmind_max_turns: Option<u32>,
+) -> Vec<AgentTemplate> {
+    vec![
+        create_overmind_with_workflows(workflows, overmind_max_turns),
+        create_aggregator(),
+        create_triage_agent(),
+    ]
 }
 
 /// Overmind - The agentic orchestrator of the swarm.
@@ -49,7 +58,10 @@ pub fn create_overmind() -> AgentTemplate {
 ///
 /// If `workflow` is `Some`, generates the system prompt dynamically from the
 /// workflow template. If `None`, uses the static `OVERMIND_SYSTEM_PROMPT`.
-pub fn create_overmind_with_workflow(workflow: Option<&WorkflowTemplate>, overmind_max_turns: Option<u32>) -> AgentTemplate {
+pub fn create_overmind_with_workflow(
+    workflow: Option<&WorkflowTemplate>,
+    overmind_max_turns: Option<u32>,
+) -> AgentTemplate {
     let has_triage = workflow
         .map(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"))
         .unwrap_or(false);
@@ -64,7 +76,10 @@ pub fn create_overmind_with_workflow(workflow: Option<&WorkflowTemplate>, overmi
 ///
 /// Generates a routing-aware prompt that describes each workflow and teaches the
 /// Overmind to select the appropriate spine based on task content at runtime.
-pub fn create_overmind_with_workflows(workflows: &[WorkflowTemplate], overmind_max_turns: Option<u32>) -> AgentTemplate {
+pub fn create_overmind_with_workflows(
+    workflows: &[WorkflowTemplate],
+    overmind_max_turns: Option<u32>,
+) -> AgentTemplate {
     let has_triage = workflows
         .iter()
         .any(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"));
@@ -101,12 +116,17 @@ pub fn create_aggregator() -> AgentTemplate {
 /// downstream agents to reference. Uses Haiku for speed and cost efficiency.
 pub fn create_triage_agent() -> AgentTemplate {
     AgentTemplate::new("codebase-triage", AgentTier::Worker)
-        .with_description("Lightweight codebase profiler that identifies language, framework, and structure")
+        .with_description(
+            "Lightweight codebase profiler that identifies language, framework, and structure",
+        )
         .with_prompt(TRIAGE_SYSTEM_PROMPT.to_string())
         .with_read_only(true)
         .with_preferred_model("haiku")
         .with_tool(ToolCapability::new("read", "Read key config files"))
-        .with_tool(ToolCapability::new("glob", "Discover file types and structure"))
+        .with_tool(ToolCapability::new(
+            "glob",
+            "Discover file types and structure",
+        ))
         .with_tool(ToolCapability::new("grep", "Search for framework markers"))
         .with_tool(ToolCapability::new("memory", "Store codebase profile"))
         .with_tool(ToolCapability::new("task_status", "Report completion"))
@@ -121,7 +141,11 @@ pub fn create_triage_agent() -> AgentTemplate {
 ///
 /// Shared by `create_overmind_with_workflow` and `create_overmind_with_workflows`
 /// so the tool list, constraints, and capabilities are defined in one place.
-fn build_overmind_template(prompt: String, has_triage: bool, max_turns_override: Option<u32>) -> AgentTemplate {
+fn build_overmind_template(
+    prompt: String,
+    has_triage: bool,
+    max_turns_override: Option<u32>,
+) -> AgentTemplate {
     let mut template = AgentTemplate::new("overmind", AgentTier::Architect)
         .with_description("Agentic orchestrator that analyzes tasks, selects the appropriate workflow spine, dynamically creates agents, and delegates work through MCP tools")
         .with_prompt(prompt)
@@ -203,7 +227,11 @@ pub fn generate_overmind_prompt_multi(workflows: &[WorkflowTemplate]) -> String 
 
     format!(
         "{}\n{}\n{}\n{}\n{}",
-        OVERMIND_PROMPT_PREFIX, routing_section, workflow_sections, example_section, OVERMIND_PROMPT_SUFFIX
+        OVERMIND_PROMPT_PREFIX,
+        routing_section,
+        workflow_sections,
+        example_section,
+        OVERMIND_PROMPT_SUFFIX
     )
 }
 
@@ -323,10 +351,7 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
 
         // Tools
         if !phase.tools.is_empty() {
-            section.push_str(&format!(
-                "- **Tools**: `{}`",
-                phase.tools.join("`, `")
-            ));
+            section.push_str(&format!("- **Tools**: `{}`", phase.tools.join("`, `")));
             if phase.read_only {
                 section.push_str(" — read-only agent");
             }
@@ -339,7 +364,8 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
         }
 
         // Auto-lifecycle phase instructions
-        let is_gate = phase.name.to_lowercase() == "triage" || phase.name.to_lowercase() == "review";
+        let is_gate =
+            phase.name.to_lowercase() == "triage" || phase.name.to_lowercase() == "review";
         let is_triage = phase.name.to_lowercase() == "triage";
 
         if is_gate {
@@ -474,7 +500,9 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
 ///
 /// Includes Turn Economy, Recovery Protocol, class-specific strategy, and Completion Protocol
 /// sections based on the phase characteristics (read_only, name, tools).
-fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::WorkflowPhase) -> String {
+fn agent_prompt_skeleton(
+    phase: &crate::domain::models::workflow_template::WorkflowPhase,
+) -> String {
     let class_name = match phase.name.to_lowercase().as_str() {
         "research" | "explore" | "analyze" | "audit" => "researcher",
         "plan" | "design" | "architect" => "planner",
@@ -711,13 +739,11 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
     for (i, phase) in template.phases.iter().enumerate() {
         let phase_num = i + 2;
         let phase_name_cap = capitalize(&phase.name);
-        let is_gate = phase.name.to_lowercase() == "triage" || phase.name.to_lowercase() == "review";
+        let is_gate =
+            phase.name.to_lowercase() == "triage" || phase.name.to_lowercase() == "review";
         let is_first_phase = i == 0;
 
-        example.push_str(&format!(
-            "\n# Phase {}: {}\n",
-            phase_num, phase_name_cap,
-        ));
+        example.push_str(&format!("\n# Phase {}: {}\n", phase_num, phase_name_cap,));
 
         // Show how this phase's subtask was created
         if is_first_phase {
@@ -827,7 +853,8 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
         }
 
         // Fan-out example for root read-only phases
-        if phase.dependency == PhaseDependency::Root && phase.read_only
+        if phase.dependency == PhaseDependency::Root
+            && phase.read_only
             && phase.name.to_lowercase() != "triage"
         {
             example.push_str(&format!(
@@ -1605,7 +1632,7 @@ Call `task_update_status` with "completed".
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::workflow_template::{WorkflowPhase, DEFAULT_WORKFLOW_YAMLS};
+    use crate::domain::models::workflow_template::{DEFAULT_WORKFLOW_YAMLS, WorkflowPhase};
 
     /// Parse the embedded `code` workflow YAML for use as a test fixture.
     fn code_workflow_fixture() -> WorkflowTemplate {
@@ -1655,7 +1682,12 @@ mod tests {
         assert!(!overmind.has_tool("edit"));
 
         // Verify constraints
-        assert!(overmind.constraints.iter().any(|c| c.name == "decision-rationale"));
+        assert!(
+            overmind
+                .constraints
+                .iter()
+                .any(|c| c.name == "decision-rationale")
+        );
 
         // No handoff targets (overmind creates agents dynamically)
         assert!(overmind.agent_card.handoff_targets.is_empty());
@@ -1713,7 +1745,12 @@ mod tests {
         assert!(!triage.has_tool("shell"));
 
         // Constraint
-        assert!(triage.constraints.iter().any(|c| c.name == "breadth-over-depth"));
+        assert!(
+            triage
+                .constraints
+                .iter()
+                .any(|c| c.name == "breadth-over-depth")
+        );
 
         // System prompt references codebase-profile storage
         assert!(triage.system_prompt.contains("codebase-profile"));
@@ -1726,23 +1763,45 @@ mod tests {
     #[test]
     fn test_overmind_does_not_have_file_reading_tools() {
         let overmind = create_overmind();
-        assert!(!overmind.has_tool("read"), "overmind should not have read tool");
-        assert!(!overmind.has_tool("glob"), "overmind should not have glob tool");
-        assert!(!overmind.has_tool("grep"), "overmind should not have grep tool");
+        assert!(
+            !overmind.has_tool("read"),
+            "overmind should not have read tool"
+        );
+        assert!(
+            !overmind.has_tool("glob"),
+            "overmind should not have glob tool"
+        );
+        assert!(
+            !overmind.has_tool("grep"),
+            "overmind should not have grep tool"
+        );
 
         // Also verify with workflow-generated overmind
         let wf = code_workflow_fixture();
         let wf_overmind = create_overmind_with_workflow(Some(&wf), None);
-        assert!(!wf_overmind.has_tool("read"), "workflow overmind should not have read tool");
-        assert!(!wf_overmind.has_tool("glob"), "workflow overmind should not have glob tool");
-        assert!(!wf_overmind.has_tool("grep"), "workflow overmind should not have grep tool");
+        assert!(
+            !wf_overmind.has_tool("read"),
+            "workflow overmind should not have read tool"
+        );
+        assert!(
+            !wf_overmind.has_tool("glob"),
+            "workflow overmind should not have glob tool"
+        );
+        assert!(
+            !wf_overmind.has_tool("grep"),
+            "workflow overmind should not have grep tool"
+        );
     }
 
     #[test]
     fn test_overmind_prompt_references_codebase_profile() {
         let overmind = create_overmind();
         assert!(overmind.system_prompt.contains("codebase-profile"));
-        assert!(overmind.system_prompt.contains("do NOT have file-reading tools"));
+        assert!(
+            overmind
+                .system_prompt
+                .contains("do NOT have file-reading tools")
+        );
     }
 
     #[test]
@@ -1826,11 +1885,7 @@ mod tests {
                     name: "write-docs".to_string(),
                     description: "Write documentation".to_string(),
                     role: "Documentation writer".to_string(),
-                    tools: vec![
-                        "read".to_string(),
-                        "write".to_string(),
-                        "edit".to_string(),
-                    ],
+                    tools: vec!["read".to_string(), "write".to_string(), "edit".to_string()],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
@@ -1907,7 +1962,11 @@ mod tests {
         // Dynamic prompt should differ from static prompt (different formatting)
         // but should contain the same key sections
         assert!(overmind.system_prompt.contains("You are the Overmind"));
-        assert!(overmind.system_prompt.contains("Phase 1: Consume Codebase Profile + Memory Search"));
+        assert!(
+            overmind
+                .system_prompt
+                .contains("Phase 1: Consume Codebase Profile + Memory Search")
+        );
         assert!(overmind.system_prompt.contains("Research"));
         assert!(overmind.system_prompt.contains("Plan"));
         assert!(overmind.system_prompt.contains("Implement"));

@@ -167,7 +167,8 @@ impl A2AMessage {
             receiver_id,
             "Handoff Request",
             reason,
-        ).with_task(task_id)
+        )
+        .with_task(task_id)
     }
 
     /// Create a delegation message.
@@ -183,7 +184,8 @@ impl A2AMessage {
             receiver_id,
             "Task Delegation",
             instructions,
-        ).with_task(task_id)
+        )
+        .with_task(task_id)
     }
 
     /// Create a progress report.
@@ -199,7 +201,8 @@ impl A2AMessage {
             receiver_id,
             "Progress Update",
             progress_info,
-        ).with_task(task_id)
+        )
+        .with_task(task_id)
     }
 
     /// Create a completion notification.
@@ -215,7 +218,8 @@ impl A2AMessage {
             receiver_id,
             "Task Completed",
             summary,
-        ).with_task(task_id)
+        )
+        .with_task(task_id)
     }
 
     /// Set the task ID.
@@ -347,7 +351,9 @@ impl A2AAgentCard {
     }
 
     pub fn has_capability(&self, cap: &str) -> bool {
-        self.capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap))
+        self.capabilities
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(cap))
     }
 }
 
@@ -479,11 +485,7 @@ pub struct FederationTaskEnvelope {
 }
 
 impl FederationTaskEnvelope {
-    pub fn new(
-        task_id: Uuid,
-        title: impl Into<String>,
-        description: impl Into<String>,
-    ) -> Self {
+    pub fn new(task_id: Uuid, title: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             task_id,
             parent_goal_id: None,
@@ -647,19 +649,13 @@ impl FederationCard {
     ///
     /// Used when the A2A discovery path succeeds and we need to convert
     /// the wire-format card into the internal federation representation.
-    pub fn from_a2a_agent_card(
-        a2a_card: &super::a2a_protocol::A2AStandardAgentCard,
-    ) -> Self {
+    pub fn from_a2a_agent_card(a2a_card: &super::a2a_protocol::A2AStandardAgentCard) -> Self {
         let card = A2AAgentCard {
             agent_id: a2a_card.id.clone(),
             display_name: a2a_card.name.clone(),
             description: a2a_card.description.clone(),
             tier: "federation".to_string(),
-            capabilities: a2a_card
-                .skills
-                .iter()
-                .map(|s| s.name.clone())
-                .collect(),
+            capabilities: a2a_card.skills.iter().map(|s| s.name.clone()).collect(),
             accepts: vec![],
             handoff_targets: vec![],
             available: true,
@@ -834,7 +830,10 @@ mod tests {
         let task_id = Uuid::new_v4();
         let corr_id = Uuid::new_v4();
         let result = FederationResult::completed(task_id, corr_id, "All done")
-            .with_artifact(Artifact::new("pr_url", "https://github.com/org/repo/pull/42"))
+            .with_artifact(Artifact::new(
+                "pr_url",
+                "https://github.com/org/repo/pull/42",
+            ))
             .with_note("Took 5 minutes")
             .with_suggestion("Consider adding more tests");
 
@@ -882,8 +881,7 @@ mod tests {
 
     #[test]
     fn test_cerebrate_status_can_accept_task() {
-        let mut status = CerebrateStatus::new("c1", "Cerebrate 1")
-            .with_max_delegations(2);
+        let mut status = CerebrateStatus::new("c1", "Cerebrate 1").with_max_delegations(2);
         status.connection_state = ConnectionState::Connected;
 
         assert!(status.can_accept_task());
@@ -916,9 +914,15 @@ mod tests {
 
     #[test]
     fn test_federation_message_types() {
-        assert_eq!(MessageType::FederationDelegate.as_str(), "federation_delegate");
+        assert_eq!(
+            MessageType::FederationDelegate.as_str(),
+            "federation_delegate"
+        );
         assert_eq!(MessageType::FederationResult.as_str(), "federation_result");
-        assert_eq!(MessageType::FederationHeartbeat.as_str(), "federation_heartbeat");
+        assert_eq!(
+            MessageType::FederationHeartbeat.as_str(),
+            "federation_heartbeat"
+        );
 
         // Verify roundtrip through serde
         let json = serde_json::to_string(&MessageType::FederationDelegate).unwrap();

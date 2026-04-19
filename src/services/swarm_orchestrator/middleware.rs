@@ -24,16 +24,15 @@ use tokio::sync::Semaphore;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::Task;
-use crate::domain::ports::{
-    AgentRepository, GoalRepository, TaskRepository, WorktreeRepository,
-    MergeRequestRepository,
-};
 use crate::domain::models::workflow_template::OutputDelivery;
-use crate::services::{
-    AuditLogService, CircuitBreakerService, Guardrails,
-    budget_tracker::BudgetTracker, cost_window_service::CostWindowService,
+use crate::domain::ports::{
+    AgentRepository, GoalRepository, MergeRequestRepository, TaskRepository, WorktreeRepository,
 };
 use crate::services::event_bus::EventBus;
+use crate::services::{
+    AuditLogService, CircuitBreakerService, Guardrails, budget_tracker::BudgetTracker,
+    cost_window_service::CostWindowService,
+};
 
 // ============================================================================
 // Pre-spawn chain
@@ -101,10 +100,7 @@ pub trait PreSpawnMiddleware: Send + Sync {
     /// Stable name used in logs / audit entries.
     fn name(&self) -> &'static str;
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision>;
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision>;
 }
 
 /// Ordered chain of [`PreSpawnMiddleware`] implementations.
@@ -117,7 +113,9 @@ pub struct PreSpawnChain {
 
 impl PreSpawnChain {
     pub fn new() -> Self {
-        Self { middleware: Vec::new() }
+        Self {
+            middleware: Vec::new(),
+        }
     }
 
     /// Register a middleware. Registration order is preserved.
@@ -230,7 +228,9 @@ pub struct PostCompletionChain {
 
 impl PostCompletionChain {
     pub fn new() -> Self {
-        Self { middleware: Vec::new() }
+        Self {
+            middleware: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, mw: Arc<dyn PostCompletionMiddleware>) {
@@ -286,33 +286,33 @@ impl Default for PostCompletionChain {
 #[allow(dead_code)]
 fn _assert_domain_error_used(_: DomainError) {}
 
-pub mod mcp_readiness;
-pub mod route_task;
-pub mod circuit_breaker;
-pub mod quiet_window;
-pub mod budget;
-pub mod guardrails_check;
-pub mod federation_priority;
-pub mod memory_only;
-pub mod verification;
-pub mod subtask_merge;
 pub mod autoship;
-pub mod pull_request;
+pub mod budget;
+pub mod circuit_breaker;
+pub mod federation_priority;
+pub mod guardrails_check;
+pub mod mcp_readiness;
+pub mod memory_only;
 pub mod merge_queue;
+pub mod pull_request;
+pub mod quiet_window;
+pub mod route_task;
+pub mod subtask_merge;
+pub mod verification;
 
-pub use mcp_readiness::McpReadinessMiddleware;
-pub use route_task::RouteTaskMiddleware;
-pub use circuit_breaker::CircuitBreakerMiddleware;
-pub use quiet_window::QuietWindowMiddleware;
-pub use budget::{BudgetDispatchMiddleware, BudgetConcurrencyMiddleware};
-pub use guardrails_check::GuardrailsMiddleware;
-pub use federation_priority::FederationPriorityMiddleware;
-pub use memory_only::MemoryOnlyShortCircuitMiddleware;
-pub use verification::VerificationMiddleware;
-pub use subtask_merge::SubtaskMergeBackMiddleware;
 pub use autoship::AutoshipMiddleware;
-pub use pull_request::PullRequestMiddleware;
+pub use budget::{BudgetConcurrencyMiddleware, BudgetDispatchMiddleware};
+pub use circuit_breaker::CircuitBreakerMiddleware;
+pub use federation_priority::FederationPriorityMiddleware;
+pub use guardrails_check::GuardrailsMiddleware;
+pub use mcp_readiness::McpReadinessMiddleware;
+pub use memory_only::MemoryOnlyShortCircuitMiddleware;
 pub use merge_queue::MergeQueueMiddleware;
+pub use pull_request::PullRequestMiddleware;
+pub use quiet_window::QuietWindowMiddleware;
+pub use route_task::RouteTaskMiddleware;
+pub use subtask_merge::SubtaskMergeBackMiddleware;
+pub use verification::VerificationMiddleware;
 
 // ============================================================================
 // Tests for the chain infrastructure itself
@@ -339,12 +339,10 @@ mod tests {
         // The middleware under test in this module doesn't actually exercise
         // the repos; we only need Arc<dyn ...> instances that typecheck.
         let pool = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
-        let task_repo: Arc<dyn TaskRepository> =
-            Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let task_repo: Arc<dyn TaskRepository> = Arc::new(SqliteTaskRepository::new(pool.clone()));
         let agent_repo: Arc<dyn AgentRepository> =
             Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let goal_repo: Arc<dyn GoalRepository> =
-            Arc::new(SqliteGoalRepository::new(pool));
+        let goal_repo: Arc<dyn GoalRepository> = Arc::new(SqliteGoalRepository::new(pool));
         PreSpawnContext {
             task: sample_task(),
             agent_type: None,
@@ -371,10 +369,7 @@ mod tests {
     }
 
     impl OrderRecording {
-        fn cont(
-            name: &'static str,
-            slot: Arc<std::sync::Mutex<Vec<&'static str>>>,
-        ) -> Arc<Self> {
+        fn cont(name: &'static str, slot: Arc<std::sync::Mutex<Vec<&'static str>>>) -> Arc<Self> {
             Arc::new(Self {
                 name_: name,
                 slot,
@@ -403,10 +398,7 @@ mod tests {
             self.name_
         }
 
-        async fn handle(
-            &self,
-            _ctx: &mut PreSpawnContext,
-        ) -> DomainResult<PreSpawnDecision> {
+        async fn handle(&self, _ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
             self.slot.lock().unwrap().push(self.name_);
             Ok(match &self.decision {
                 PreSpawnDecision::Continue => PreSpawnDecision::Continue,
@@ -426,10 +418,7 @@ mod tests {
             "agent-stamp"
         }
 
-        async fn handle(
-            &self,
-            ctx: &mut PreSpawnContext,
-        ) -> DomainResult<PreSpawnDecision> {
+        async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
             ctx.agent_type = Some(self.0.to_string());
             Ok(PreSpawnDecision::Continue)
         }
@@ -506,10 +495,8 @@ mod tests {
         use sqlx::SqlitePool;
 
         let pool = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
-        let task_repo: Arc<dyn TaskRepository> =
-            Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let goal_repo: Arc<dyn GoalRepository> =
-            Arc::new(SqliteGoalRepository::new(pool.clone()));
+        let task_repo: Arc<dyn TaskRepository> = Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let goal_repo: Arc<dyn GoalRepository> = Arc::new(SqliteGoalRepository::new(pool.clone()));
         let worktree_repo: Arc<dyn WorktreeRepository> =
             Arc::new(SqliteWorktreeRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));

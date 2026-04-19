@@ -100,8 +100,15 @@ impl Default for SubstrateConfig {
 /// `WebFetch` and `WebSearch` are kept for general web access; Abathur APIs
 /// are now native MCP tools, not WebFetch targets.
 pub const DEFAULT_TOOLS: &[&str] = &[
-    "Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read",
-    "WebFetch", "WebSearch", "Write",
+    "Bash",
+    "Edit",
+    "Glob",
+    "Grep",
+    "MultiEdit",
+    "Read",
+    "WebFetch",
+    "WebSearch",
+    "Write",
 ];
 
 /// Tools that must NEVER be available to swarm agents.
@@ -109,11 +116,22 @@ pub const DEFAULT_TOOLS: &[&str] = &[
 /// These are Claude Code built-in tools that provide their own task/team
 /// orchestration, bypassing Abathur's swarm layer entirely.
 pub const BLOCKED_TOOLS: &[&str] = &[
-    "Task", "TodoWrite", "TodoRead",
-    "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "TaskOutput",
-    "TeamCreate", "TeamDelete", "SendMessage",
-    "EnterPlanMode", "ExitPlanMode",
-    "Skill", "NotebookEdit",
+    "Task",
+    "TodoWrite",
+    "TodoRead",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskList",
+    "TaskGet",
+    "TaskStop",
+    "TaskOutput",
+    "TeamCreate",
+    "TeamDelete",
+    "SendMessage",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "Skill",
+    "NotebookEdit",
 ];
 
 impl SubstrateConfig {
@@ -194,7 +212,10 @@ impl SessionStatus {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::TimedOut | Self::Terminated)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::TimedOut | Self::Terminated
+        )
     }
 }
 
@@ -296,7 +317,8 @@ impl SubstrateSession {
     }
 
     pub fn duration_seconds(&self) -> Option<i64> {
-        self.ended_at.map(|end| (end - self.started_at).num_seconds())
+        self.ended_at
+            .map(|end| (end - self.started_at).num_seconds())
     }
 
     pub fn is_over_turn_limit(&self) -> bool {
@@ -313,9 +335,17 @@ pub enum SubstrateOutput {
     /// Tool call started
     ToolStart { name: String, id: String },
     /// Tool call result
-    ToolResult { id: String, result: String, is_error: bool },
+    ToolResult {
+        id: String,
+        result: String,
+        is_error: bool,
+    },
     /// Turn completed
-    TurnComplete { turn_number: u32, input_tokens: u64, output_tokens: u64 },
+    TurnComplete {
+        turn_number: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     /// Session complete
     SessionComplete { result: String },
     /// Agent ran out of turns before completing

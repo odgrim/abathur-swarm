@@ -76,7 +76,10 @@ pub trait A2AClient: Send + Sync {
         &self,
         url: &str,
         params: TaskSendParams,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>, A2AWireError>;
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
+        A2AWireError,
+    >;
 
     /// Get task status (`tasks/get`).
     async fn get_task(
@@ -94,7 +97,10 @@ pub trait A2AClient: Send + Sync {
         &self,
         url: &str,
         task_id: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>, A2AWireError>;
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
+        A2AWireError,
+    >;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,15 +186,19 @@ impl HttpA2AClient {
         match body.result {
             Some(serde_json::Value::Null) => Err(A2AWireError::Protocol {
                 code: -32603,
-                message: format!("Server returned null result for {} (HTTP {})", method, status),
+                message: format!(
+                    "Server returned null result for {} (HTTP {})",
+                    method, status
+                ),
                 data: None,
             }),
-            Some(result) => {
-                serde_json::from_value(result).map_err(A2AWireError::Json)
-            }
+            Some(result) => serde_json::from_value(result).map_err(A2AWireError::Json),
             None => Err(A2AWireError::Protocol {
                 code: -32603,
-                message: format!("Response missing result field for {} (HTTP {})", method, status),
+                message: format!(
+                    "Response missing result field for {} (HTTP {})",
+                    method, status
+                ),
                 data: None,
             }),
         }
@@ -200,8 +210,10 @@ impl HttpA2AClient {
         url: &str,
         method: &str,
         params: serde_json::Value,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>, A2AWireError>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
+        A2AWireError,
+    > {
         let request = self.build_jsonrpc(method, params);
         debug!(method, url, "A2A RPC stream");
 
@@ -238,10 +250,7 @@ impl Default for HttpA2AClient {
 #[async_trait]
 impl A2AClient for HttpA2AClient {
     async fn discover(&self, base_url: &str) -> Result<A2AStandardAgentCard, A2AWireError> {
-        let url = format!(
-            "{}/.well-known/agent.json",
-            base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/.well-known/agent.json", base_url.trim_end_matches('/'));
         debug!(url, "A2A discover");
 
         let resp = self
@@ -253,10 +262,7 @@ impl A2AClient for HttpA2AClient {
             .map_err(|e| A2AWireError::Discovery(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(A2AWireError::Discovery(format!(
-                "HTTP {}",
-                resp.status()
-            )));
+            return Err(A2AWireError::Discovery(format!("HTTP {}", resp.status())));
         }
 
         resp.json()
@@ -269,16 +275,20 @@ impl A2AClient for HttpA2AClient {
         url: &str,
         params: TaskSendParams,
     ) -> Result<A2ATask, A2AWireError> {
-        self.rpc_call(url, "tasks/send", serde_json::to_value(&params)?).await
+        self.rpc_call(url, "tasks/send", serde_json::to_value(&params)?)
+            .await
     }
 
     async fn send_streaming(
         &self,
         url: &str,
         params: TaskSendParams,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>, A2AWireError>
-    {
-        self.rpc_stream(url, "tasks/sendSubscribe", serde_json::to_value(&params)?).await
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
+        A2AWireError,
+    > {
+        self.rpc_stream(url, "tasks/sendSubscribe", serde_json::to_value(&params)?)
+            .await
     }
 
     async fn get_task(
@@ -291,7 +301,8 @@ impl A2AClient for HttpA2AClient {
             id: task_id.to_string(),
             history_length,
         };
-        self.rpc_call(url, "tasks/get", serde_json::to_value(&params)?).await
+        self.rpc_call(url, "tasks/get", serde_json::to_value(&params)?)
+            .await
     }
 
     async fn cancel_task(&self, url: &str, task_id: &str) -> Result<A2ATask, A2AWireError> {
@@ -303,8 +314,10 @@ impl A2AClient for HttpA2AClient {
         &self,
         url: &str,
         task_id: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>, A2AWireError>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
+        A2AWireError,
+    > {
         let params = serde_json::json!({ "id": task_id });
         self.rpc_stream(url, "tasks/resubscribe", params).await
     }
@@ -349,10 +362,7 @@ fn parse_sse_stream(
                     }
                 }
                 Some(Err(e)) => {
-                    return Some((
-                        Err(A2AWireError::Http(e)),
-                        (byte_stream, buffer),
-                    ));
+                    return Some((Err(A2AWireError::Http(e)), (byte_stream, buffer)));
                 }
                 None => return None,
             }

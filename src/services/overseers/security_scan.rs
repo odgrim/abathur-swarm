@@ -96,14 +96,15 @@ impl SecurityScanOverseer {
             let trimmed = line.trim().to_lowercase();
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
             if parts.len() >= 2
-                && let Ok(count) = parts[0].parse::<u32>() {
-                    match parts[1] {
-                        "critical" => critical_count = count,
-                        "high" => high_count = count,
-                        "moderate" | "medium" => medium_count = count,
-                        _ => {}
-                    }
+                && let Ok(count) = parts[0].parse::<u32>()
+            {
+                match parts[1] {
+                    "critical" => critical_count = count,
+                    "high" => high_count = count,
+                    "moderate" | "medium" => medium_count = count,
+                    _ => {}
                 }
+            }
         }
 
         SecurityScanResult {

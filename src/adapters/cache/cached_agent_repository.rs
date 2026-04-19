@@ -91,7 +91,11 @@ impl<A: AgentRepository + 'static> AgentRepository for CachedAgentRepository<A> 
         Ok(result)
     }
 
-    async fn get_template_version(&self, name: &str, version: u32) -> DomainResult<Option<AgentTemplate>> {
+    async fn get_template_version(
+        &self,
+        name: &str,
+        version: u32,
+    ) -> DomainResult<Option<AgentTemplate>> {
         // Version-specific lookups are not cached (rarely used)
         self.inner.get_template_version(name, version).await
     }
@@ -143,7 +147,10 @@ impl<A: AgentRepository + 'static> AgentRepository for CachedAgentRepository<A> 
         self.inner.delete_instance(id).await
     }
 
-    async fn list_instances_by_status(&self, status: InstanceStatus) -> DomainResult<Vec<AgentInstance>> {
+    async fn list_instances_by_status(
+        &self,
+        status: InstanceStatus,
+    ) -> DomainResult<Vec<AgentInstance>> {
         self.inner.list_instances_by_status(status).await
     }
 

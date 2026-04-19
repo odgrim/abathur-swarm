@@ -9,13 +9,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{
-    SessionStatus, SubstrateOutput, SubstrateRequest, SubstrateSession,
-};
+use crate::domain::models::{SessionStatus, SubstrateOutput, SubstrateRequest, SubstrateSession};
 use crate::domain::ports::Substrate;
 
 /// Claude Code CLI substrate configuration.
@@ -151,7 +149,12 @@ impl ClaudeCodeSubstrate {
                 crate::domain::models::DEFAULT_TOOLS.to_vec()
             } else {
                 // Use agent-specific tools
-                request.config.allowed_tool_names.iter().map(|s| s.as_str()).collect()
+                request
+                    .config
+                    .allowed_tool_names
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect()
             };
             all_tools.extend_from_slice(crate::ABATHUR_ALLOWED_TOOLS);
             args.push(all_tools.join(","));
@@ -194,7 +197,8 @@ impl ClaudeCodeSubstrate {
         match event_type {
             // Assistant message content
             "assistant" | "content_block_delta" | "text" => {
-                let content = json.get("content")
+                let content = json
+                    .get("content")
                     .or_else(|| json.get("text"))
                     .or_else(|| json.get("delta").and_then(|d| d.get("text")))
                     .and_then(|c| c.as_str())
@@ -210,40 +214,55 @@ impl ClaudeCodeSubstrate {
             }
 
             // Tool use started
-            "tool_use" | "tool_use_block" => {
-                Some(SubstrateOutput::ToolStart {
-                    name: json.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string(),
-                    id: json.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
-                })
-            }
+            "tool_use" | "tool_use_block" => Some(SubstrateOutput::ToolStart {
+                name: json
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                id: json
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }),
 
             // Tool result
-            "tool_result" => {
-                Some(SubstrateOutput::ToolResult {
-                    id: json.get("tool_use_id")
-                        .or_else(|| json.get("id"))
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    result: json.get("content")
-                        .or_else(|| json.get("result"))
-                        .and_then(|r| {
-                            if r.is_string() {
-                                r.as_str().map(|s| s.to_string())
-                            } else {
-                                Some(r.to_string())
-                            }
-                        })
-                        .unwrap_or_default(),
-                    is_error: json.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false),
-                })
-            }
+            "tool_result" => Some(SubstrateOutput::ToolResult {
+                id: json
+                    .get("tool_use_id")
+                    .or_else(|| json.get("id"))
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                result: json
+                    .get("content")
+                    .or_else(|| json.get("result"))
+                    .and_then(|r| {
+                        if r.is_string() {
+                            r.as_str().map(|s| s.to_string())
+                        } else {
+                            Some(r.to_string())
+                        }
+                    })
+                    .unwrap_or_default(),
+                is_error: json
+                    .get("is_error")
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(false),
+            }),
 
             // Usage/token information
             "usage" | "message_delta" => {
                 let usage = json.get("usage").unwrap_or(&json);
-                let input = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                let output = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                let input = usage
+                    .get("input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                let output = usage
+                    .get("output_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
 
                 if input > 0 || output > 0 {
                     Some(SubstrateOutput::TurnComplete {
@@ -258,7 +277,8 @@ impl ClaudeCodeSubstrate {
 
             // Result/completion event
             "result" | "message_stop" => {
-                let result = json.get("result")
+                let result = json
+                    .get("result")
                     .or_else(|| json.get("content"))
                     .and_then(|r| {
                         if r.is_string() {
@@ -274,14 +294,23 @@ impl ClaudeCodeSubstrate {
                 // SessionComplete, otherwise the swarm collapses real failures
                 // (max_turns, mid-execution crashes) into successful completions.
                 let subtype = json.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-                let is_error_flag = json.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+                let is_error_flag = json
+                    .get("is_error")
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(false);
                 let is_max_turns = subtype == "error_max_turns";
                 let is_other_error = is_error_flag || subtype.starts_with("error");
 
                 // Extract final usage if present
                 if let Some(usage) = json.get("usage") {
-                    let input = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                    let output = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    let input = usage
+                        .get("input_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    let output = usage
+                        .get("output_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
 
                     // Return usage first, then session complete will follow
                     if input > 0 || output > 0 {
@@ -315,7 +344,8 @@ impl ClaudeCodeSubstrate {
 
             // Error events
             "error" => {
-                let message = json.get("error")
+                let message = json
+                    .get("error")
                     .and_then(|e| e.get("message"))
                     .or_else(|| json.get("message"))
                     .and_then(|m| m.as_str())
@@ -348,9 +378,10 @@ impl ClaudeCodeSubstrate {
 
         // Try JSON first
         if trimmed.starts_with('{')
-            && let Some(output) = Self::parse_stream_json(trimmed) {
-                return Some(output);
-            }
+            && let Some(output) = Self::parse_stream_json(trimmed)
+        {
+            return Some(output);
+        }
 
         // Fall back to plain text
         Some(SubstrateOutput::AssistantText {
@@ -369,12 +400,25 @@ impl ClaudeCodeSubstrate {
 
         for line in output.lines() {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(line)
-                && let Some(usage) = json.get("usage") {
-                    input_tokens += usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                    output_tokens += usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                    cache_read += usage.get("cache_read_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                    cache_write += usage.get("cache_creation_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                }
+                && let Some(usage) = json.get("usage")
+            {
+                input_tokens += usage
+                    .get("input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                output_tokens += usage
+                    .get("output_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                cache_read += usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                cache_write += usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+            }
         }
 
         (input_tokens, output_tokens, cache_read, cache_write)
@@ -403,7 +447,9 @@ impl Substrate for ClaudeCodeSubstrate {
 
     async fn execute(&self, request: SubstrateRequest) -> DomainResult<SubstrateSession> {
         let args = self.build_args(&request, "stream-json");
-        let working_dir = request.config.working_dir
+        let working_dir = request
+            .config
+            .working_dir
             .clone()
             .unwrap_or_else(|| ".".to_string());
 
@@ -423,13 +469,18 @@ impl Substrate for ClaudeCodeSubstrate {
         cmd.env("ABATHUR_TASK_ID", request.task_id.to_string());
         cmd.env("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "1");
 
-        let mut child = cmd.spawn()
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to spawn claude: {}", e)))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| DomainError::SubstrateError(format!("Failed to spawn claude: {}", e)))?;
 
         let pid = child.id();
 
         // Create session
-        let mut session = SubstrateSession::new(request.task_id, &request.agent_template, request.config.clone());
+        let mut session = SubstrateSession::new(
+            request.task_id,
+            &request.agent_template,
+            request.config.clone(),
+        );
         session.start(pid);
 
         // Store session
@@ -445,10 +496,14 @@ impl Substrate for ClaudeCodeSubstrate {
         }
 
         // Read stdout
-        let stdout = child.stdout.take()
-            .ok_or_else(|| DomainError::ValidationFailed("Failed to capture stdout".to_string()))?;
-        let stderr = child.stderr.take()
-            .ok_or_else(|| DomainError::ValidationFailed("Failed to capture stderr".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| DomainError::SubstrateError("Failed to capture stdout".to_string()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| DomainError::SubstrateError("Failed to capture stderr".to_string()))?;
 
         // Open task log file
         let mut log_file = self.open_task_log(request.task_id).await;
@@ -491,14 +546,19 @@ impl Substrate for ClaudeCodeSubstrate {
 
             // Capture the "result" event for final metadata extraction
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line)
-                && json.get("type").and_then(|t| t.as_str()) == Some("result") {
-                    result_json = Some(json);
-                    continue;
-                }
+                && json.get("type").and_then(|t| t.as_str()) == Some("result")
+            {
+                result_json = Some(json);
+                continue;
+            }
 
             if let Some(parsed) = Self::parse_output_line(&line) {
                 match parsed {
-                    SubstrateOutput::TurnComplete { input_tokens, output_tokens, .. } => {
+                    SubstrateOutput::TurnComplete {
+                        input_tokens,
+                        output_tokens,
+                        ..
+                    } => {
                         total_input_tokens += input_tokens;
                         total_output_tokens += output_tokens;
                         turns += 1;
@@ -527,8 +587,9 @@ impl Substrate for ClaudeCodeSubstrate {
         }
 
         // Wait for process to complete
-        let exit_status = child.wait().await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to wait for process: {}", e)))?;
+        let exit_status = child.wait().await.map_err(|e| {
+            DomainError::SubstrateError(format!("Failed to wait for process: {}", e))
+        })?;
 
         // Remove from running processes
         {
@@ -540,10 +601,22 @@ impl Substrate for ClaudeCodeSubstrate {
         // the result text, usage stats, cost, and turn count.
         let result_text = if let Some(ref json) = result_json {
             if let Some(usage) = json.get("usage") {
-                total_input_tokens = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(total_input_tokens);
-                total_output_tokens = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(total_output_tokens);
-                session.cache_read_tokens = usage.get("cache_read_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                session.cache_write_tokens = usage.get("cache_creation_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                total_input_tokens = usage
+                    .get("input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(total_input_tokens);
+                total_output_tokens = usage
+                    .get("output_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(total_output_tokens);
+                session.cache_read_tokens = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                session.cache_write_tokens = usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
             }
 
             if let Some(num_turns) = json.get("num_turns").and_then(|n| n.as_u64()) {
@@ -561,7 +634,8 @@ impl Substrate for ClaudeCodeSubstrate {
         } else {
             // Fallback: no result event found, try line-by-line extraction
             if total_input_tokens == 0 && total_output_tokens == 0 {
-                let (input, output, cache_read, cache_write) = Self::extract_final_usage(&output_text);
+                let (input, output, cache_read, cache_write) =
+                    Self::extract_final_usage(&output_text);
                 total_input_tokens = input;
                 total_output_tokens = output;
                 session.cache_read_tokens = cache_read;
@@ -577,7 +651,8 @@ impl Substrate for ClaudeCodeSubstrate {
 
         // Determine success based on exit code
         if exit_status.success() {
-            let is_max_turns = result_json.as_ref()
+            let is_max_turns = result_json
+                .as_ref()
                 .and_then(|j| j.get("subtype"))
                 .and_then(|s| s.as_str())
                 == Some("error_max_turns");
@@ -613,7 +688,9 @@ impl Substrate for ClaudeCodeSubstrate {
         request: SubstrateRequest,
     ) -> DomainResult<(mpsc::Receiver<SubstrateOutput>, SubstrateSession)> {
         let args = self.build_args(&request, "stream-json");
-        let working_dir = request.config.working_dir
+        let working_dir = request
+            .config
+            .working_dir
             .clone()
             .unwrap_or_else(|| ".".to_string());
 
@@ -633,13 +710,15 @@ impl Substrate for ClaudeCodeSubstrate {
         cmd.env("ABATHUR_TASK_ID", request.task_id.to_string());
         cmd.env("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "1");
 
-        let mut child = cmd.spawn()
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to spawn claude: {}", e)))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| DomainError::SubstrateError(format!("Failed to spawn claude: {}", e)))?;
 
         let pid = child.id();
 
         // Create session
-        let mut session = SubstrateSession::new(request.task_id, &request.agent_template, request.config);
+        let mut session =
+            SubstrateSession::new(request.task_id, &request.agent_template, request.config);
         session.start(pid);
 
         // Store session
@@ -658,10 +737,14 @@ impl Substrate for ClaudeCodeSubstrate {
         let (tx, rx) = mpsc::channel(100);
 
         // Get handles to stdout and stderr
-        let stdout = child.stdout.take()
-            .ok_or_else(|| DomainError::ValidationFailed("Failed to capture stdout".to_string()))?;
-        let stderr = child.stderr.take()
-            .ok_or_else(|| DomainError::ValidationFailed("Failed to capture stderr".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| DomainError::SubstrateError("Failed to capture stdout".to_string()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| DomainError::SubstrateError("Failed to capture stderr".to_string()))?;
 
         let session_id = session.id;
         let sessions_clone = self.sessions.clone();
@@ -705,7 +788,11 @@ impl Substrate for ClaudeCodeSubstrate {
 
                 if let Some(output) = Self::parse_output_line(&line) {
                     match &output {
-                        SubstrateOutput::TurnComplete { input_tokens, output_tokens, .. } => {
+                        SubstrateOutput::TurnComplete {
+                            input_tokens,
+                            output_tokens,
+                            ..
+                        } => {
                             total_input += input_tokens;
                             total_output += output_tokens;
                         }
@@ -759,14 +846,17 @@ impl Substrate for ClaudeCodeSubstrate {
                                     all_output.trim().chars().take(500).collect::<String>()
                                 );
                                 session.fail(&error_msg);
-                                let _ = tx.send(SubstrateOutput::Error { message: error_msg }).await;
+                                let _ =
+                                    tx.send(SubstrateOutput::Error { message: error_msg }).await;
                             } else {
                                 if session.status == SessionStatus::Active {
                                     session.complete(all_output.trim());
                                 }
-                                let _ = tx.send(SubstrateOutput::SessionComplete {
-                                    result: "Completed successfully".to_string(),
-                                }).await;
+                                let _ = tx
+                                    .send(SubstrateOutput::SessionComplete {
+                                        result: "Completed successfully".to_string(),
+                                    })
+                                    .await;
                             }
                         }
                         Ok(status) => {
@@ -780,9 +870,11 @@ impl Substrate for ClaudeCodeSubstrate {
                         }
                         Err(e) => {
                             session.fail(e.to_string());
-                            let _ = tx.send(SubstrateOutput::Error {
-                                message: e.to_string(),
-                            }).await;
+                            let _ = tx
+                                .send(SubstrateOutput::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
                         }
                     }
                 }
@@ -798,12 +890,13 @@ impl Substrate for ClaudeCodeSubstrate {
         additional_prompt: Option<String>,
     ) -> DomainResult<SubstrateSession> {
         let sessions = self.sessions.read().await;
-        let session = sessions.get(&session_id)
-            .ok_or_else(|| DomainError::ValidationFailed(format!("Session {} not found", session_id)))?;
+        let session = sessions.get(&session_id).ok_or_else(|| {
+            DomainError::ValidationFailed(format!("Session {} not found", session_id))
+        })?;
 
         if !session.status.is_terminal() {
             return Err(DomainError::ValidationFailed(
-                "Cannot resume active session".to_string()
+                "Cannot resume active session".to_string(),
             ));
         }
 
@@ -862,7 +955,8 @@ impl Substrate for ClaudeCodeSubstrate {
         // Find the session ID for this task by scanning sessions
         let session_id = {
             let sessions = self.sessions.read().await;
-            sessions.values()
+            sessions
+                .values()
                 .find(|s| s.task_id == task_id && s.status == SessionStatus::Active)
                 .map(|s| s.id)
         };
@@ -909,7 +1003,8 @@ mod tests {
             "test-agent",
             "You are a helpful assistant",
             "Hello world",
-        ).with_config(SubstrateConfig::default().with_max_turns(10));
+        )
+        .with_config(SubstrateConfig::default().with_max_turns(10));
 
         let args = substrate.build_args(&request, "stream-json");
 
@@ -931,14 +1026,18 @@ mod tests {
     fn test_parse_stream_json_assistant() {
         let line = r#"{"type":"assistant","content":"Hello!"}"#;
         let output = ClaudeCodeSubstrate::parse_stream_json(line);
-        assert!(matches!(output, Some(SubstrateOutput::AssistantText { content }) if content == "Hello!"));
+        assert!(
+            matches!(output, Some(SubstrateOutput::AssistantText { content }) if content == "Hello!")
+        );
     }
 
     #[test]
     fn test_parse_stream_json_tool_use() {
         let line = r#"{"type":"tool_use","name":"Read","id":"tool_123"}"#;
         let output = ClaudeCodeSubstrate::parse_stream_json(line);
-        assert!(matches!(output, Some(SubstrateOutput::ToolStart { name, id }) if name == "Read" && id == "tool_123"));
+        assert!(
+            matches!(output, Some(SubstrateOutput::ToolStart { name, id }) if name == "Read" && id == "tool_123")
+        );
     }
 
     #[test]
@@ -947,7 +1046,11 @@ mod tests {
         let output = ClaudeCodeSubstrate::parse_stream_json(line);
         assert!(matches!(
             output,
-            Some(SubstrateOutput::TurnComplete { input_tokens: 100, output_tokens: 50, .. })
+            Some(SubstrateOutput::TurnComplete {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..
+            })
         ));
     }
 
@@ -955,13 +1058,18 @@ mod tests {
     fn test_parse_stream_json_error() {
         let line = r#"{"type":"error","message":"Something went wrong"}"#;
         let output = ClaudeCodeSubstrate::parse_stream_json(line);
-        assert!(matches!(output, Some(SubstrateOutput::Error { message }) if message == "Something went wrong"));
+        assert!(
+            matches!(output, Some(SubstrateOutput::Error { message }) if message == "Something went wrong")
+        );
     }
 
     #[test]
     fn test_parse_output_plain_text() {
         let output = ClaudeCodeSubstrate::parse_output_line("Hello world");
-        assert!(matches!(output, Some(SubstrateOutput::AssistantText { .. })));
+        assert!(matches!(
+            output,
+            Some(SubstrateOutput::AssistantText { .. })
+        ));
     }
 
     #[test]
@@ -977,14 +1085,18 @@ mod tests {
     fn test_parse_stream_json_result_max_turns() {
         let line = r#"{"type":"result","subtype":"error_max_turns","result":"Agent ran out of turns","cost_usd":0.5,"num_turns":25}"#;
         let output = ClaudeCodeSubstrate::parse_stream_json(line);
-        assert!(matches!(output, Some(SubstrateOutput::MaxTurnsExceeded { result }) if result == "Agent ran out of turns"));
+        assert!(
+            matches!(output, Some(SubstrateOutput::MaxTurnsExceeded { result }) if result == "Agent ran out of turns")
+        );
     }
 
     #[test]
     fn test_parse_stream_json_result_normal() {
         let line = r#"{"type":"result","result":"Task completed successfully","cost_usd":0.3,"num_turns":5}"#;
         let output = ClaudeCodeSubstrate::parse_stream_json(line);
-        assert!(matches!(output, Some(SubstrateOutput::SessionComplete { result }) if result == "Task completed successfully"));
+        assert!(
+            matches!(output, Some(SubstrateOutput::SessionComplete { result }) if result == "Task completed successfully")
+        );
     }
 
     #[test]
@@ -996,9 +1108,17 @@ mod tests {
         let output = ClaudeCodeSubstrate::parse_stream_json(line);
         match output {
             Some(SubstrateOutput::Error { message }) => {
-                assert!(message.contains("error_during_execution"), "subtype missing: {}", message);
+                assert!(
+                    message.contains("error_during_execution"),
+                    "subtype missing: {}",
+                    message
+                );
                 assert!(message.contains("boom"), "result body missing: {}", message);
-                assert!(message.contains("17 turns"), "num_turns missing: {}", message);
+                assert!(
+                    message.contains("17 turns"),
+                    "num_turns missing: {}",
+                    message
+                );
             }
             other => panic!("expected Error, got {:?}", other),
         }

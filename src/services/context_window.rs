@@ -81,12 +81,7 @@ impl ContextWindowGuard {
     ///
     /// Estimates total prompt tokens from the system prompt and user prompt,
     /// then checks remaining capacity against thresholds.
-    pub fn check(
-        &self,
-        model: &str,
-        system_prompt: &str,
-        user_prompt: &str,
-    ) -> ContextWindowCheck {
+    pub fn check(&self, model: &str, system_prompt: &str, user_prompt: &str) -> ContextWindowCheck {
         let context_window = model_context_window(model);
         let prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt);
         let remaining = context_window.saturating_sub(prompt_tokens);
@@ -167,7 +162,10 @@ mod tests {
         let guard = ContextWindowGuard::with_defaults();
         let check = guard.check("opus", "", "");
         assert!(check.should_proceed());
-        if let ContextWindowCheck::Ok { remaining_tokens, .. } = check {
+        if let ContextWindowCheck::Ok {
+            remaining_tokens, ..
+        } = check
+        {
             assert_eq!(remaining_tokens, 200_000);
         }
     }

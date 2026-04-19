@@ -19,13 +19,11 @@ use clap::{Args, Subcommand};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::adapters::sqlite::{initialize_default_database, SqliteTaskScheduleRepository};
-use crate::cli::display::{
-    action_success, output, CommandOutput,
-};
+use crate::adapters::sqlite::{SqliteTaskScheduleRepository, initialize_default_database};
 use crate::cli::commands::schedule::{self, ScheduleArgs, ScheduleCommands};
-use crate::domain::models::task_schedule::*;
+use crate::cli::display::{CommandOutput, action_success, output};
 use crate::domain::models::TaskPriority;
+use crate::domain::models::task_schedule::*;
 use crate::domain::ports::task_schedule_repository::TaskScheduleRepository;
 use crate::services::task_schedule_service::TaskScheduleService;
 use crate::services::trigger_rules::{normalize_cron_expression, validate_cron_expression};
@@ -108,7 +106,13 @@ fn slugify_prompt(prompt: &str) -> String {
         .join("-")
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
 
     // Trim trailing hyphens and truncate
@@ -134,18 +138,30 @@ fn next_fire_description(expression: &str) -> Option<String> {
         Some(format!("in {} seconds", secs))
     } else if secs < 3600 {
         let mins = secs / 60;
-        Some(format!("in {} minute{}", mins, if mins == 1 { "" } else { "s" }))
+        Some(format!(
+            "in {} minute{}",
+            mins,
+            if mins == 1 { "" } else { "s" }
+        ))
     } else if secs < 86400 {
         let hours = secs / 3600;
         let mins = (secs % 3600) / 60;
         if mins > 0 {
             Some(format!("in {}h {}m", hours, mins))
         } else {
-            Some(format!("in {} hour{}", hours, if hours == 1 { "" } else { "s" }))
+            Some(format!(
+                "in {} hour{}",
+                hours,
+                if hours == 1 { "" } else { "s" }
+            ))
         }
     } else {
         let days = secs / 86400;
-        Some(format!("in {} day{}", days, if days == 1 { "" } else { "s" }))
+        Some(format!(
+            "in {} day{}",
+            days,
+            if days == 1 { "" } else { "s" }
+        ))
     }
 }
 
@@ -163,10 +179,7 @@ pub struct CronCreateOutput {
 
 impl CommandOutput for CronCreateOutput {
     fn to_human(&self) -> String {
-        let mut msg = action_success(&format!(
-            "Cron schedule '{}' created",
-            self.name,
-        ));
+        let mut msg = action_success(&format!("Cron schedule '{}' created", self.name,));
         msg.push_str(&format!("\n  ID:         {}", self.id));
         msg.push_str(&format!("\n  Expression: {}", self.expression));
         if let Some(ref next) = self.next_fire {
@@ -191,8 +204,7 @@ pub async fn execute(args: CronArgs, json_mode: bool) -> Result<()> {
             overlap,
         } => {
             // Validate cron expression early with a clear error
-            validate_cron_expression(&expression)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            validate_cron_expression(&expression).map_err(|e| anyhow::anyhow!(e))?;
 
             let normalized = normalize_cron_expression(&expression);
             let schedule_name = name.unwrap_or_else(|| slugify_prompt(&prompt));
@@ -225,7 +237,9 @@ pub async fn execute(args: CronArgs, json_mode: bool) -> Result<()> {
             let mut sched = TaskSchedule::new(
                 schedule_name.clone(),
                 format!("Cron schedule: {}", expression),
-                TaskScheduleType::Cron { expression: normalized.clone() },
+                TaskScheduleType::Cron {
+                    expression: normalized.clone(),
+                },
                 task_title,
                 prompt,
             );

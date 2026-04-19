@@ -3,52 +3,45 @@
 //! Allows users to specify any unique prefix of a UUID instead of the full 32-char ID,
 //! similar to git short hashes.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 /// Resolve a task ID prefix to a full UUID.
 pub async fn resolve_task_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
-    resolve_prefix(pool, prefix, "task", TASK_QUERY)
-        .await
+    resolve_prefix(pool, prefix, "task", TASK_QUERY).await
 }
 
 /// Resolve a goal ID prefix to a full UUID.
 pub async fn resolve_goal_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
-    resolve_prefix(pool, prefix, "goal", GOAL_QUERY)
-        .await
+    resolve_prefix(pool, prefix, "goal", GOAL_QUERY).await
 }
 
 /// Resolve a worktree ID prefix to a full UUID.
 ///
 /// Searches both the worktree `id` and `task_id` columns.
 pub async fn resolve_worktree_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
-    resolve_prefix(pool, prefix, "worktree", WORKTREE_QUERY)
-        .await
+    resolve_prefix(pool, prefix, "worktree", WORKTREE_QUERY).await
 }
 
 /// Resolve a memory ID prefix to a full UUID.
 pub async fn resolve_memory_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
-    resolve_prefix(pool, prefix, "memory", MEMORY_QUERY)
-        .await
+    resolve_prefix(pool, prefix, "memory", MEMORY_QUERY).await
 }
 
 /// Resolve a trigger rule ID prefix to a full UUID.
 pub async fn resolve_trigger_rule_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
-    resolve_prefix(pool, prefix, "trigger_rule", TRIGGER_RULE_QUERY)
-        .await
+    resolve_prefix(pool, prefix, "trigger_rule", TRIGGER_RULE_QUERY).await
 }
 
 /// Resolve an event ID prefix to a full UUID.
 pub async fn resolve_event_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
-    resolve_prefix(pool, prefix, "event", EVENT_QUERY)
-        .await
+    resolve_prefix(pool, prefix, "event", EVENT_QUERY).await
 }
 
 /// Resolve a task schedule ID prefix to a full UUID.
 pub async fn resolve_schedule_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
-    resolve_prefix(pool, prefix, "task_schedule", SCHEDULE_QUERY)
-        .await
+    resolve_prefix(pool, prefix, "task_schedule", SCHEDULE_QUERY).await
 }
 
 /// Resolve a dead letter entry ID prefix to a full ID string.
@@ -61,8 +54,7 @@ pub async fn resolve_dlq_id(pool: &SqlitePool, prefix: &str) -> Result<String> {
 
 const TASK_QUERY: &str = "SELECT id FROM tasks WHERE id LIKE ?";
 const GOAL_QUERY: &str = "SELECT id FROM goals WHERE id LIKE ?";
-const WORKTREE_QUERY: &str =
-    "SELECT id FROM worktrees WHERE id LIKE ?1 UNION SELECT id FROM worktrees WHERE task_id LIKE ?1";
+const WORKTREE_QUERY: &str = "SELECT id FROM worktrees WHERE id LIKE ?1 UNION SELECT id FROM worktrees WHERE task_id LIKE ?1";
 const MEMORY_QUERY: &str = "SELECT id FROM memories WHERE id LIKE ?";
 const TRIGGER_RULE_QUERY: &str = "SELECT id FROM trigger_rules WHERE id LIKE ?";
 const SCHEDULE_QUERY: &str = "SELECT id FROM task_schedules WHERE id LIKE ?";
@@ -96,19 +88,13 @@ async fn resolve_prefix_raw(
     validate_prefix(prefix)?;
 
     let pattern = format!("{}%", prefix);
-    let rows: Vec<(String,)> = sqlx::query_as(query)
-        .bind(&pattern)
-        .fetch_all(pool)
-        .await?;
+    let rows: Vec<(String,)> = sqlx::query_as(query).bind(&pattern).fetch_all(pool).await?;
 
     match rows.len() {
         0 => bail!("No {} found matching '{}'", entity, prefix),
         1 => Ok(rows[0].0.clone()),
         n => {
-            let mut msg = format!(
-                "Ambiguous prefix '{}': matches {} {}s:",
-                prefix, n, entity
-            );
+            let mut msg = format!("Ambiguous prefix '{}': matches {} {}s:", prefix, n, entity);
             for row in &rows {
                 msg.push_str(&format!("\n  {}", row.0));
             }

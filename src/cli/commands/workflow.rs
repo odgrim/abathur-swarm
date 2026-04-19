@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
 use crate::cli::display::{
-    list_table, output, render_list, truncate_ellipsis, CommandOutput, DetailView,
+    CommandOutput, DetailView, list_table, output, render_list, truncate_ellipsis,
 };
 use crate::domain::models::workflow_template::WorkflowTemplate;
 use crate::services::config::Config;
@@ -114,7 +114,8 @@ impl CommandOutput for WorkflowDetailOutput {
 
         for (i, phase) in self.phases.iter().enumerate() {
             let ro = if phase.read_only { " (read-only)" } else { "" };
-            view = view.section(&format!("{}. {} [{}]", i + 1, phase.name, phase.dependency))
+            view = view
+                .section(&format!("{}. {} [{}]", i + 1, phase.name, phase.dependency))
                 .item(&phase.description)
                 .field("Role", &phase.role)
                 .field("Tools", &phase.tools.join(", "));
@@ -175,14 +176,17 @@ pub async fn execute(args: WorkflowArgs, json_mode: bool) -> Result<()> {
         WorkflowCommands::List => list_workflows(json_mode),
         WorkflowCommands::Show { name } => show_workflow(&name, json_mode),
         WorkflowCommands::Validate => validate_workflows(json_mode),
-        WorkflowCommands::Export { name, output } => export_workflow(&name, output.as_deref(), json_mode),
-        WorkflowCommands::ExportAll { output } => export_all_workflows(output.as_deref(), json_mode),
+        WorkflowCommands::Export { name, output } => {
+            export_workflow(&name, output.as_deref(), json_mode)
+        }
+        WorkflowCommands::ExportAll { output } => {
+            export_all_workflows(output.as_deref(), json_mode)
+        }
     }
 }
 
 fn list_workflows(json_mode: bool) -> Result<()> {
-    let config = Config::load()
-        .context("Failed to load configuration")?;
+    let config = Config::load().context("Failed to load configuration")?;
 
     let available = config.available_workflows();
 
@@ -213,8 +217,7 @@ fn list_workflows(json_mode: bool) -> Result<()> {
 }
 
 fn show_workflow(name: &str, json_mode: bool) -> Result<()> {
-    let config = Config::load()
-        .context("Failed to load configuration")?;
+    let config = Config::load().context("Failed to load configuration")?;
 
     let wf = config
         .resolve_workflow(name)
@@ -243,8 +246,7 @@ fn show_workflow(name: &str, json_mode: bool) -> Result<()> {
 }
 
 fn validate_workflows(json_mode: bool) -> Result<()> {
-    let config = Config::load()
-        .context("Failed to load configuration")?;
+    let config = Config::load().context("Failed to load configuration")?;
 
     let mut results = Vec::new();
 
@@ -313,12 +315,10 @@ impl CommandOutput for ExportAllOutput {
 }
 
 fn write_workflow_yaml(wf: &WorkflowTemplate, dir: &str) -> Result<String> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("Failed to create directory: {}", dir))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create directory: {}", dir))?;
     let yaml = wf.to_yaml().map_err(|e| anyhow::anyhow!("{}", e))?;
     let path = std::path::Path::new(dir).join(format!("{}.yaml", wf.name));
-    std::fs::write(&path, &yaml)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+    std::fs::write(&path, &yaml).with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(path.display().to_string())
 }
 

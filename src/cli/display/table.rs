@@ -1,7 +1,7 @@
 //! Table builder wrapper around comfy-table for consistent list display.
 
 use colored::Colorize;
-use comfy_table::{presets, Cell, CellAlignment, ContentArrangement, Table};
+use comfy_table::{Cell, CellAlignment, ContentArrangement, Table, presets};
 
 /// Create a standard list table with the given headers.
 ///
@@ -12,10 +12,11 @@ pub fn list_table(headers: &[&str]) -> Table {
     table
         .load_preset(presets::NOTHING)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(headers.iter().map(|h| {
-            Cell::new(h.to_uppercase())
-                .set_alignment(CellAlignment::Left)
-        }));
+        .set_header(
+            headers
+                .iter()
+                .map(|h| Cell::new(h.to_uppercase()).set_alignment(CellAlignment::Left)),
+        );
     table
 }
 

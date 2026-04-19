@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    ArtifactRef, ExecutionMode, RoutingHints, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType,
+    ArtifactRef, ExecutionMode, RoutingHints, Task, TaskContext, TaskPriority, TaskSource,
+    TaskStatus, TaskType,
 };
 use crate::domain::ports::{TaskFilter, TaskRepository};
 
@@ -87,10 +88,7 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Task>> {
-        let get_q = sqlx::query_as(
-            "SELECT * FROM tasks WHERE id = ?"
-        )
-        .bind(id.to_string());
+        let get_q = sqlx::query_as("SELECT * FROM tasks WHERE id = ?").bind(id.to_string());
         let row: Option<TaskRow> = exec_tx!(&self.pool, get_q, fetch_optional)?;
 
         match row {
@@ -124,7 +122,7 @@ impl TaskRepository for SqliteTaskRepository {
                source_type = ?, source_ref = ?,
                version = ?, updated_at = ?, started_at = ?, completed_at = ?, deadline = ?,
                execution_mode = ?, trajectory_id = ?, task_type = ?
-               WHERE id = ? AND version = ?"#
+               WHERE id = ? AND version = ?"#,
         )
         .bind(task.parent_id.map(|id| id.to_string()))
         .bind(&task.title)
@@ -154,12 +152,10 @@ impl TaskRepository for SqliteTaskRepository {
 
         if result.rows_affected() == 0 {
             // Distinguish between "task doesn't exist" and "version mismatch"
-            let exists: Option<(i64,)> = sqlx::query_as(
-                "SELECT 1 FROM tasks WHERE id = ?"
-            )
-            .bind(task.id.to_string())
-            .fetch_optional(&self.pool)
-            .await?;
+            let exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM tasks WHERE id = ?")
+                .bind(task.id.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
 
             if exists.is_some() {
                 return Err(DomainError::ConcurrencyConflict {
@@ -239,11 +235,19 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn list_by_status(&self, status: TaskStatus) -> DomainResult<Vec<Task>> {
-        self.list(TaskFilter { status: Some(status), ..Default::default() }).await
+        self.list(TaskFilter {
+            status: Some(status),
+            ..Default::default()
+        })
+        .await
     }
 
     async fn get_subtasks(&self, parent_id: Uuid) -> DomainResult<Vec<Task>> {
-        self.list(TaskFilter { parent_id: Some(parent_id), ..Default::default() }).await
+        self.list(TaskFilter {
+            parent_id: Some(parent_id),
+            ..Default::default()
+        })
+        .await
     }
 
     async fn get_ready_tasks(&self, limit: usize) -> DomainResult<Vec<Task>> {
@@ -255,7 +259,7 @@ impl TaskRepository for SqliteTaskRepository {
                    WHEN 'normal' THEN 3
                    WHEN 'low' THEN 4
                END, created_at
-               LIMIT ?"#
+               LIMIT ?"#,
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -269,14 +273,18 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn get_by_agent(&self, agent_type: &str) -> DomainResult<Vec<Task>> {
-        self.list(TaskFilter { agent_type: Some(agent_type.to_string()), ..Default::default() }).await
+        self.list(TaskFilter {
+            agent_type: Some(agent_type.to_string()),
+            ..Default::default()
+        })
+        .await
     }
 
     async fn get_dependencies(&self, task_id: Uuid) -> DomainResult<Vec<Task>> {
         let deps_q = sqlx::query_as(
             r#"SELECT t.* FROM tasks t
                INNER JOIN task_dependencies d ON t.id = d.depends_on_id
-               WHERE d.task_id = ?"#
+               WHERE d.task_id = ?"#,
         )
         .bind(task_id.to_string());
         let rows: Vec<TaskRow> = exec_tx!(&self.pool, deps_q, fetch_all)?;
@@ -288,7 +296,7 @@ impl TaskRepository for SqliteTaskRepository {
         let rows: Vec<TaskRow> = sqlx::query_as(
             r#"SELECT t.* FROM tasks t
                INNER JOIN task_dependencies d ON t.id = d.task_id
-               WHERE d.depends_on_id = ?"#
+               WHERE d.depends_on_id = ?"#,
         )
         .bind(task_id.to_string())
         .fetch_all(&self.pool)
@@ -311,7 +319,7 @@ impl TaskRepository for SqliteTaskRepository {
         }
 
         let dep_q = sqlx::query(
-            "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_id) VALUES (?, ?)"
+            "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_id) VALUES (?, ?)",
         )
         .bind(task_id.to_string())
         .bind(depends_on.to_string());
@@ -320,13 +328,11 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn remove_dependency(&self, task_id: Uuid, depends_on: Uuid) -> DomainResult<()> {
-        sqlx::query(
-            "DELETE FROM task_dependencies WHERE task_id = ? AND depends_on_id = ?"
-        )
-        .bind(task_id.to_string())
-        .bind(depends_on.to_string())
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("DELETE FROM task_dependencies WHERE task_id = ? AND depends_on_id = ?")
+            .bind(task_id.to_string())
+            .bind(depends_on.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -338,7 +344,7 @@ impl TaskRepository for SqliteTaskRepository {
                 UNION ALL
                 SELECT t.id FROM tasks t INNER JOIN descendants d ON t.parent_id = d.id
             )
-            SELECT COUNT(*) FROM descendants"#
+            SELECT COUNT(*) FROM descendants"#,
         )
         .bind(task_id.to_string())
         .fetch_one(&self.pool)
@@ -348,10 +354,7 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn get_by_idempotency_key(&self, key: &str) -> DomainResult<Option<Task>> {
-        let idem_q = sqlx::query_as(
-            "SELECT * FROM tasks WHERE idempotency_key = ?"
-        )
-        .bind(key);
+        let idem_q = sqlx::query_as("SELECT * FROM tasks WHERE idempotency_key = ?").bind(key);
         let row: Option<TaskRow> = exec_tx!(&self.pool, idem_q, fetch_optional)?;
 
         match row {
@@ -365,12 +368,11 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn list_by_source(&self, source_type: &str) -> DomainResult<Vec<Task>> {
-        let rows: Vec<TaskRow> = sqlx::query_as(
-            "SELECT * FROM tasks WHERE source_type = ? ORDER BY created_at DESC"
-        )
-        .bind(source_type)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<TaskRow> =
+            sqlx::query_as("SELECT * FROM tasks WHERE source_type = ? ORDER BY created_at DESC")
+                .bind(source_type)
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut tasks = Vec::new();
         for row in rows {
@@ -382,11 +384,10 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn count_by_status(&self) -> DomainResult<HashMap<TaskStatus, u64>> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT status, COUNT(*) FROM tasks GROUP BY status"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT status, COUNT(*) FROM tasks GROUP BY status")
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut counts = HashMap::new();
         for (status_str, count) in rows {
@@ -397,7 +398,11 @@ impl TaskRepository for SqliteTaskRepository {
         Ok(counts)
     }
 
-    async fn claim_task_atomic(&self, task_id: Uuid, agent_type: &str) -> DomainResult<Option<Task>> {
+    async fn claim_task_atomic(
+        &self,
+        task_id: Uuid,
+        agent_type: &str,
+    ) -> DomainResult<Option<Task>> {
         let now = chrono::Utc::now().to_rfc3339();
         let result = sqlx::query(
             r#"UPDATE tasks
@@ -420,12 +425,11 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn get_parent_id(&self, task_id: Uuid) -> DomainResult<Option<Uuid>> {
-        let row: Option<(Option<String>,)> = sqlx::query_as(
-            "SELECT parent_id FROM tasks WHERE id = ?"
-        )
-        .bind(task_id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT parent_id FROM tasks WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
 
         match row {
             Some((Some(parent_str),)) => {
@@ -446,7 +450,7 @@ impl TaskRepository for SqliteTaskRepository {
                 FROM tasks t INNER JOIN ancestors a ON t.id = a.parent_id
                 WHERE a.parent_id IS NOT NULL
             )
-            SELECT COALESCE(MAX(depth), 0) FROM ancestors"#
+            SELECT COALESCE(MAX(depth), 0) FROM ancestors"#,
         )
         .bind(task_id.to_string())
         .fetch_one(&self.pool)
@@ -464,23 +468,20 @@ impl TaskRepository for SqliteTaskRepository {
                 FROM tasks t INNER JOIN ancestors a ON t.id = a.parent_id
                 WHERE a.parent_id IS NOT NULL
             )
-            SELECT id FROM ancestors WHERE parent_id IS NULL LIMIT 1"#
+            SELECT id FROM ancestors WHERE parent_id IS NULL LIMIT 1"#,
         )
         .bind(task_id.to_string())
         .fetch_one(&self.pool)
         .await?;
 
-        Uuid::parse_str(&result.0)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))
+        Uuid::parse_str(&result.0).map_err(|e| DomainError::SerializationError(e.to_string()))
     }
 
     async fn count_children(&self, task_id: Uuid) -> DomainResult<u32> {
-        let result: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM tasks WHERE parent_id = ?"
-        )
-        .bind(task_id.to_string())
-        .fetch_one(&self.pool)
-        .await?;
+        let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE parent_id = ?")
+            .bind(task_id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
 
         Ok(result.0 as u32)
     }
@@ -512,10 +513,9 @@ impl SqliteTaskRepository {
     }
 
     async fn load_dependencies(&self, task: &mut Task) -> DomainResult<()> {
-        let load_deps_q = sqlx::query_as(
-            "SELECT depends_on_id FROM task_dependencies WHERE task_id = ?"
-        )
-        .bind(task.id.to_string());
+        let load_deps_q =
+            sqlx::query_as("SELECT depends_on_id FROM task_dependencies WHERE task_id = ?")
+                .bind(task.id.to_string());
         let deps: Vec<(String,)> = exec_tx!(&self.pool, load_deps_q, fetch_all)?;
 
         task.depends_on = deps
@@ -563,11 +563,13 @@ impl TryFrom<TaskRow> for Task {
         let id = super::parse_uuid(&row.id)?;
         let parent_id = super::parse_optional_uuid(row.parent_id)?;
 
-        let status = TaskStatus::from_str(&row.status)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid status: {}", row.status)))?;
+        let status = TaskStatus::from_str(&row.status).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid status: {}", row.status))
+        })?;
 
-        let priority = TaskPriority::from_str(&row.priority)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid priority: {}", row.priority)))?;
+        let priority = TaskPriority::from_str(&row.priority).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid priority: {}", row.priority))
+        })?;
 
         let routing_hints: RoutingHints = super::parse_json_or_default(row.routing)?;
         let artifacts: Vec<ArtifactRef> = super::parse_json_or_default(row.artifacts)?;
@@ -579,15 +581,18 @@ impl TryFrom<TaskRow> for Task {
         let completed_at = super::parse_optional_datetime(row.completed_at)?;
         let deadline = super::parse_optional_datetime(row.deadline)?;
 
-        let source = deserialize_task_source(row.source_type.as_deref(), row.source_ref.as_deref())?;
+        let source =
+            deserialize_task_source(row.source_type.as_deref(), row.source_ref.as_deref())?;
 
         let execution_mode: ExecutionMode = match row.execution_mode {
-            Some(ref json) => serde_json::from_str(json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid execution_mode: {}", e)))?,
+            Some(ref json) => serde_json::from_str(json).map_err(|e| {
+                DomainError::SerializationError(format!("Invalid execution_mode: {}", e))
+            })?,
             None => ExecutionMode::default(),
         };
         let trajectory_id = super::parse_optional_uuid(row.trajectory_id)?;
-        let task_type = row.task_type
+        let task_type = row
+            .task_type
             .as_deref()
             .and_then(TaskType::from_str)
             .unwrap_or_default();
@@ -964,7 +969,11 @@ mod tests {
         let original_version = task.version;
         repo.create(&task).await.unwrap();
 
-        let claimed = repo.claim_task_atomic(task.id, "overmind").await.unwrap().unwrap();
+        let claimed = repo
+            .claim_task_atomic(task.id, "overmind")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(claimed.version, original_version + 1);
     }
 
@@ -1017,7 +1026,10 @@ mod tests {
         repo.create(&child).await.unwrap();
         repo.create(&grandchild).await.unwrap();
 
-        assert_eq!(repo.find_root_task_id(grandchild.id).await.unwrap(), root.id);
+        assert_eq!(
+            repo.find_root_task_id(grandchild.id).await.unwrap(),
+            root.id
+        );
         assert_eq!(repo.find_root_task_id(child.id).await.unwrap(), root.id);
     }
 

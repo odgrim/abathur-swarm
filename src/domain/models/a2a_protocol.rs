@@ -9,8 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::a2a::{
-    FederationCard, FederationResult, FederationTaskEnvelope, FederationTaskStatus,
-    MessagePriority,
+    FederationCard, FederationResult, FederationTaskEnvelope, FederationTaskStatus, MessagePriority,
 };
 
 // ---------------------------------------------------------------------------
@@ -653,12 +652,9 @@ mod tests {
 
     #[test]
     fn test_from_federation_task_envelope() {
-        let envelope = FederationTaskEnvelope::new(
-            uuid::Uuid::new_v4(),
-            "Test task",
-            "Do something useful",
-        )
-        .with_constraint("Must not break CI");
+        let envelope =
+            FederationTaskEnvelope::new(uuid::Uuid::new_v4(), "Test task", "Do something useful")
+                .with_constraint("Must not break CI");
 
         let params = TaskSendParams::from(&envelope);
         assert_eq!(params.message.role, A2ARole::User);
@@ -671,12 +667,12 @@ mod tests {
 
     #[test]
     fn test_from_federation_result() {
-        let result = FederationResult::completed(
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            "All done",
-        )
-        .with_artifact(Artifact::new("pr_url", "https://github.com/org/repo/pull/1"));
+        let result =
+            FederationResult::completed(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), "All done")
+                .with_artifact(Artifact::new(
+                    "pr_url",
+                    "https://github.com/org/repo/pull/1",
+                ));
 
         let task = A2ATask::from(&result);
         assert_eq!(task.status.state, A2ATaskState::Completed);

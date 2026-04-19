@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::SubstrateRequest;
 use crate::domain::ports::Substrate;
-use crate::services::event_bus::EventBus;
 use crate::services::MemoryService;
+use crate::services::event_bus::EventBus;
 
 /// Configuration for cold start context gathering.
 #[derive(Debug, Clone)]
@@ -241,29 +241,36 @@ where
 
         // Run LLM analysis if configured and substrate available
         if self.config.use_llm_analysis
-            && let Some(ref substrate) = self.substrate {
-                match self.analyze_with_llm(&report, substrate.as_ref()).await {
-                    Ok(insights) => {
-                        for (i, insight) in insights.iter().enumerate() {
-                            let (_memory, events) = self.memory_service.learn(
+            && let Some(ref substrate) = self.substrate
+        {
+            match self.analyze_with_llm(&report, substrate.as_ref()).await {
+                Ok(insights) => {
+                    for (i, insight) in insights.iter().enumerate() {
+                        let (_memory, events) = self
+                            .memory_service
+                            .learn(
                                 format!("project.llm_analysis.{}", i),
                                 insight.clone(),
                                 "project.llm_analysis",
-                            ).await?;
-                            // Publish learn events via EventBus
-                            if let Some(ref bus) = self.event_bus {
-                                for event in events {
-                                    bus.publish(event).await;
-                                }
+                            )
+                            .await?;
+                        // Publish learn events via EventBus
+                        if let Some(ref bus) = self.event_bus {
+                            for event in events {
+                                bus.publish(event).await;
                             }
-                            report.memories_created += 1;
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("LLM analysis during cold start failed, continuing without it: {}", e);
+                        report.memories_created += 1;
                     }
                 }
+                Err(e) => {
+                    tracing::warn!(
+                        "LLM analysis during cold start failed, continuing without it: {}",
+                        e
+                    );
+                }
             }
+        }
 
         // Store memories
         report.memories_created += self.store_memories(&report).await?;
@@ -278,11 +285,23 @@ where
         }
 
         let mut entries = Vec::new();
-        let mut dir_entries = fs::read_dir(path).await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to read directory: {}", e)))?;
+        let mut dir_entries =
+            fs::read_dir(path)
+                .await
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "filesystem".to_string(),
+                    reason: format!("Failed to read directory: {}", e),
+                })?;
 
-        while let Some(entry) = dir_entries.next_entry().await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to read entry: {}", e)))? {
+        while let Some(entry) =
+            dir_entries
+                .next_entry()
+                .await
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "filesystem".to_string(),
+                    reason: format!("Failed to read entry: {}", e),
+                })?
+        {
             let name = entry.file_name().to_string_lossy().to_string();
 
             // Skip ignored directories
@@ -295,12 +314,20 @@ where
                 continue;
             }
 
-            let file_type = entry.file_type().await
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to get file type: {}", e)))?;
+            let file_type =
+                entry
+                    .file_type()
+                    .await
+                    .map_err(|e| DomainError::ExternalServiceError {
+                        service: "filesystem".to_string(),
+                        reason: format!("Failed to get file type: {}", e),
+                    })?;
 
             let is_dir = file_type.is_dir();
             let extension = if !is_dir {
-                Path::new(&name).extension().map(|e| e.to_string_lossy().to_string())
+                Path::new(&name)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_string())
             } else {
                 None
             };
@@ -324,7 +351,8 @@ where
 
     /// Detect project type from directory entries.
     async fn detect_project_type(&self, entries: &[DirEntry]) -> DomainResult<ProjectType> {
-        let file_names: Vec<&str> = entries.iter()
+        let file_names: Vec<&str> = entries
+            .iter()
             .filter(|e| !e.is_dir && e.depth == 0)
             .map(|e| e.name.as_str())
             .collect();
@@ -337,13 +365,19 @@ where
         if file_names.contains(&"package.json") {
             types.push(ProjectType::Node);
         }
-        if file_names.iter().any(|f| *f == "pyproject.toml" || *f == "setup.py" || *f == "requirements.txt") {
+        if file_names
+            .iter()
+            .any(|f| *f == "pyproject.toml" || *f == "setup.py" || *f == "requirements.txt")
+        {
             types.push(ProjectType::Python);
         }
         if file_names.contains(&"go.mod") {
             types.push(ProjectType::Go);
         }
-        if file_names.iter().any(|f| *f == "pom.xml" || *f == "build.gradle") {
+        if file_names
+            .iter()
+            .any(|f| *f == "pom.xml" || *f == "build.gradle")
+        {
             types.push(ProjectType::Java);
         }
 
@@ -355,11 +389,16 @@ where
     }
 
     /// Generate a structure summary from directory entries.
-    fn generate_structure_summary(&self, entries: &[DirEntry], project_type: &ProjectType) -> String {
+    fn generate_structure_summary(
+        &self,
+        entries: &[DirEntry],
+        project_type: &ProjectType,
+    ) -> String {
         let mut summary = format!("Project Type: {}\n\n", project_type);
 
         // Get top-level directories
-        let top_dirs: Vec<&str> = entries.iter()
+        let top_dirs: Vec<&str> = entries
+            .iter()
             .filter(|e| e.is_dir && e.depth == 0)
             .map(|e| e.name.as_str())
             .collect();
@@ -413,7 +452,10 @@ where
         }
 
         // Check for tests directory
-        if entries.iter().any(|e| e.is_dir && (e.name == "tests" || e.name == "test")) {
+        if entries
+            .iter()
+            .any(|e| e.is_dir && (e.name == "tests" || e.name == "test"))
+        {
             conventions.push(Convention {
                 name: "separate-tests".to_string(),
                 description: "Tests organized in separate directory".to_string(),
@@ -423,7 +465,10 @@ where
         }
 
         // Check for README
-        if entries.iter().any(|e| !e.is_dir && e.name.to_lowercase().starts_with("readme")) {
+        if entries
+            .iter()
+            .any(|e| !e.is_dir && e.name.to_lowercase().starts_with("readme"))
+        {
             conventions.push(Convention {
                 name: "readme".to_string(),
                 description: "Project has README documentation".to_string(),
@@ -443,7 +488,8 @@ where
         }
 
         // Check for Rust-specific conventions
-        let rust_files: Vec<_> = entries.iter()
+        let rust_files: Vec<_> = entries
+            .iter()
             .filter(|e| e.extension.as_deref() == Some("rs"))
             .collect();
 
@@ -470,7 +516,10 @@ where
         }
 
         // Check for TypeScript
-        if entries.iter().any(|e| !e.is_dir && e.name == "tsconfig.json") {
+        if entries
+            .iter()
+            .any(|e| !e.is_dir && e.name == "tsconfig.json")
+        {
             conventions.push(Convention {
                 name: "typescript".to_string(),
                 description: "Uses TypeScript".to_string(),
@@ -483,7 +532,10 @@ where
     }
 
     /// Analyze project dependencies.
-    async fn analyze_dependencies(&self, project_type: &ProjectType) -> DomainResult<Vec<Dependency>> {
+    async fn analyze_dependencies(
+        &self,
+        project_type: &ProjectType,
+    ) -> DomainResult<Vec<Dependency>> {
         let mut dependencies = Vec::new();
 
         match project_type {
@@ -515,8 +567,12 @@ where
             return Ok(Vec::new());
         }
 
-        let content = fs::read_to_string(&cargo_path).await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to read Cargo.toml: {}", e)))?;
+        let content = fs::read_to_string(&cargo_path).await.map_err(|e| {
+            DomainError::ExternalServiceError {
+                service: "filesystem".to_string(),
+                reason: format!("Failed to read Cargo.toml: {}", e),
+            }
+        })?;
 
         let mut dependencies = Vec::new();
         let mut in_deps = false;
@@ -570,11 +626,17 @@ where
             return Ok(Vec::new());
         }
 
-        let content = fs::read_to_string(&pkg_path).await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to read package.json: {}", e)))?;
+        let content =
+            fs::read_to_string(&pkg_path)
+                .await
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "filesystem".to_string(),
+                    reason: format!("Failed to read package.json: {}", e),
+                })?;
 
-        let json: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to parse package.json: {}", e)))?;
+        let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+            DomainError::SerializationError(format!("Failed to parse package.json: {}", e))
+        })?;
 
         let mut dependencies = Vec::new();
 
@@ -612,8 +674,12 @@ where
         // Try requirements.txt
         let req_path = self.config.project_root.join("requirements.txt");
         if req_path.exists() {
-            let content = fs::read_to_string(&req_path).await
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to read requirements.txt: {}", e)))?;
+            let content = fs::read_to_string(&req_path).await.map_err(|e| {
+                DomainError::ExternalServiceError {
+                    service: "filesystem".to_string(),
+                    reason: format!("Failed to read requirements.txt: {}", e),
+                }
+            })?;
 
             for line in content.lines() {
                 let trimmed = line.trim();
@@ -642,8 +708,12 @@ where
         // Try pyproject.toml (basic parsing)
         let pyproject_path = self.config.project_root.join("pyproject.toml");
         if pyproject_path.exists() {
-            let content = fs::read_to_string(&pyproject_path).await
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to read pyproject.toml: {}", e)))?;
+            let content = fs::read_to_string(&pyproject_path).await.map_err(|e| {
+                DomainError::ExternalServiceError {
+                    service: "filesystem".to_string(),
+                    reason: format!("Failed to read pyproject.toml: {}", e),
+                }
+            })?;
 
             let mut in_deps = false;
             for line in content.lines() {
@@ -656,7 +726,8 @@ where
                     let dep = trimmed.trim_matches(|c| c == '"' || c == ',' || c == ' ');
                     if !dep.is_empty() {
                         dependencies.push(Dependency {
-                            name: dep.split(['>', '<', '=', '['])
+                            name: dep
+                                .split(['>', '<', '=', '['])
                                 .next()
                                 .unwrap_or(dep)
                                 .trim()
@@ -674,13 +745,27 @@ where
     }
 
     /// Analyze the cold start report using an LLM for deeper architectural insights.
-    async fn analyze_with_llm(&self, report: &ColdStartReport, substrate: &dyn Substrate) -> DomainResult<Vec<String>> {
-        let conventions_summary = report.conventions.iter()
-            .map(|c| format!("- {} (confidence: {:.0}%)", c.description, c.confidence * 100.0))
+    async fn analyze_with_llm(
+        &self,
+        report: &ColdStartReport,
+        substrate: &dyn Substrate,
+    ) -> DomainResult<Vec<String>> {
+        let conventions_summary = report
+            .conventions
+            .iter()
+            .map(|c| {
+                format!(
+                    "- {} (confidence: {:.0}%)",
+                    c.description,
+                    c.confidence * 100.0
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
-        let deps_summary = report.dependencies.iter()
+        let deps_summary = report
+            .dependencies
+            .iter()
             .filter(|d| !d.is_dev)
             .take(15)
             .map(|d| {
@@ -704,8 +789,16 @@ where
             Focus on: architecture patterns, key design decisions, potential areas of complexity, \
             and recommendations for agents working in this codebase.",
             report.structure_summary,
-            if conventions_summary.is_empty() { "None detected".to_string() } else { conventions_summary },
-            if deps_summary.is_empty() { "None detected".to_string() } else { deps_summary },
+            if conventions_summary.is_empty() {
+                "None detected".to_string()
+            } else {
+                conventions_summary
+            },
+            if deps_summary.is_empty() {
+                "None detected".to_string()
+            } else {
+                deps_summary
+            },
         );
 
         let request = SubstrateRequest::new(
@@ -717,18 +810,21 @@ where
 
         let session = substrate.execute(request).await?;
         let result = session.result.ok_or_else(|| {
-            DomainError::ExecutionFailed("LLM analysis returned no result".to_string())
+            DomainError::SubstrateError("LLM analysis returned no result".to_string())
         })?;
 
         // Parse numbered insights from the response
-        let insights: Vec<String> = result.lines()
+        let insights: Vec<String> = result
+            .lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty())
             .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()))
             .map(|l| {
                 // Strip leading number and punctuation (e.g., "1. " or "1) ")
-                l.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == ' ')
-                    .to_string()
+                l.trim_start_matches(|c: char| {
+                    c.is_ascii_digit() || c == '.' || c == ')' || c == ' '
+                })
+                .to_string()
             })
             .filter(|l| !l.is_empty())
             .collect();
@@ -747,40 +843,51 @@ where
         let namespace = "project";
 
         // Store project type as semantic memory (long-term)
-        self.memory_service.learn(
-            "project.type".to_string(),
-            format!("Project type: {}", report.project_type),
-            namespace,
-        ).await.map(|_| ())?;
+        self.memory_service
+            .learn(
+                "project.type".to_string(),
+                format!("Project type: {}", report.project_type),
+                namespace,
+            )
+            .await
+            .map(|_| ())?;
         count += 1;
 
         // Store structure summary
-        self.memory_service.learn(
-            "project.structure".to_string(),
-            report.structure_summary.clone(),
-            namespace,
-        ).await.map(|_| ())?;
+        self.memory_service
+            .learn(
+                "project.structure".to_string(),
+                report.structure_summary.clone(),
+                namespace,
+            )
+            .await
+            .map(|_| ())?;
         count += 1;
 
         // Store conventions
         for convention in &report.conventions {
-            self.memory_service.learn(
-                format!("project.convention.{}", convention.name),
-                convention.description.clone(),
-                namespace,
-            ).await.map(|_| ())?;
+            self.memory_service
+                .learn(
+                    format!("project.convention.{}", convention.name),
+                    convention.description.clone(),
+                    namespace,
+                )
+                .await
+                .map(|_| ())?;
             count += 1;
         }
 
         // Store key dependencies
-        let key_deps: Vec<&Dependency> = report.dependencies
+        let key_deps: Vec<&Dependency> = report
+            .dependencies
             .iter()
             .filter(|d| !d.is_dev)
             .take(20)
             .collect();
 
         if !key_deps.is_empty() {
-            let deps_summary = key_deps.iter()
+            let deps_summary = key_deps
+                .iter()
                 .map(|d| {
                     if let Some(ref v) = d.version {
                         format!("  - {} ({})", d.name, v)
@@ -791,11 +898,14 @@ where
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            self.memory_service.learn(
-                "project.dependencies".to_string(),
-                format!("Key project dependencies:\n{}", deps_summary),
-                namespace,
-            ).await.map(|_| ())?;
+            self.memory_service
+                .learn(
+                    "project.dependencies".to_string(),
+                    format!("Key project dependencies:\n{}", deps_summary),
+                    namespace,
+                )
+                .await
+                .map(|_| ())?;
             count += 1;
         }
 

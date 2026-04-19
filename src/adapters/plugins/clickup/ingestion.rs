@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::adapter::{AdapterManifest, IngestionItem};
 use crate::domain::models::TaskPriority;
+use crate::domain::models::adapter::{AdapterManifest, IngestionItem};
 use crate::domain::ports::adapter::IngestionAdapter;
 
 use super::client::ClickUpClient;
@@ -38,10 +38,7 @@ impl ClickUpIngestionAdapter {
 
     /// Read the `list_id` from the manifest config.
     fn list_id(&self) -> Option<&str> {
-        self.manifest
-            .config
-            .get("list_id")
-            .and_then(|v| v.as_str())
+        self.manifest.config.get("list_id").and_then(|v| v.as_str())
     }
 
     /// Read the optional `filter_tag` from the manifest config.
@@ -77,10 +74,7 @@ impl ClickUpIngestionAdapter {
         }
 
         // Store the ClickUp status as metadata.
-        item = item.with_metadata(
-            "clickup_status",
-            serde_json::json!(task.status.status),
-        );
+        item = item.with_metadata("clickup_status", serde_json::json!(task.status.status));
 
         if let Some(ref url) = task.url {
             item = item.with_metadata("clickup_url", serde_json::json!(url));
@@ -95,9 +89,10 @@ impl ClickUpIngestionAdapter {
         // Parse date_updated (Unix ms) to DateTime<Utc>.
         if let Some(ref ts_str) = task.date_updated
             && let Ok(ts_ms) = ts_str.parse::<i64>()
-                && let Some(dt) = DateTime::from_timestamp_millis(ts_ms) {
-                    item = item.with_external_updated_at(dt);
-                }
+            && let Some(dt) = DateTime::from_timestamp_millis(ts_ms)
+        {
+            item = item.with_external_updated_at(dt);
+        }
 
         item
     }
@@ -110,11 +105,12 @@ impl IngestionAdapter for ClickUpIngestionAdapter {
     }
 
     async fn poll(&self, last_poll: Option<DateTime<Utc>>) -> DomainResult<Vec<IngestionItem>> {
-        let list_id = self.list_id().ok_or_else(|| {
-            crate::domain::errors::DomainError::ValidationFailed(
-                "ClickUp adapter config missing required 'list_id'".to_string(),
-            )
-        })?;
+        let list_id =
+            self.list_id()
+                .ok_or_else(|| crate::domain::errors::DomainError::ConfigError {
+                    key: "clickup.list_id".to_string(),
+                    reason: "ClickUp adapter config missing required 'list_id'".to_string(),
+                })?;
 
         // Convert last_poll to Unix milliseconds for the ClickUp API.
         let updated_after_ms = last_poll.map(|dt| dt.timestamp_millis());
@@ -156,14 +152,16 @@ impl IngestionAdapter for ClickUpIngestionAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::adapter::{
-        AdapterCapability, AdapterDirection, AdapterType,
-    };
+    use crate::domain::models::adapter::{AdapterCapability, AdapterDirection, AdapterType};
 
     fn test_manifest() -> AdapterManifest {
-        AdapterManifest::new("clickup", AdapterType::Native, AdapterDirection::Bidirectional)
-            .with_capability(AdapterCapability::PollItems)
-            .with_config("list_id", serde_json::json!("12345"))
+        AdapterManifest::new(
+            "clickup",
+            AdapterType::Native,
+            AdapterDirection::Bidirectional,
+        )
+        .with_capability(AdapterCapability::PollItems)
+        .with_config("list_id", serde_json::json!("12345"))
     }
 
     fn make_clickup_task(id: &str, name: &str, priority_id: Option<&str>) -> ClickUpTask {
@@ -195,17 +193,47 @@ mod tests {
     #[test]
     fn test_priority_mapping() {
         use super::super::models::ClickUpPriority;
-        let urgent = ClickUpPriority { id: "1".to_string(), priority: "urgent".to_string() };
-        let high = ClickUpPriority { id: "2".to_string(), priority: "high".to_string() };
-        let normal = ClickUpPriority { id: "3".to_string(), priority: "normal".to_string() };
-        let low = ClickUpPriority { id: "4".to_string(), priority: "low".to_string() };
-        let unknown = ClickUpPriority { id: "99".to_string(), priority: "???".to_string() };
+        let urgent = ClickUpPriority {
+            id: "1".to_string(),
+            priority: "urgent".to_string(),
+        };
+        let high = ClickUpPriority {
+            id: "2".to_string(),
+            priority: "high".to_string(),
+        };
+        let normal = ClickUpPriority {
+            id: "3".to_string(),
+            priority: "normal".to_string(),
+        };
+        let low = ClickUpPriority {
+            id: "4".to_string(),
+            priority: "low".to_string(),
+        };
+        let unknown = ClickUpPriority {
+            id: "99".to_string(),
+            priority: "???".to_string(),
+        };
 
-        assert_eq!(ClickUpIngestionAdapter::map_priority(&urgent), TaskPriority::Critical);
-        assert_eq!(ClickUpIngestionAdapter::map_priority(&high), TaskPriority::High);
-        assert_eq!(ClickUpIngestionAdapter::map_priority(&normal), TaskPriority::Normal);
-        assert_eq!(ClickUpIngestionAdapter::map_priority(&low), TaskPriority::Low);
-        assert_eq!(ClickUpIngestionAdapter::map_priority(&unknown), TaskPriority::Normal);
+        assert_eq!(
+            ClickUpIngestionAdapter::map_priority(&urgent),
+            TaskPriority::Critical
+        );
+        assert_eq!(
+            ClickUpIngestionAdapter::map_priority(&high),
+            TaskPriority::High
+        );
+        assert_eq!(
+            ClickUpIngestionAdapter::map_priority(&normal),
+            TaskPriority::Normal
+        );
+        assert_eq!(
+            ClickUpIngestionAdapter::map_priority(&low),
+            TaskPriority::Low
+        );
+        assert_eq!(
+            ClickUpIngestionAdapter::map_priority(&unknown),
+            TaskPriority::Normal
+        );
     }
 
     #[test]
@@ -242,8 +270,7 @@ mod tests {
 
     #[test]
     fn test_filter_tag_from_config() {
-        let manifest = test_manifest()
-            .with_config("filter_tag", serde_json::json!("abathur"));
+        let manifest = test_manifest().with_config("filter_tag", serde_json::json!("abathur"));
         let client = Arc::new(ClickUpClient::new("test-key".to_string()));
         let adapter = ClickUpIngestionAdapter::new(manifest, client);
         assert_eq!(adapter.filter_tag(), Some("abathur"));
@@ -259,8 +286,7 @@ mod tests {
 
     #[test]
     fn test_filter_tag_empty_string_treated_as_absent() {
-        let manifest = test_manifest()
-            .with_config("filter_tag", serde_json::json!(""));
+        let manifest = test_manifest().with_config("filter_tag", serde_json::json!(""));
         let client = Arc::new(ClickUpClient::new("test-key".to_string()));
         let adapter = ClickUpIngestionAdapter::new(manifest, client);
         assert!(adapter.filter_tag().is_none());

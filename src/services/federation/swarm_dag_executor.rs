@@ -181,10 +181,11 @@ impl SwarmDagExecutor {
         let mut failed_ids = Vec::new();
         for dep_id in &transitive {
             if let Some(dep_node) = dag.get_node_mut(*dep_id)
-                && !dep_node.state.is_terminal() {
-                    dep_node.state = SwarmDagNodeState::Failed;
-                    failed_ids.push(*dep_id);
-                }
+                && !dep_node.state.is_terminal()
+            {
+                dep_node.state = SwarmDagNodeState::Failed;
+                failed_ids.push(*dep_id);
+            }
         }
 
         // Emit failure events for cascaded nodes.
@@ -201,10 +202,7 @@ impl SwarmDagExecutor {
                         dag_id: dag.id,
                         node_id: *dep_id,
                         node_label: label,
-                        reason: format!(
-                            "Cascaded failure from node '{}': {}",
-                            node_label, reason
-                        ),
+                        reason: format!("Cascaded failure from node '{}': {}", node_label, reason),
                     },
                 ))
                 .await;
@@ -265,12 +263,12 @@ impl SwarmDagExecutor {
             .federation_service
             .delegate_goal(goal, &cerebrate_id, contract)
             .await
-            .map_err(|e| {
-                crate::domain::errors::DomainError::ValidationFailed(format!(
-                    "Failed to delegate node '{}': {}",
-                    label, e
-                ))
-            })?;
+            .map_err(
+                |e| crate::domain::errors::DomainError::ExternalServiceError {
+                    service: format!("federation:{}", cerebrate_id),
+                    reason: format!("Failed to delegate node '{}': {}", label, e),
+                },
+            )?;
 
         let fed_goal_id = federated_goal.id;
 
@@ -393,9 +391,18 @@ mod tests {
         }
 
         assert!(dag.is_complete());
-        assert_eq!(dag.get_node(code_id).unwrap().state, SwarmDagNodeState::Failed);
-        assert_eq!(dag.get_node(deploy_id).unwrap().state, SwarmDagNodeState::Failed);
-        assert_eq!(dag.get_node(e2e_id).unwrap().state, SwarmDagNodeState::Failed);
+        assert_eq!(
+            dag.get_node(code_id).unwrap().state,
+            SwarmDagNodeState::Failed
+        );
+        assert_eq!(
+            dag.get_node(deploy_id).unwrap().state,
+            SwarmDagNodeState::Failed
+        );
+        assert_eq!(
+            dag.get_node(e2e_id).unwrap().state,
+            SwarmDagNodeState::Failed
+        );
     }
 
     #[test]

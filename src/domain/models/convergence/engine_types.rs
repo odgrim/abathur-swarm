@@ -178,11 +178,20 @@ mod tests {
             trajectory_id: "traj-3".to_string(),
             best_observation_sequence: None,
         };
-        assert!(matches!(exhausted_none, ConvergenceOutcome::Exhausted { best_observation_sequence: None, .. }));
+        assert!(matches!(
+            exhausted_none,
+            ConvergenceOutcome::Exhausted {
+                best_observation_sequence: None,
+                ..
+            }
+        ));
 
         let trapped = ConvergenceOutcome::Trapped {
             trajectory_id: "traj-4".to_string(),
-            attractor_type: AttractorType::LimitCycle { period: 2, cycle_signatures: vec![] },
+            attractor_type: AttractorType::LimitCycle {
+                period: 2,
+                cycle_signatures: vec![],
+            },
         };
         assert!(matches!(trapped, ConvergenceOutcome::Trapped { .. }));
 
@@ -201,7 +210,7 @@ mod tests {
     #[test]
     fn test_loop_control_variants_constructible() {
         // Verify all LoopControl variants can be constructed and matched
-        let variants = vec![
+        let variants = [
             LoopControl::Continue,
             LoopControl::IntentCheck,
             LoopControl::Exhausted,

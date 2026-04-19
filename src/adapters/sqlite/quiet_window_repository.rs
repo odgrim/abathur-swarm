@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use super::{parse_datetime, parse_uuid};
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::quiet_window::{QuietWindow, QuietWindowStatus};
 use crate::domain::ports::quiet_window_repository::{QuietWindowFilter, QuietWindowRepository};
-use super::{parse_datetime, parse_uuid};
 
 pub struct SqliteQuietWindowRepository {
     pool: SqlitePool,
@@ -41,8 +41,7 @@ impl QuietWindowRow {
             start_cron: self.start_cron,
             end_cron: self.end_cron,
             timezone: self.timezone,
-            status: QuietWindowStatus::from_str(&self.status)
-                .unwrap_or(QuietWindowStatus::Enabled),
+            status: QuietWindowStatus::from_str(&self.status).unwrap_or(QuietWindowStatus::Enabled),
             created_at: parse_datetime(&self.created_at)?,
             updated_at: parse_datetime(&self.updated_at)?,
         })
@@ -98,7 +97,7 @@ impl QuietWindowRepository for SqliteQuietWindowRepository {
     async fn update(&self, window: &QuietWindow) -> DomainResult<()> {
         sqlx::query(
             "UPDATE quiet_windows SET name = ?, description = ?, start_cron = ?, end_cron = ?,
-             timezone = ?, status = ?, updated_at = ? WHERE id = ?"
+             timezone = ?, status = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&window.name)
         .bind(&window.description)
@@ -146,6 +145,9 @@ impl QuietWindowRepository for SqliteQuietWindowRepository {
     }
 
     async fn list_enabled(&self) -> DomainResult<Vec<QuietWindow>> {
-        self.list(QuietWindowFilter { status: Some(QuietWindowStatus::Enabled) }).await
+        self.list(QuietWindowFilter {
+            status: Some(QuietWindowStatus::Enabled),
+        })
+        .await
     }
 }

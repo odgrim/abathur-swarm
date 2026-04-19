@@ -56,10 +56,7 @@ impl AdapterRegistry {
     /// Takes ownership of the loaded adapters and indexes them by name.
     /// The `prompts` map provides prompt content for prompt-based adapters
     /// (keyed by adapter name).
-    pub fn from_loaded(
-        adapters: Vec<LoadedAdapter>,
-        prompts: HashMap<String, String>,
-    ) -> Self {
+    pub fn from_loaded(adapters: Vec<LoadedAdapter>, prompts: HashMap<String, String>) -> Self {
         let mut manifests = HashMap::new();
         let mut ingestion = HashMap::new();
         let mut egress = HashMap::new();
@@ -172,9 +169,7 @@ impl AdapterRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::adapter::{
-        AdapterCapability, AdapterDirection, AdapterType,
-    };
+    use crate::domain::models::adapter::{AdapterCapability, AdapterDirection, AdapterType};
 
     fn make_egress_manifest(name: &str) -> AdapterManifest {
         AdapterManifest::new(name, AdapterType::Prompt, AdapterDirection::Egress)
@@ -203,10 +198,12 @@ mod tests {
         let loaded = vec![LoadedAdapter {
             manifest: manifest.clone(),
             ingestion: None,
-            egress: Some(Box::new(crate::services::prompt_adapter::PromptAdapter::new(
-                manifest,
-                "# Jira Instructions".into(),
-            ))),
+            egress: Some(Box::new(
+                crate::services::prompt_adapter::PromptAdapter::new(
+                    manifest,
+                    "# Jira Instructions".into(),
+                ),
+            )),
             prompt_content: Some("# Jira Instructions".into()),
         }];
 
@@ -234,10 +231,9 @@ mod tests {
         let loaded = vec![LoadedAdapter {
             manifest: manifest.clone(),
             ingestion: None,
-            egress: Some(Box::new(crate::services::prompt_adapter::PromptAdapter::new(
-                manifest,
-                "# GitHub".into(),
-            ))),
+            egress: Some(Box::new(
+                crate::services::prompt_adapter::PromptAdapter::new(manifest, "# GitHub".into()),
+            )),
             prompt_content: Some("# GitHub".into()),
         }];
 
@@ -256,17 +252,17 @@ mod tests {
             LoadedAdapter {
                 manifest: m1.clone(),
                 ingestion: None,
-                egress: Some(Box::new(crate::services::prompt_adapter::PromptAdapter::new(
-                    m1, "a".into(),
-                ))),
+                egress: Some(Box::new(
+                    crate::services::prompt_adapter::PromptAdapter::new(m1, "a".into()),
+                )),
                 prompt_content: Some("a".into()),
             },
             LoadedAdapter {
                 manifest: m2.clone(),
                 ingestion: None,
-                egress: Some(Box::new(crate::services::prompt_adapter::PromptAdapter::new(
-                    m2, "b".into(),
-                ))),
+                egress: Some(Box::new(
+                    crate::services::prompt_adapter::PromptAdapter::new(m2, "b".into()),
+                )),
                 prompt_content: Some("b".into()),
             },
         ];
@@ -288,10 +284,12 @@ mod tests {
         let loaded = vec![LoadedAdapter {
             manifest: manifest.clone(),
             ingestion: None,
-            egress: Some(Box::new(crate::services::prompt_adapter::PromptAdapter::new(
-                manifest,
-                "# Linear Prompt".into(),
-            ))),
+            egress: Some(Box::new(
+                crate::services::prompt_adapter::PromptAdapter::new(
+                    manifest,
+                    "# Linear Prompt".into(),
+                ),
+            )),
             prompt_content: Some("# Linear Prompt".into()),
         }];
 
@@ -316,10 +314,12 @@ mod tests {
             LoadedAdapter {
                 manifest: egress_manifest.clone(),
                 ingestion: None,
-                egress: Some(Box::new(crate::services::prompt_adapter::PromptAdapter::new(
-                    egress_manifest,
-                    "egress prompt".into(),
-                ))),
+                egress: Some(Box::new(
+                    crate::services::prompt_adapter::PromptAdapter::new(
+                        egress_manifest,
+                        "egress prompt".into(),
+                    ),
+                )),
                 prompt_content: Some("egress prompt".into()),
             },
             LoadedAdapter {

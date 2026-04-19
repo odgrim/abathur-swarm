@@ -6,20 +6,19 @@
 //! the latest convergence signal.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use uuid::Uuid;
 
-use crate::adapters::mcp::a2a_http::{
-    A2AArtifact, A2ATaskState, InMemoryTask, MessagePart,
-};
+use crate::adapters::mcp::a2a_http::{A2AArtifact, A2ATaskState, InMemoryTask, MessagePart};
 use crate::domain::ports::TrajectoryRepository;
+use crate::services::clock::{DynClock, system_clock};
+use crate::services::supervise;
 
 /// Handle to stop the convergence publisher daemon.
 pub struct ConvergencePublisherHandle {
@@ -45,6 +44,7 @@ pub struct ConvergencePublisher {
     trajectory_repo: Option<Arc<dyn TrajectoryRepository>>,
     poll_interval: Duration,
     stop_flag: Arc<AtomicBool>,
+    clock: DynClock,
 }
 
 /// The convergence signal snapshot that gets serialized into the artifact.
@@ -84,15 +84,13 @@ impl ConvergenceSnapshot {
 
 impl ConvergencePublisher {
     /// Create a new convergence publisher.
-    pub fn new(
-        tasks: Arc<RwLock<HashMap<String, InMemoryTask>>>,
-        poll_interval: Duration,
-    ) -> Self {
+    pub fn new(tasks: Arc<RwLock<HashMap<String, InMemoryTask>>>, poll_interval: Duration) -> Self {
         Self {
             tasks,
             trajectory_repo: None,
             poll_interval,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            clock: system_clock(),
         }
     }
 
@@ -101,6 +99,12 @@ impl ConvergencePublisher {
     /// Without this, the publisher falls back to default (zero) snapshots.
     pub fn with_trajectory_repo(mut self, repo: Arc<dyn TrajectoryRepository>) -> Self {
         self.trajectory_repo = Some(repo);
+        self
+    }
+
+    /// Inject a custom clock (for deterministic testing).
+    pub fn with_clock(mut self, clock: DynClock) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -114,7 +118,7 @@ impl ConvergencePublisher {
     /// Spawn the publisher as a background task. Returns a handle for stopping.
     pub fn spawn(self) -> ConvergencePublisherHandle {
         let handle = self.handle();
-        tokio::spawn(async move {
+        supervise("convergence_publisher", async move {
             self.run_loop().await;
         });
         handle
@@ -148,10 +152,11 @@ impl ConvergencePublisher {
 
         for task_id in task_ids {
             if let Some(task) = tasks.get_mut(&task_id) {
-                let snapshot = compute_convergence_snapshot(task, self.trajectory_repo.as_ref()).await;
+                let snapshot =
+                    compute_convergence_snapshot(task, self.trajectory_repo.as_ref()).await;
                 let artifact = build_convergence_artifact(&snapshot);
                 upsert_convergence_artifact(task, artifact);
-                task.updated_at = Utc::now();
+                task.updated_at = self.clock.now();
             }
         }
     }
@@ -178,7 +183,12 @@ fn extract_goal_id(task: &InMemoryTask) -> Option<String> {
         .as_ref()?
         .get("abathur:federation")?
         .get("parent_goal_id")
-        .or_else(|| task.metadata.as_ref()?.get("abathur:federation")?.get("goal_id"))
+        .or_else(|| {
+            task.metadata
+                .as_ref()?
+                .get("abathur:federation")?
+                .get("goal_id")
+        })
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -233,7 +243,11 @@ pub async fn compute_convergence_snapshot(
         .as_ref()
         .map(|t| {
             let total = t.passed + t.failed;
-            if total == 0 { 0.0 } else { t.passed as f64 / total as f64 }
+            if total == 0 {
+                0.0
+            } else {
+                t.passed as f64 / total as f64
+            }
         })
         .unwrap_or(0.0);
 
@@ -368,10 +382,7 @@ mod tests {
 
     #[test]
     fn test_only_processes_goal_delegate_working_tasks() {
-        let working_delegate = make_task(
-            A2ATaskState::Working,
-            Some(goal_delegate_metadata()),
-        );
+        let working_delegate = make_task(A2ATaskState::Working, Some(goal_delegate_metadata()));
         assert!(is_working_goal_delegate(&working_delegate));
 
         // Non-delegate working task
@@ -433,10 +444,7 @@ mod tests {
 
     #[test]
     fn test_upsert_replaces_existing_convergence_artifact() {
-        let mut task = make_task(
-            A2ATaskState::Working,
-            Some(goal_delegate_metadata()),
-        );
+        let mut task = make_task(A2ATaskState::Working, Some(goal_delegate_metadata()));
 
         let snapshot1 = ConvergenceSnapshot {
             convergence_level: 0.3,
@@ -489,26 +497,17 @@ mod tests {
         let mut tasks_map = HashMap::new();
 
         // Working goal_delegate task — should get artifact
-        let eligible = make_task(
-            A2ATaskState::Working,
-            Some(goal_delegate_metadata()),
-        );
+        let eligible = make_task(A2ATaskState::Working, Some(goal_delegate_metadata()));
         let eligible_id = eligible.id.clone();
         tasks_map.insert(eligible_id.clone(), eligible);
 
         // Completed goal_delegate task — should NOT get artifact
-        let completed = make_task(
-            A2ATaskState::Completed,
-            Some(goal_delegate_metadata()),
-        );
+        let completed = make_task(A2ATaskState::Completed, Some(goal_delegate_metadata()));
         let completed_id = completed.id.clone();
         tasks_map.insert(completed_id.clone(), completed);
 
         // Working non-delegate task — should NOT get artifact
-        let non_delegate = make_task(
-            A2ATaskState::Working,
-            Some(json!({ "something": "else" })),
-        );
+        let non_delegate = make_task(A2ATaskState::Working, Some(json!({ "something": "else" })));
         let non_delegate_id = non_delegate.id.clone();
         tasks_map.insert(non_delegate_id.clone(), non_delegate);
 

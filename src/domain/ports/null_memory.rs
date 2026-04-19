@@ -6,9 +6,9 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use super::MemoryRepository;
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{Memory, MemoryQuery, MemoryTier};
-use super::MemoryRepository;
 
 /// A no-op memory repository that stores nothing.
 ///
@@ -48,7 +48,12 @@ impl MemoryRepository for NullMemoryRepository {
         Ok(Vec::new())
     }
 
-    async fn search(&self, _query: &str, _namespace: Option<&str>, _limit: usize) -> DomainResult<Vec<Memory>> {
+    async fn search(
+        &self,
+        _query: &str,
+        _namespace: Option<&str>,
+        _limit: usize,
+    ) -> DomainResult<Vec<Memory>> {
         Ok(Vec::new())
     }
 

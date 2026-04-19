@@ -16,10 +16,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::domain::models::TaskPriority;
 use super::config::BudgetConfig;
 use super::event_bus::{BudgetPressureLevel, EventBus, EventCategory, EventPayload, EventSeverity};
 use super::event_factory;
+use crate::domain::models::TaskPriority;
 
 // ============================================================================
 // Supporting types
@@ -267,8 +267,13 @@ impl BudgetTracker {
         }
 
         // Check for an opportunity window and emit if warranted.
-        self.detect_opportunity_and_emit(&window_id, consumed_pct, remaining_tokens, time_to_reset_secs)
-            .await;
+        self.detect_opportunity_and_emit(
+            &window_id,
+            consumed_pct,
+            remaining_tokens,
+            time_to_reset_secs,
+        )
+        .await;
     }
 
     /// Increment the internal cumulative token counter.
@@ -418,7 +423,11 @@ impl BudgetTracker {
                     opportunity_score: score,
                 }
             })
-            .max_by(|a, b| a.opportunity_score.partial_cmp(&b.opportunity_score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.opportunity_score
+                    .partial_cmp(&b.opportunity_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     // -------------------------------------------------------------------------
@@ -610,7 +619,13 @@ mod tests {
 
         // Monthly at Caution (65%)
         tracker
-            .report_budget_signal("monthly", BudgetWindowType::Monthly, 0.65, 35_000, 2_592_000)
+            .report_budget_signal(
+                "monthly",
+                BudgetWindowType::Monthly,
+                0.65,
+                35_000,
+                2_592_000,
+            )
             .await;
 
         // Daily at Warning (82%)

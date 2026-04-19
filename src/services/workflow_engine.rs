@@ -15,7 +15,9 @@ use crate::domain::models::task::{ExecutionMode, Task, TaskSource, TaskStatus, T
 use crate::domain::models::workflow_state::{FanOutSlice, GateVerdict, WorkflowState};
 use crate::domain::models::workflow_template::WorkflowTemplate;
 use crate::domain::ports::TaskRepository;
-use crate::services::event_bus::{EventBus, EventCategory, EventPayload, EventSeverity};
+use crate::services::event_bus::{
+    EventBus, EventCategory, EventPayload, EventSeverity, WorkflowVerificationCompletedPayload,
+};
 use crate::services::event_factory;
 use crate::services::task_service::TaskService;
 
@@ -48,20 +50,18 @@ fn validate_state_consistency(
 
         // Terminal TaskStatus is compatible with terminal WorkflowState or any
         // state (workflow may not have caught up yet)
-        (TaskStatus::Complete, _)
-        | (TaskStatus::Failed, _)
-        | (TaskStatus::Canceled, _) => Ok(()),
+        (TaskStatus::Complete, _) | (TaskStatus::Failed, _) | (TaskStatus::Canceled, _) => Ok(()),
 
         // Pending/Ready/Blocked are compatible with Pending workflow state
         (TaskStatus::Pending, WorkflowState::Pending { .. })
         | (TaskStatus::Ready, WorkflowState::Pending { .. })
         | (TaskStatus::Blocked, WorkflowState::Pending { .. }) => Ok(()),
-        (TaskStatus::Pending, ws)
-        | (TaskStatus::Ready, ws)
-        | (TaskStatus::Blocked, ws) => Err(format!(
-            "TaskStatus::Pending/Ready/Blocked is only valid with WorkflowState::Pending, got {:?}",
-            ws
-        )),
+        (TaskStatus::Pending, ws) | (TaskStatus::Ready, ws) | (TaskStatus::Blocked, ws) => {
+            Err(format!(
+                "TaskStatus::Pending/Ready/Blocked is only valid with WorkflowState::Pending, got {:?}",
+                ws
+            ))
+        }
     }
 }
 
@@ -148,7 +148,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     ///
     /// Supplied templates take precedence over any already loaded with the
     /// same name.
-    pub fn with_templates(mut self, extra: std::collections::HashMap<String, WorkflowTemplate>) -> Self {
+    pub fn with_templates(
+        mut self,
+        extra: std::collections::HashMap<String, WorkflowTemplate>,
+    ) -> Self {
         self.templates.extend(extra);
         self
     }
@@ -196,10 +199,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
 
     /// Read workflow state from task context.
     fn read_state(task: &Task) -> Option<WorkflowState> {
-        task.context
-            .custom
-            .get("workflow_state")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        task.workflow_state()
     }
 
     /// Public accessor for reading workflow state from a task (used by handlers).
@@ -210,7 +210,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     /// Write workflow state to task context and persist via TaskService
     /// (with retry-on-conflict).
     async fn write_state(&self, task_id: Uuid, state: &WorkflowState) -> DomainResult<()> {
-        self.task_service.update_workflow_state(task_id, state).await?;
+        self.task_service
+            .update_workflow_state(task_id, state)
+            .await?;
 
         // Post-condition: validate state consistency
         self.check_state_consistency(task_id, state).await;
@@ -344,7 +346,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                         "State inconsistency detected: TaskStatus::Validating with WorkflowState::PhaseReady — \
                          auto-correcting TaskStatus to Running"
                     );
-                    let _ = self.task_service.transition_to_running(task_id).await;
+                    if let Err(e) = self.task_service.transition_to_running(task_id).await {
+                        tracing::warn!(task_id = %task_id, error = %e, "auto-correct: transition_to_running failed during stale-Validating recovery");
+                    }
                 }
                 return Err(DomainError::ValidationFailed(format!(
                     "Task {} is already in PhaseReady — call fan_out to create subtasks",
@@ -540,8 +544,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                         return Ok(());
                     }
                     // Exhausted retries → fail
-                    let phase_retry_key =
-                        format!("phase_{}_retry_count", phase_index);
+                    let phase_retry_key = format!("phase_{}_retry_count", phase_index);
                     let parent = self
                         .task_repo
                         .get(parent_task_id)
@@ -563,7 +566,8 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                         *phase_index,
                         phase_name,
                         &error_msg,
-                    ).await?;
+                    )
+                    .await?;
                     return Ok(());
                 }
                 // All fan-out subtasks done → handle fan-in
@@ -612,12 +616,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         let any_failed = self.any_subtask_failed(&subtask_ids).await?;
         if any_failed {
             let retried = self
-                .retry_failed_phase_subtasks(
-                    parent_task_id,
-                    phase_index,
-                    &phase_name,
-                    &subtask_ids,
-                )
+                .retry_failed_phase_subtasks(parent_task_id, phase_index, &phase_name, &subtask_ids)
                 .await?;
             if retried {
                 return Ok(());
@@ -645,7 +644,8 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 phase_index,
                 &phase_name,
                 &error_msg,
-            ).await?;
+            )
+            .await?;
             return Ok(());
         }
 
@@ -659,7 +659,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         if phase.verify && self.verification_enabled && !all_converged {
             // Transition parent TaskStatus to Validating via TaskService
             {
-                let (_task, events) = self.task_service.transition_to_validating(parent_task_id).await?;
+                let (_task, events) = self
+                    .task_service
+                    .transition_to_validating(parent_task_id)
+                    .await?;
                 for evt in events {
                     self.event_bus.publish(evt).await;
                 }
@@ -847,20 +850,22 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 EventCategory::Workflow,
                 None,
                 Some(parent_task_id),
-                EventPayload::WorkflowVerificationCompleted {
+                EventPayload::WorkflowVerificationCompleted(WorkflowVerificationCompletedPayload {
                     task_id: parent_task_id,
                     phase_index,
                     phase_name: phase_name.clone(),
                     satisfied,
                     retry_count,
                     summary: summary.to_string(),
-                },
+                }),
             ))
             .await;
 
         if satisfied {
             // Transition parent TaskStatus: Validating -> Running via TaskService
-            let _ = self.task_service.transition_to_running(parent_task_id).await?;
+            self.task_service
+                .transition_to_running(parent_task_id)
+                .await?;
 
             // Verification passed — proceed
             if is_gate_phase(&self.templates, &workflow_name, phase_index, &phase_name) {
@@ -941,11 +946,14 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             }
         } else if retry_count < max_retries {
             // Failed with retries remaining — auto-rework
-            self.store_verification_feedback(parent_task_id, summary).await?;
+            self.store_verification_feedback(parent_task_id, summary)
+                .await?;
 
             // Transition parent TaskStatus: Validating -> Running via TaskService
             // (mirrors the satisfied branch above)
-            let _ = self.task_service.transition_to_running(parent_task_id).await?;
+            self.task_service
+                .transition_to_running(parent_task_id)
+                .await?;
 
             // Reset state so advance() re-creates the phase subtask
             if phase_index == 0 {
@@ -969,7 +977,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
 
             // Auto-advance to prepare the phase for rework
             match self.advance(parent_task_id).await {
-                Ok(AdvanceResult::PhaseReady { phase_name: rework_phase, .. }) => {
+                Ok(AdvanceResult::PhaseReady {
+                    phase_name: rework_phase,
+                    ..
+                }) => {
                     tracing::info!(
                         task_id = %parent_task_id,
                         phase = %rework_phase,
@@ -978,10 +989,15 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     );
 
                     // Update retry count on the parent task via TaskService
-                    self.task_service.update_task_context(
-                        parent_task_id,
-                        vec![("verification_retry_count".to_string(), serde_json::json!(retry_count + 1))],
-                    ).await?;
+                    self.task_service
+                        .update_task_context(
+                            parent_task_id,
+                            vec![(
+                                "verification_retry_count".to_string(),
+                                serde_json::json!(retry_count + 1),
+                            )],
+                        )
+                        .await?;
                 }
                 Ok(AdvanceResult::Completed) => {
                     tracing::info!(
@@ -1021,11 +1037,14 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             }
         } else {
             // Retries exhausted — escalate to PhaseGate for overmind decision
-            self.store_verification_feedback(parent_task_id, summary).await?;
+            self.store_verification_feedback(parent_task_id, summary)
+                .await?;
 
             // Transition parent TaskStatus: Validating -> Running via TaskService
             // (mirrors the satisfied branch above)
-            let _ = self.task_service.transition_to_running(parent_task_id).await?;
+            self.task_service
+                .transition_to_running(parent_task_id)
+                .await?;
 
             let gate_state = WorkflowState::PhaseGate {
                 workflow_name,
@@ -1134,7 +1153,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     .await;
 
                 // Fail parent task via TaskService
-                let error_msg = format!("Workflow rejected at phase {}: {}", phase_index, rejection_reason);
+                let error_msg = format!(
+                    "Workflow rejected at phase {}: {}",
+                    phase_index, rejection_reason
+                );
                 self.fail_parent_task(task_id, &error_msg).await?;
 
                 Ok(None)
@@ -1143,9 +1165,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 // Re-run: go back to Pending-like state so advance() re-creates the phase subtask
                 // We set it to PhaseGate at (phase_index - 1) so advance() will create phase_index again
                 if phase_index == 0 {
-                    let pending = WorkflowState::Pending {
-                        workflow_name,
-                    };
+                    let pending = WorkflowState::Pending { workflow_name };
                     self.write_state(task_id, &pending).await?;
                 } else {
                     let prev_phase_name = self
@@ -1182,13 +1202,11 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         // creating/selecting the right specialist before fanning out.
         for (i, slice) in slices.iter().enumerate() {
             if slice.agent.is_none() {
-                return Err(DomainError::ValidationFailed(
-                    format!(
-                        "fan_out slice {} is missing required `agent` field — \
+                return Err(DomainError::ValidationFailed(format!(
+                    "fan_out slice {} is missing required `agent` field — \
                          create or select an agent template and set `agent` on every slice",
-                        i
-                    ),
-                ));
+                    i
+                )));
             }
         }
 
@@ -1246,7 +1264,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             let mut subtask = Task::with_title(&title, &description);
             subtask.parent_id = Some(task_id);
             subtask.source = TaskSource::SubtaskOf(task_id);
-            let _ = subtask.transition_to(TaskStatus::Ready);
+            subtask
+                .transition_to(TaskStatus::Ready)
+                .expect("Pending → Ready transition must succeed for freshly-created subtask");
 
             // Assign agent_type inline if the slice specifies one
             if let Some(ref agent) = slice.agent {
@@ -1260,16 +1280,13 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             for (k, v) in &slice.context {
                 subtask.context.custom.insert(k.clone(), v.clone());
             }
-            subtask.context.custom.insert(
-                "workflow_phase".to_string(),
-                serde_json::json!({
-                    "workflow_name": workflow_name,
-                    "phase_index": phase_index,
-                    "phase_name": phase_name,
-                    "slice_index": i,
-                    "total_slices": slices.len(),
-                }),
-            );
+            subtask.set_workflow_phase_value(serde_json::json!({
+                "workflow_name": workflow_name,
+                "phase_index": phase_index,
+                "phase_name": phase_name,
+                "slice_index": i,
+                "total_slices": slices.len(),
+            }));
 
             self.task_repo.create(&subtask).await?;
             subtask_ids.push(subtask.id);
@@ -1325,40 +1342,46 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             .map(|t| t.phases.len())
             .unwrap_or(0);
 
-        let (current_phase_index, current_phase_name, is_verifying, verification_retry_count) = match &state {
-            WorkflowState::PhaseRunning {
-                phase_index,
-                phase_name,
-                ..
-            }
-            | WorkflowState::FanningOut {
-                phase_index,
-                phase_name,
-                ..
-            }
-            | WorkflowState::Aggregating {
-                phase_index,
-                phase_name,
-                ..
-            } => (Some(*phase_index), Some(phase_name.clone()), false, None),
-            WorkflowState::Verifying {
-                phase_index,
-                phase_name,
-                retry_count,
-                ..
-            } => (Some(*phase_index), Some(phase_name.clone()), true, Some(*retry_count)),
-            WorkflowState::PhaseGate {
-                phase_index,
-                phase_name,
-                ..
-            }
-            | WorkflowState::PhaseReady {
-                phase_index,
-                phase_name,
-                ..
-            } => (Some(*phase_index), Some(phase_name.clone()), false, None),
-            _ => (None, None, false, None),
-        };
+        let (current_phase_index, current_phase_name, is_verifying, verification_retry_count) =
+            match &state {
+                WorkflowState::PhaseRunning {
+                    phase_index,
+                    phase_name,
+                    ..
+                }
+                | WorkflowState::FanningOut {
+                    phase_index,
+                    phase_name,
+                    ..
+                }
+                | WorkflowState::Aggregating {
+                    phase_index,
+                    phase_name,
+                    ..
+                } => (Some(*phase_index), Some(phase_name.clone()), false, None),
+                WorkflowState::Verifying {
+                    phase_index,
+                    phase_name,
+                    retry_count,
+                    ..
+                } => (
+                    Some(*phase_index),
+                    Some(phase_name.clone()),
+                    true,
+                    Some(*retry_count),
+                ),
+                WorkflowState::PhaseGate {
+                    phase_index,
+                    phase_name,
+                    ..
+                }
+                | WorkflowState::PhaseReady {
+                    phase_index,
+                    phase_name,
+                    ..
+                } => (Some(*phase_index), Some(phase_name.clone()), false, None),
+                _ => (None, None, false, None),
+            };
 
         Ok(WorkflowStatus {
             task_id,
@@ -1382,7 +1405,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     /// `TaskCompleted` + `TaskExecutionRecorded` events are emitted
     /// and optimistic locking is handled correctly.
     async fn complete_parent_task(&self, task_id: Uuid) -> DomainResult<()> {
-        let task = self.task_repo.get(task_id).await?
+        let task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
         if task.status.is_terminal() {
             return Ok(());
@@ -1399,12 +1425,16 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     /// Routes through `TaskService::fail_task()` so that
     /// `TaskFailed` + `TaskExecutionRecorded` events are emitted.
     async fn fail_parent_task(&self, task_id: Uuid, error: &str) -> DomainResult<()> {
-        let task = self.task_repo.get(task_id).await?
+        let task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
         if task.status.is_terminal() {
             return Ok(());
         }
-        let (_task, events) = self.task_service
+        let (_task, events) = self
+            .task_service
             .fail_task(task_id, Some(error.to_string()))
             .await?;
         for evt in events {
@@ -1459,13 +1489,12 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     ///
     /// Appends to the `verification_feedback` array in the task's custom context
     /// so rework agents can see what failed. Uses TaskService for retry-on-conflict.
-    async fn store_verification_feedback(
-        &self,
-        task_id: Uuid,
-        summary: &str,
-    ) -> DomainResult<()> {
+    async fn store_verification_feedback(&self, task_id: Uuid, summary: &str) -> DomainResult<()> {
         // Read current feedback array, append, then write back via TaskService.
-        let task = self.task_repo.get(task_id).await?
+        let task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         let mut feedback = task
@@ -1476,10 +1505,15 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             .unwrap_or_default();
         feedback.push(serde_json::json!(summary));
 
-        self.task_service.update_task_context(
-            task_id,
-            vec![("verification_feedback".to_string(), serde_json::json!(feedback))],
-        ).await
+        self.task_service
+            .update_task_context(
+                task_id,
+                vec![(
+                    "verification_feedback".to_string(),
+                    serde_json::json!(feedback),
+                )],
+            )
+            .await
     }
 
     /// Handle fan-in: all fan-out subtasks are done, create aggregation task.
@@ -1522,11 +1556,8 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         let mut slice_summaries = Vec::new();
         for (i, id) in fan_out_subtask_ids.iter().enumerate() {
             if let Ok(Some(subtask)) = self.task_repo.get(*id).await {
-                let artifact_refs: Vec<String> = subtask
-                    .artifacts
-                    .iter()
-                    .map(|a| a.uri.clone())
-                    .collect();
+                let artifact_refs: Vec<String> =
+                    subtask.artifacts.iter().map(|a| a.uri.clone()).collect();
                 slice_summaries.push(format!(
                     "Slice {} (id: {}): {} (status: {}, artifacts: {})",
                     i + 1,
@@ -1572,7 +1603,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         );
 
         let mut agg_subtask = Task::with_title(
-            format!("[{}/{}:{}] Aggregate fan-out results", workflow_name, phase_index, phase_name),
+            format!(
+                "[{}/{}:{}] Aggregate fan-out results",
+                workflow_name, phase_index, phase_name
+            ),
             &aggregation_desc,
         );
         agg_subtask.parent_id = Some(parent_task_id);
@@ -1580,18 +1614,17 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         agg_subtask.task_type = TaskType::Standard;
         agg_subtask.execution_mode = ExecutionMode::Direct; // Aggregation is always read-only
         agg_subtask.worktree_path = task.worktree_path.clone();
-        let _ = agg_subtask.transition_to(TaskStatus::Ready);
+        agg_subtask.transition_to(TaskStatus::Ready).expect(
+            "Pending → Ready transition must succeed for freshly-created aggregation subtask",
+        );
         agg_subtask.agent_type = Some("aggregator".to_string());
 
-        agg_subtask.context.custom.insert(
-            "workflow_phase".to_string(),
-            serde_json::json!({
-                "workflow_name": workflow_name,
-                "phase_index": phase_index,
-                "phase_name": phase_name,
-                "is_aggregation": true,
-            }),
-        );
+        agg_subtask.set_workflow_phase_value(serde_json::json!({
+            "workflow_name": workflow_name,
+            "phase_index": phase_index,
+            "phase_name": phase_name,
+            "is_aggregation": true,
+        }));
 
         self.task_repo.create(&agg_subtask).await?;
 
@@ -1636,7 +1669,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         for id in subtask_ids {
             match self.task_repo.get(*id).await? {
                 Some(t) if t.status == TaskStatus::Failed || t.status == TaskStatus::Canceled => {
-                    return Ok(true)
+                    return Ok(true);
                 }
                 _ => continue,
             }
@@ -1686,10 +1719,15 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
 
             if retried_any {
                 let new_retry_count = phase_retry_count + 1;
-                self.task_service.update_task_context(
-                    parent_task_id,
-                    vec![(phase_retry_key, serde_json::Value::Number(new_retry_count.into()))],
-                ).await?;
+                self.task_service
+                    .update_task_context(
+                        parent_task_id,
+                        vec![(
+                            phase_retry_key,
+                            serde_json::Value::Number(new_retry_count.into()),
+                        )],
+                    )
+                    .await?;
                 tracing::info!(
                     parent_id = %parent_task_id,
                     phase = %phase_name,
@@ -1832,7 +1870,11 @@ mod tests {
 
         // Now call handle_phase_complete — the subtask has failed and has no retries
         let result = engine.handle_phase_complete(parent.id, subtask.id).await;
-        assert!(result.is_ok(), "handle_phase_complete should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "handle_phase_complete should succeed: {:?}",
+            result.err()
+        );
 
         // Verify parent task is now Failed
         let updated_parent = task_repo.get(parent.id).await.unwrap().unwrap();
@@ -1843,8 +1885,9 @@ mod tests {
         );
 
         // Verify workflow state is Failed
-        let ws_val = updated_parent.context.custom.get("workflow_state").unwrap();
-        let ws: WorkflowState = serde_json::from_value(ws_val.clone()).unwrap();
+        let ws = updated_parent
+            .workflow_state()
+            .expect("workflow_state present");
         assert!(
             matches!(ws, WorkflowState::Failed { .. }),
             "workflow_state should be Failed"
@@ -1910,7 +1953,11 @@ mod tests {
 
         // Call handle_phase_complete — subtask failed but can retry
         let result = engine.handle_phase_complete(parent.id, subtask.id).await;
-        assert!(result.is_ok(), "handle_phase_complete should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "handle_phase_complete should succeed: {:?}",
+            result.err()
+        );
 
         // Collect emitted events
         let mut found_retried = false;
@@ -1929,7 +1976,10 @@ mod tests {
                 found_retried = true;
             }
         }
-        assert!(found_retried, "WorkflowPhaseRetried event should have been emitted");
+        assert!(
+            found_retried,
+            "WorkflowPhaseRetried event should have been emitted"
+        );
     }
 
     #[tokio::test]
@@ -1972,7 +2022,11 @@ mod tests {
 
         // Call handle_phase_complete — subtask failed with no retries
         let result = engine.handle_phase_complete(parent.id, subtask.id).await;
-        assert!(result.is_ok(), "handle_phase_complete should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "handle_phase_complete should succeed: {:?}",
+            result.err()
+        );
 
         // Collect emitted events
         let mut found_failed = false;
@@ -1987,11 +2041,18 @@ mod tests {
                 assert_eq!(*task_id, parent.id);
                 assert_eq!(*phase_index, 0);
                 assert_eq!(phase_name, "implement");
-                assert!(reason.contains("failed after"), "reason should mention retries: {}", reason);
+                assert!(
+                    reason.contains("failed after"),
+                    "reason should mention retries: {}",
+                    reason
+                );
                 found_failed = true;
             }
         }
-        assert!(found_failed, "WorkflowPhaseFailed event should have been emitted");
+        assert!(
+            found_failed,
+            "WorkflowPhaseFailed event should have been emitted"
+        );
     }
 
     // --- validate_state_consistency tests (Fix 1 / Fix 8) ---
@@ -2004,7 +2065,10 @@ mod tests {
             phase_name: "implement".to_string(),
         };
         let result = validate_state_consistency(TaskStatus::Validating, &ws);
-        assert!(result.is_err(), "Validating + PhaseReady should be inconsistent");
+        assert!(
+            result.is_err(),
+            "Validating + PhaseReady should be inconsistent"
+        );
         let msg = result.unwrap_err();
         assert!(
             msg.contains("Validating") && msg.contains("Verifying"),
@@ -2024,7 +2088,8 @@ mod tests {
                     phase_index: 0,
                     phase_name: "implement".to_string(),
                 },
-            ).is_ok(),
+            )
+            .is_ok(),
             "Running + PhaseReady should be valid"
         );
 
@@ -2038,7 +2103,8 @@ mod tests {
                     phase_name: "implement".to_string(),
                     subtask_ids: vec![],
                 },
-            ).is_ok(),
+            )
+            .is_ok(),
             "Running + PhaseRunning should be valid"
         );
 
@@ -2053,7 +2119,8 @@ mod tests {
                     subtask_ids: vec![],
                     retry_count: 0,
                 },
-            ).is_ok(),
+            )
+            .is_ok(),
             "Validating + Verifying should be valid"
         );
 
@@ -2064,7 +2131,8 @@ mod tests {
                 &WorkflowState::Completed {
                     workflow_name: "code".to_string(),
                 },
-            ).is_ok(),
+            )
+            .is_ok(),
             "Complete + Completed should be valid"
         );
 
@@ -2075,7 +2143,8 @@ mod tests {
                 &WorkflowState::Pending {
                     workflow_name: "code".to_string(),
                 },
-            ).is_ok(),
+            )
+            .is_ok(),
             "Pending + Pending should be valid"
         );
     }
@@ -2102,7 +2171,11 @@ mod tests {
         engine.write_state(task.id, &ws).await.unwrap();
 
         let result = engine.advance(task.id).await;
-        assert!(result.is_ok(), "advance from Pending should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "advance from Pending should succeed: {:?}",
+            result.err()
+        );
 
         match result.unwrap() {
             AdvanceResult::PhaseReady { phase_index, .. } => {
@@ -2133,7 +2206,11 @@ mod tests {
         engine.write_state(task.id, &ws).await.unwrap();
 
         let result = engine.advance(task.id).await;
-        assert!(result.is_ok(), "advance from PhaseGate should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "advance from PhaseGate should succeed: {:?}",
+            result.err()
+        );
 
         match result.unwrap() {
             AdvanceResult::PhaseReady { phase_index, .. } => {
@@ -2273,7 +2350,11 @@ mod tests {
         assert!(result.is_ok(), "fan_out should succeed: {:?}", result.err());
 
         let fan_out_result = result.unwrap();
-        assert_eq!(fan_out_result.subtask_ids.len(), 2, "Should create 2 subtasks");
+        assert_eq!(
+            fan_out_result.subtask_ids.len(),
+            2,
+            "Should create 2 subtasks"
+        );
         assert_eq!(fan_out_result.phase_index, 0);
     }
 

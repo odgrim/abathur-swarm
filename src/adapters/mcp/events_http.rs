@@ -4,17 +4,17 @@
 //! and replay capabilities via HTTP endpoints.
 
 use axum::{
+    Router,
     extract::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Json,
+        sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post, delete},
-    Router,
+    routing::{delete, get, post},
 };
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -333,13 +333,15 @@ fn create_event_stream_with_replay(
                 match rx.recv().await {
                     Ok(event) => {
                         if let Some(goal_id) = goal_filter
-                            && event.goal_id != Some(goal_id) {
-                                continue;
-                            }
+                            && event.goal_id != Some(goal_id)
+                        {
+                            continue;
+                        }
                         if let Some(task_id) = task_filter
-                            && event.task_id != Some(task_id) {
-                                continue;
-                            }
+                            && event.task_id != Some(task_id)
+                        {
+                            continue;
+                        }
 
                         let sse_event = Event::default()
                             .event(format!("{}", event.category))
@@ -389,34 +391,32 @@ async fn ws_events(
 }
 
 /// Handle a WebSocket event stream connection.
-async fn handle_ws_events(
-    mut socket: WebSocket,
-    params: WsEventParams,
-    state: Arc<EventsState>,
-) {
+async fn handle_ws_events(mut socket: WebSocket, params: WsEventParams, state: Arc<EventsState>) {
     let category_filter = params.category.as_deref().and_then(parse_category);
 
     // Replay missed events if since_sequence is provided
     if let Some(since) = params.since_sequence
-        && let Some(ref store) = state.event_store {
-            let query = EventQuery::new()
-                .since_sequence(SequenceNumber(since))
-                .limit(state.config.max_history_limit)
-                .ascending();
+        && let Some(ref store) = state.event_store
+    {
+        let query = EventQuery::new()
+            .since_sequence(SequenceNumber(since))
+            .limit(state.config.max_history_limit)
+            .ascending();
 
-            if let Ok(events) = store.query(query).await {
-                for event in &events {
-                    if let Some(cat) = category_filter
-                        && event.category != cat {
-                            continue;
-                        }
-                    let json = serde_json::to_string(event).unwrap_or_default();
-                    if socket.send(Message::Text(json.into())).await.is_err() {
-                        return;
-                    }
+        if let Ok(events) = store.query(query).await {
+            for event in &events {
+                if let Some(cat) = category_filter
+                    && event.category != cat
+                {
+                    continue;
+                }
+                let json = serde_json::to_string(event).unwrap_or_default();
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
                 }
             }
         }
+    }
 
     // Stream live events
     let mut receiver = state.event_bus.subscribe();
@@ -503,35 +503,42 @@ async fn create_webhook(
     let now = chrono::Utc::now();
     let filter_json = serde_json::json!({
         "category": req.filter_category,
-    }).to_string();
+    })
+    .to_string();
     let max_failures = req.max_failures.unwrap_or(10);
 
-    store.create_webhook(
-        &id.to_string(),
-        &req.url,
-        req.secret.as_deref(),
-        &filter_json,
-        max_failures,
-        &now.to_rfc3339(),
-    ).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-                code: "CREATE_ERROR".to_string(),
-            }),
+    store
+        .create_webhook(
+            &id.to_string(),
+            &req.url,
+            req.secret.as_deref(),
+            &filter_json,
+            max_failures,
+            &now.to_rfc3339(),
         )
-    })?;
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                    code: "CREATE_ERROR".to_string(),
+                }),
+            )
+        })?;
 
-    Ok((StatusCode::CREATED, Json(WebhookResponse {
-        id: id.to_string(),
-        url: req.url,
-        filter_category: req.filter_category,
-        active: true,
-        failure_count: 0,
-        max_failures,
-        created_at: now.to_rfc3339(),
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(WebhookResponse {
+            id: id.to_string(),
+            url: req.url,
+            filter_category: req.filter_category,
+            active: true,
+            failure_count: 0,
+            max_failures,
+            created_at: now.to_rfc3339(),
+        }),
+    ))
 }
 
 /// List all webhook subscriptions.
@@ -558,15 +565,20 @@ async fn list_webhooks(
         )
     })?;
 
-    Ok(Json(webhooks.into_iter().map(|w| WebhookResponse {
-        id: w.id,
-        url: w.url,
-        filter_category: w.filter_category,
-        active: w.active,
-        failure_count: w.failure_count,
-        max_failures: w.max_failures,
-        created_at: w.created_at,
-    }).collect()))
+    Ok(Json(
+        webhooks
+            .into_iter()
+            .map(|w| WebhookResponse {
+                id: w.id,
+                url: w.url,
+                filter_category: w.filter_category,
+                active: w.active,
+                failure_count: w.failure_count,
+                max_failures: w.max_failures,
+                created_at: w.created_at,
+            })
+            .collect(),
+    ))
 }
 
 /// Delete a webhook subscription.
@@ -645,7 +657,8 @@ async fn test_webhook(
         .build()
         .unwrap_or_default();
 
-    let mut request = client.post(&webhook.url)
+    let mut request = client
+        .post(&webhook.url)
         .header("Content-Type", "application/json")
         .header("X-Abathur-Event", "test");
 
@@ -678,8 +691,8 @@ fn compute_hmac_signature(secret: &str, body: &str) -> String {
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(body.as_bytes());
     let result = mac.finalize();
     format!("sha256={}", hex::encode(result.into_bytes()))
@@ -762,9 +775,10 @@ async fn query_history(
         query = query.correlation_id(corr_id);
     }
     if let Some(ref cat) = params.category
-        && let Some(category) = parse_category(cat) {
-            query = query.category(category);
-        }
+        && let Some(category) = parse_category(cat)
+    {
+        query = query.category(category);
+    }
     if let Some(offset) = params.offset {
         query = query.offset(offset);
     }
@@ -794,34 +808,33 @@ async fn get_stats(
     let current_sequence = state.event_bus.current_sequence().0;
     let subscriber_count = state.event_bus.subscriber_count();
 
-    let (total_events, oldest, newest, by_category) =
-        if let Some(ref store) = state.event_store {
-            let stats = store.stats().await.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                        code: "STATS_ERROR".to_string(),
-                    }),
-                )
-            })?;
-
+    let (total_events, oldest, newest, by_category) = if let Some(ref store) = state.event_store {
+        let stats = store.stats().await.map_err(|e| {
             (
-                stats.total_events,
-                stats.oldest_event.map(|dt| dt.to_rfc3339()),
-                stats.newest_event.map(|dt| dt.to_rfc3339()),
-                stats
-                    .events_by_category
-                    .into_iter()
-                    .map(|(cat, count)| CategoryCount {
-                        category: format!("{}", cat),
-                        count,
-                    })
-                    .collect(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                    code: "STATS_ERROR".to_string(),
+                }),
             )
-        } else {
-            (0, None, None, vec![])
-        };
+        })?;
+
+        (
+            stats.total_events,
+            stats.oldest_event.map(|dt| dt.to_rfc3339()),
+            stats.newest_event.map(|dt| dt.to_rfc3339()),
+            stats
+                .events_by_category
+                .into_iter()
+                .map(|(cat, count)| CategoryCount {
+                    category: format!("{}", cat),
+                    count,
+                })
+                .collect(),
+        )
+    } else {
+        (0, None, None, vec![])
+    };
 
     Ok(Json(StatsResponse {
         current_sequence,

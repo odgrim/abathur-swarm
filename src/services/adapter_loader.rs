@@ -190,12 +190,11 @@ async fn load_single_adapter(adapter_dir: &Path) -> Result<LoadedAdapter, Adapte
     }
 
     // Read and parse the manifest
-    let manifest_content = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        AdapterLoadError::Io {
+    let manifest_content =
+        std::fs::read_to_string(&manifest_path).map_err(|e| AdapterLoadError::Io {
             path: manifest_path.clone(),
             source: e,
-        }
-    })?;
+        })?;
 
     let manifest: AdapterManifest =
         toml::from_str(&manifest_content).map_err(|e| AdapterLoadError::TomlParse {
@@ -204,12 +203,12 @@ async fn load_single_adapter(adapter_dir: &Path) -> Result<LoadedAdapter, Adapte
         })?;
 
     // Validate the manifest
-    manifest.validate().map_err(|reason| {
-        AdapterLoadError::ValidationFailed {
+    manifest
+        .validate()
+        .map_err(|reason| AdapterLoadError::ValidationFailed {
             name: manifest.name.clone(),
             reason,
-        }
-    })?;
+        })?;
 
     // Check for missing environment variables referenced in config
     let missing = find_missing_env_vars(&manifest);
@@ -268,15 +267,11 @@ async fn load_prompt_adapter(
 /// Load a native (compiled Rust) adapter.
 ///
 /// Delegates to the native adapter factory in `crate::adapters::plugins`.
-async fn load_native_adapter(
-    manifest: AdapterManifest,
-) -> Result<LoadedAdapter, AdapterLoadError> {
-    let (ingestion, egress) =
-        crate::adapters::plugins::create_native_adapter(&manifest, "").map_err(|reason| {
-            AdapterLoadError::NativeCreationFailed {
-                name: manifest.name.clone(),
-                reason,
-            }
+async fn load_native_adapter(manifest: AdapterManifest) -> Result<LoadedAdapter, AdapterLoadError> {
+    let (ingestion, egress) = crate::adapters::plugins::create_native_adapter(&manifest, "")
+        .map_err(|reason| AdapterLoadError::NativeCreationFailed {
+            name: manifest.name.clone(),
+            reason,
         })?;
 
     Ok(LoadedAdapter {
@@ -518,7 +513,10 @@ mod tests {
 
         let result = load_single_adapter(&adapter_dir).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AdapterLoadError::MissingManifest(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            AdapterLoadError::MissingManifest(_)
+        ));
     }
 
     #[tokio::test]
@@ -530,7 +528,10 @@ mod tests {
 
         let result = load_single_adapter(&adapter_dir).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AdapterLoadError::TomlParse { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            AdapterLoadError::TomlParse { .. }
+        ));
     }
 
     #[tokio::test]

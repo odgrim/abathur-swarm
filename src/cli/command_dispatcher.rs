@@ -6,7 +6,7 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 
 use crate::adapters::sqlite::{
-    goal_repository::SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
+    SqliteMemoryRepository, SqliteTaskRepository, goal_repository::SqliteGoalRepository,
 };
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandError, CommandResult, CommandSource, DomainCommand,
@@ -33,7 +33,9 @@ impl CliCommandDispatcher {
         let goal_service = Arc::new(GoalService::new(goal_repo));
         let memory_service = Arc::new(MemoryService::new(memory_repo));
 
-        let outbox_repo = Arc::new(crate::adapters::sqlite::SqliteOutboxRepository::new(pool.clone()));
+        let outbox_repo = Arc::new(crate::adapters::sqlite::SqliteOutboxRepository::new(
+            pool.clone(),
+        ));
         let command_bus = Arc::new(
             CommandBus::new(task_service, goal_service, memory_service, event_bus)
                 .with_pool(pool)

@@ -11,29 +11,21 @@ use crate::domain::ports::{
 };
 use crate::services::builtin_handlers::{
     A2APollHandler, AdapterLifecycleSyncHandler, AgentTerminationHandler,
-    ConvergenceCancellationHandler,
-    ConvergenceCoordinationHandler,
-    ConvergenceEscalationFeedbackHandler,
-    ConvergenceEvolutionHandler, ConvergenceMemoryHandler, ConvergenceSLAPressureHandler,
-    DeadLetterRetryHandler, DirectModeExecutionMemoryHandler, EscalationTimeoutHandler, FastReconciliationHandler,
-    EgressRoutingHandler,
-    EventPruningHandler, EventStorePollerHandler,
-    GoalConvergenceCheckHandler, GoalStagnationDetectorHandler,
-    GoalCreatedHandler, GoalEvaluationHandler, GoalEvaluationTaskCreationHandler,
-    GoalReconciliationHandler, GoalRetiredHandler,
-    IngestionPollHandler,
-    MemoryConflictEscalationHandler, MemoryInformedDecompositionHandler,
-    MemoryMaintenanceHandler, MemoryReconciliationHandler,
-    ObstacleEscalationHandler,
-    PriorityAgingHandler, ReadyTaskPollingHandler, ReconciliationHandler,
-    ReviewFailureLoopHandler, RetryProcessingHandler, SpecialistCheckHandler,
-    StartupCatchUpHandler, StatsUpdateHandler, SystemStallDetectorHandler,
-    TaskCompletionLearningHandler,
-    TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
-    TaskOutcomeMemoryHandler,
-    TaskReadySpawnHandler, TaskScheduleHandler, TaskSLAEnforcementHandler,
-    TriggerCatchupHandler, WatermarkAuditHandler,
-    WorkflowSubtaskCompletionHandler, WorkflowVerificationHandler,
+    ConvergenceCancellationHandler, ConvergenceCoordinationHandler,
+    ConvergenceEscalationFeedbackHandler, ConvergenceEvolutionHandler, ConvergenceMemoryHandler,
+    ConvergenceSLAPressureHandler, DeadLetterRetryHandler, DirectModeExecutionMemoryHandler,
+    EgressRoutingHandler, EscalationTimeoutHandler, EventPruningHandler, EventStorePollerHandler,
+    FastReconciliationHandler, GoalConvergenceCheckHandler, GoalCreatedHandler,
+    GoalEvaluationHandler, GoalEvaluationTaskCreationHandler, GoalReconciliationHandler,
+    GoalRetiredHandler, GoalStagnationDetectorHandler, IngestionPollHandler,
+    MemoryConflictEscalationHandler, MemoryInformedDecompositionHandler, MemoryMaintenanceHandler,
+    MemoryReconciliationHandler, ObstacleEscalationHandler, PriorityAgingHandler,
+    ReadyTaskPollingHandler, ReconciliationHandler, RetryProcessingHandler,
+    ReviewFailureLoopHandler, SpecialistCheckHandler, StartupCatchUpHandler, StatsUpdateHandler,
+    SystemStallDetectorHandler, TaskCompletedReadinessHandler, TaskCompletionLearningHandler,
+    TaskFailedBlockHandler, TaskFailedRetryHandler, TaskOutcomeMemoryHandler,
+    TaskReadySpawnHandler, TaskSLAEnforcementHandler, TaskScheduleHandler, TriggerCatchupHandler,
+    WatermarkAuditHandler, WorkflowSubtaskCompletionHandler, WorkflowVerificationHandler,
     WorktreeReconciliationHandler,
 };
 use crate::services::command_bus::CommandBus;
@@ -65,9 +57,9 @@ where
 
         // Create a TaskService for SYSTEM handlers that need validated state transitions.
         // This ensures all mutations go through TaskService (validation + event emission).
-        let handler_task_service = Arc::new(TaskService::new(
-            self.task_repo.clone(),
-        ).with_event_bus(self.event_bus.clone()));
+        let handler_task_service = Arc::new(
+            TaskService::new(self.task_repo.clone()).with_event_bus(self.event_bus.clone()),
+        );
 
         // TaskCompletedReadinessHandler (SYSTEM) — cascade readiness on completion
         reactor
@@ -196,9 +188,7 @@ where
 
         // ReconciliationHandler (LOW) — slow-path expensive checks (stale tasks, timeouts)
         reactor
-            .register(Arc::new(ReconciliationHandler::new(
-                self.task_repo.clone(),
-            )))
+            .register(Arc::new(ReconciliationHandler::new(self.task_repo.clone())))
             .await;
 
         // WorktreeReconciliationHandler (LOW) — detect orphaned worktrees
@@ -230,7 +220,9 @@ where
         if let Some(ref memory_repo) = self.memory_repo {
             let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
             reactor
-                .register(Arc::new(MemoryMaintenanceHandler::new(memory_service.clone())))
+                .register(Arc::new(MemoryMaintenanceHandler::new(
+                    memory_service.clone(),
+                )))
                 .await;
 
             // MemoryReconciliationHandler (LOW) — periodic memory reconciliation
@@ -330,19 +322,21 @@ where
         let command_bus = {
             use crate::domain::ports::NullMemoryRepository;
 
-            let task_service = Arc::new(TaskService::new(
-                self.task_repo.clone(),
-            ).with_event_bus(self.event_bus.clone())
-             .with_default_execution_mode(self.config.default_execution_mode.clone()));
-            let goal_service = Arc::new(GoalService::new(
-                self.goal_repo.clone(),
-            ));
+            let task_service = Arc::new(
+                TaskService::new(self.task_repo.clone())
+                    .with_event_bus(self.event_bus.clone())
+                    .with_default_execution_mode(self.config.default_execution_mode.clone()),
+            );
+            let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
 
             let bus = if let Some(ref memory_repo) = self.memory_repo {
-                let memory_service = Arc::new(MemoryService::new(
-                    memory_repo.clone(),
-                ));
-                let mut bus = CommandBus::new(task_service, goal_service, memory_service, self.event_bus.clone());
+                let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
+                let mut bus = CommandBus::new(
+                    task_service,
+                    goal_service,
+                    memory_service,
+                    self.event_bus.clone(),
+                );
                 if let Some(ref pool) = self.pool {
                     bus = bus.with_pool(pool.clone());
                 }
@@ -351,10 +345,14 @@ where
                 }
                 Arc::new(bus)
             } else {
-                let null_memory = Arc::new(MemoryService::new(
-                    Arc::new(NullMemoryRepository::new()),
-                ));
-                let mut bus = CommandBus::new(task_service, goal_service, null_memory, self.event_bus.clone());
+                let null_memory =
+                    Arc::new(MemoryService::new(Arc::new(NullMemoryRepository::new())));
+                let mut bus = CommandBus::new(
+                    task_service,
+                    goal_service,
+                    null_memory,
+                    self.event_bus.clone(),
+                );
                 if let Some(ref pool) = self.pool {
                     bus = bus.with_pool(pool.clone());
                 }
@@ -426,7 +424,11 @@ where
                             if !merged.iter().any(|r| r.name == builtin.name) {
                                 // Persist built-in rule so FK constraints on absence timers work
                                 if let Err(e) = repo.create(&builtin).await {
-                                    tracing::debug!("Could not seed built-in rule '{}': {}", builtin.name, e);
+                                    tracing::debug!(
+                                        "Could not seed built-in rule '{}': {}",
+                                        builtin.name,
+                                        e
+                                    );
                                 }
                                 merged.push(builtin);
                             }
@@ -441,12 +443,19 @@ where
                         // Seed built-in rules into DB so FK constraints on absence timers work
                         for rule in &rules {
                             if let Err(e) = repo.create(rule).await {
-                                tracing::debug!("Could not seed built-in rule '{}': {}", rule.name, e);
+                                tracing::debug!(
+                                    "Could not seed built-in rule '{}': {}",
+                                    rule.name,
+                                    e
+                                );
                             }
                         }
                         let count = rules.len();
                         engine.load_rules(rules).await;
-                        tracing::info!("Loaded {} built-in trigger rules (no DB rules found)", count);
+                        tracing::info!(
+                            "Loaded {} built-in trigger rules (no DB rules found)",
+                            count
+                        );
                     }
                 }
             } else {
@@ -462,7 +471,10 @@ where
             // Register cron-conditioned triggers with EventScheduler
             let cron_count = engine.register_cron_triggers().await;
             if cron_count > 0 {
-                tracing::info!("Registered {} cron trigger(s) with EventScheduler", cron_count);
+                tracing::info!(
+                    "Registered {} cron trigger(s) with EventScheduler",
+                    cron_count
+                );
             }
 
             reactor.register(engine.clone()).await;
@@ -493,14 +505,14 @@ where
                 event_store.clone(),
                 self.event_bus.process_id(),
             ));
-            poller.initialize_watermark_with_replay(p.startup_max_replay_events).await;
+            poller
+                .initialize_watermark_with_replay(p.startup_max_replay_events)
+                .await;
             reactor.register(poller).await;
 
             // DeadLetterRetryHandler (LOW) — retry failed handler events
             reactor
-                .register(Arc::new(DeadLetterRetryHandler::new(
-                    event_store.clone(),
-                )))
+                .register(Arc::new(DeadLetterRetryHandler::new(event_store.clone())))
                 .await;
 
             // EventPruningHandler (LOW) — prune old events
@@ -575,18 +587,19 @@ where
 
         // ObstacleEscalationHandler (LOW) — detect repeated failure patterns and escalate to goals
         if p.obstacle_escalation_enabled
-            && let Some(ref memory_repo) = self.memory_repo {
-                reactor
-                    .register(Arc::new(ObstacleEscalationHandler::new(
-                        self.task_repo.clone(),
-                        memory_repo.clone(),
-                        self.goal_repo.clone(),
-                        command_bus.clone(),
-                        p.obstacle_escalation_threshold,
-                        p.obstacle_escalation_window_secs,
-                    )))
-                    .await;
-            }
+            && let Some(ref memory_repo) = self.memory_repo
+        {
+            reactor
+                .register(Arc::new(ObstacleEscalationHandler::new(
+                    self.task_repo.clone(),
+                    memory_repo.clone(),
+                    self.goal_repo.clone(),
+                    command_bus.clone(),
+                    p.obstacle_escalation_threshold,
+                    p.obstacle_escalation_window_secs,
+                )))
+                .await;
+        }
 
         // GoalEvaluationTaskCreationHandler (NORMAL) — create diagnostic/remediation tasks
         if p.auto_create_diagnostic_tasks || p.auto_create_remediation_tasks {
@@ -648,10 +661,16 @@ where
 
             // Register all active task schedules with the EventScheduler
             let schedule_service = TaskScheduleService::new(schedule_repo);
-            match schedule_service.register_active_schedules(&self.event_scheduler).await {
+            match schedule_service
+                .register_active_schedules(&self.event_scheduler)
+                .await
+            {
                 Ok(count) => {
                     if count > 0 {
-                        tracing::info!("Registered {} active task schedule(s) with EventScheduler", count);
+                        tracing::info!(
+                            "Registered {} active task schedule(s) with EventScheduler",
+                            count
+                        );
                     }
                 }
                 Err(e) => {
@@ -662,27 +681,35 @@ where
 
         // Budget handlers — only when budget tracker is configured
         if let Some(ref budget_tracker) = self.budget_tracker {
-            reactor.register(Arc::new(
-                crate::services::builtin_handlers::BudgetTokenAccumulatorHandler::new(
-                    budget_tracker.clone(),
-                )
-            )).await;
-            reactor.register(Arc::new(
-                crate::services::builtin_handlers::BudgetOpportunityHandler::new()
-            )).await;
+            reactor
+                .register(Arc::new(
+                    crate::services::builtin_handlers::BudgetTokenAccumulatorHandler::new(
+                        budget_tracker.clone(),
+                    ),
+                ))
+                .await;
+            reactor
+                .register(Arc::new(
+                    crate::services::builtin_handlers::BudgetOpportunityHandler::new(),
+                ))
+                .await;
         }
 
         // FederationResultHandler (NORMAL) — process federation events
         if let Some(ref federation_service) = self.federation_service {
             use crate::services::federation::FederationResultHandler;
             reactor
-                .register(Arc::new(FederationResultHandler::new(federation_service.clone())))
+                .register(Arc::new(FederationResultHandler::new(
+                    federation_service.clone(),
+                )))
                 .await;
         }
 
         // Federation heartbeat schedule — if federation is enabled, schedule periodic heartbeat checks
         if self.federation_service.is_some() {
-            let fed_config = self.federation_service.as_ref()
+            let fed_config = self
+                .federation_service
+                .as_ref()
                 .map(|s| s.config())
                 .filter(|c| c.enabled);
             if let Some(config) = fed_config {
@@ -944,16 +971,17 @@ where
 
         // Adapter ingestion poll — periodic external system ingestion
         if let Some(ref adapter_registry) = self.adapter_registry
-            && !adapter_registry.ingestion_names().is_empty() {
-                scheduler
-                    .register(interval_schedule(
-                        "adapter-ingestion-poll",
-                        Duration::from_secs(300),
-                        EventCategory::Scheduler,
-                        EventSeverity::Debug,
-                    ))
-                    .await;
-            }
+            && !adapter_registry.ingestion_names().is_empty()
+        {
+            scheduler
+                .register(interval_schedule(
+                    "adapter-ingestion-poll",
+                    Duration::from_secs(300),
+                    EventCategory::Scheduler,
+                    EventSeverity::Debug,
+                ))
+                .await;
+        }
 
         // Event store polling — cross-process event propagation
         if self.event_bus.store().is_some() {
@@ -1002,10 +1030,10 @@ where
     pub(super) async fn register_builtin_middleware(&self) {
         use super::middleware::{
             AutoshipMiddleware, BudgetConcurrencyMiddleware, BudgetDispatchMiddleware,
-            CircuitBreakerMiddleware, FederationPriorityMiddleware,
-            GuardrailsMiddleware, McpReadinessMiddleware, MemoryOnlyShortCircuitMiddleware,
-            MergeQueueMiddleware, PullRequestMiddleware, QuietWindowMiddleware,
-            RouteTaskMiddleware, SubtaskMergeBackMiddleware, VerificationMiddleware,
+            CircuitBreakerMiddleware, FederationPriorityMiddleware, GuardrailsMiddleware,
+            McpReadinessMiddleware, MemoryOnlyShortCircuitMiddleware, MergeQueueMiddleware,
+            PullRequestMiddleware, QuietWindowMiddleware, RouteTaskMiddleware,
+            SubtaskMergeBackMiddleware, VerificationMiddleware,
         };
 
         // -- Pre-spawn chain (order matches the previous inline sequence) --

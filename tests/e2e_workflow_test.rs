@@ -15,7 +15,7 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use abathur::adapters::sqlite::{initialize_database, SqliteTaskRepository};
+use abathur::adapters::sqlite::{SqliteTaskRepository, initialize_database};
 use abathur::domain::models::task::{Task, TaskStatus};
 use abathur::domain::models::workflow_state::{FanOutSlice, GateVerdict, WorkflowState};
 use abathur::domain::models::workflow_template::WorkflowTemplate;
@@ -194,7 +194,14 @@ async fn test_cli_submit_auto_enrolls_workflow() {
     // Submit a task via CLI
     let json = harness::run_json(
         dir,
-        &["task", "submit", "Implement feature X", "-t", "Feature X", "--json"],
+        &[
+            "task",
+            "submit",
+            "Implement feature X",
+            "-t",
+            "Feature X",
+            "--json",
+        ],
     );
     assert_eq!(json["success"], true);
     let task_id_str = harness::json_str(&json["task"], "id");
@@ -202,13 +209,20 @@ async fn test_cli_submit_auto_enrolls_workflow() {
     // Open the same database and inspect
     let (_service, _engine, repo) = harness::open_db(dir).await;
     let task_id: uuid::Uuid = task_id_str.parse().expect("invalid UUID");
-    let task = repo.get(task_id).await.expect("db error").expect("task not found");
+    let task = repo
+        .get(task_id)
+        .await
+        .expect("db error")
+        .expect("task not found");
 
     // Verify workflow auto-enrollment
     let ws = harness::read_workflow_state(&task);
     match ws {
         WorkflowState::Pending { ref workflow_name } => {
-            assert_eq!(workflow_name, "code", "Root human tasks default to 'code' workflow");
+            assert_eq!(
+                workflow_name, "code",
+                "Root human tasks default to 'code' workflow"
+            );
         }
         other => panic!("Expected Pending, got {:?}", other),
     }
@@ -242,7 +256,10 @@ async fn test_full_phase_progression_code_workflow() {
     let task_id: uuid::Uuid = task_id_str.parse().unwrap();
 
     // Claim parent (must be Running before advance)
-    service.claim_task(task_id, "overmind").await.expect("claim parent");
+    service
+        .claim_task(task_id, "overmind")
+        .await
+        .expect("claim parent");
 
     // Phase 0: research — advance → fan_out → complete → aggregation → PhaseReady
     harness::run_phase(&service, &engine, task_id).await;
@@ -252,7 +269,11 @@ async fn test_full_phase_progression_code_workflow() {
         let task = repo.get(task_id).await.unwrap().unwrap();
         let ws = harness::read_workflow_state(&task);
         match &ws {
-            WorkflowState::PhaseReady { phase_index, phase_name, .. } => {
+            WorkflowState::PhaseReady {
+                phase_index,
+                phase_name,
+                ..
+            } => {
                 assert_eq!(*phase_index, 1);
                 assert_eq!(phase_name, "plan");
             }
@@ -266,7 +287,11 @@ async fn test_full_phase_progression_code_workflow() {
         let task = repo.get(task_id).await.unwrap().unwrap();
         let ws = harness::read_workflow_state(&task);
         match &ws {
-            WorkflowState::PhaseReady { phase_index, phase_name, .. } => {
+            WorkflowState::PhaseReady {
+                phase_index,
+                phase_name,
+                ..
+            } => {
                 assert_eq!(*phase_index, 2);
                 assert_eq!(phase_name, "implement");
             }
@@ -276,7 +301,10 @@ async fn test_full_phase_progression_code_workflow() {
     // Implement phase: advance → fan_out → complete → aggregation → then verification kicks in
     let implement_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, implement_sub).await;
-    engine.handle_phase_complete(task_id, implement_sub).await.expect("handle implement fan_out");
+    engine
+        .handle_phase_complete(task_id, implement_sub)
+        .await
+        .expect("handle implement fan_out");
 
     // Complete the aggregation subtask for implement phase
     {
@@ -285,7 +313,10 @@ async fn test_full_phase_progression_code_workflow() {
         if let WorkflowState::Aggregating { subtask_ids, .. } = ws {
             let agg_id = *subtask_ids.last().unwrap();
             harness::complete_subtask(&service, agg_id).await;
-            engine.handle_phase_complete(task_id, agg_id).await.expect("handle implement aggregation");
+            engine
+                .handle_phase_complete(task_id, agg_id)
+                .await
+                .expect("handle implement aggregation");
         } else {
             panic!("Expected Aggregating after implement fan_out, got {:?}", ws);
         }
@@ -296,7 +327,12 @@ async fn test_full_phase_progression_code_workflow() {
         let task = repo.get(task_id).await.unwrap().unwrap();
         let ws = harness::read_workflow_state(&task);
         match &ws {
-            WorkflowState::Verifying { phase_index, phase_name, retry_count, .. } => {
+            WorkflowState::Verifying {
+                phase_index,
+                phase_name,
+                retry_count,
+                ..
+            } => {
                 assert_eq!(*phase_index, 2);
                 assert_eq!(phase_name, "implement");
                 assert_eq!(*retry_count, 0);
@@ -307,9 +343,15 @@ async fn test_full_phase_progression_code_workflow() {
 
     // Simulate verification passing by advancing from Verifying state
     // (The subtask is already complete, so advance should work)
-    let review_result = engine.advance(task_id).await.expect("advance past verification");
+    let review_result = engine
+        .advance(task_id)
+        .await
+        .expect("advance past verification");
     match review_result {
-        AdvanceResult::PhaseReady { phase_index, phase_name } => {
+        AdvanceResult::PhaseReady {
+            phase_index,
+            phase_name,
+        } => {
             assert_eq!(phase_index, 3);
             assert_eq!(phase_name, "review");
 
@@ -327,7 +369,10 @@ async fn test_full_phase_progression_code_workflow() {
                 .expect("fan_out failed");
             let subtask_id = fan_result.subtask_ids[0];
             harness::complete_subtask(&service, subtask_id).await;
-            engine.handle_phase_complete(task_id, subtask_id).await.expect("handle review fan_out");
+            engine
+                .handle_phase_complete(task_id, subtask_id)
+                .await
+                .expect("handle review fan_out");
 
             // Complete aggregation subtask for review phase
             let task = repo.get(task_id).await.unwrap().unwrap();
@@ -335,7 +380,10 @@ async fn test_full_phase_progression_code_workflow() {
             if let WorkflowState::Aggregating { subtask_ids, .. } = ws {
                 let agg_id = *subtask_ids.last().unwrap();
                 harness::complete_subtask(&service, agg_id).await;
-                engine.handle_phase_complete(task_id, agg_id).await.expect("handle review aggregation");
+                engine
+                    .handle_phase_complete(task_id, agg_id)
+                    .await
+                    .expect("handle review aggregation");
             }
         }
         AdvanceResult::Completed => panic!("Expected review phase, got Completed"),
@@ -346,7 +394,11 @@ async fn test_full_phase_progression_code_workflow() {
         let task = repo.get(task_id).await.unwrap().unwrap();
         let ws = harness::read_workflow_state(&task);
         match &ws {
-            WorkflowState::PhaseGate { phase_index, phase_name, .. } => {
+            WorkflowState::PhaseGate {
+                phase_index,
+                phase_name,
+                ..
+            } => {
                 assert_eq!(*phase_index, 3);
                 assert_eq!(phase_name, "review");
             }
@@ -389,7 +441,14 @@ async fn test_gate_verdict_reject() {
 
     let json = harness::run_json(
         dir,
-        &["task", "submit", "Rejected task", "-t", "Reject Me", "--json"],
+        &[
+            "task",
+            "submit",
+            "Rejected task",
+            "-t",
+            "Reject Me",
+            "--json",
+        ],
     );
     let task_id: uuid::Uuid = harness::json_str(&json["task"], "id").parse().unwrap();
 
@@ -410,7 +469,10 @@ async fn test_gate_verdict_reject() {
     // Phase 3: review — advance and fan_out to create subtask
     let review_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, review_sub).await;
-    engine.handle_phase_complete(task_id, review_sub).await.unwrap();
+    engine
+        .handle_phase_complete(task_id, review_sub)
+        .await
+        .unwrap();
 
     // Complete aggregation for review
     {
@@ -425,7 +487,11 @@ async fn test_gate_verdict_reject() {
 
     // Should be at PhaseGate(review)
     let ws = harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap());
-    assert!(matches!(ws, WorkflowState::PhaseGate { .. }), "Expected PhaseGate, got {:?}", ws);
+    assert!(
+        matches!(ws, WorkflowState::PhaseGate { .. }),
+        "Expected PhaseGate, got {:?}",
+        ws
+    );
 
     // Reject at the gate
     let result = engine
@@ -436,12 +502,23 @@ async fn test_gate_verdict_reject() {
 
     // Verify rejected state
     let task = repo.get(task_id).await.unwrap().unwrap();
-    assert_eq!(task.status, TaskStatus::Failed, "Parent task should be Failed after rejection");
+    assert_eq!(
+        task.status,
+        TaskStatus::Failed,
+        "Parent task should be Failed after rejection"
+    );
     let ws = harness::read_workflow_state(&task);
     match ws {
-        WorkflowState::Rejected { phase_index, reason, .. } => {
+        WorkflowState::Rejected {
+            phase_index,
+            reason,
+            ..
+        } => {
             assert_eq!(phase_index, 3);
-            assert!(reason.contains("quality"), "Reason should contain rejection text");
+            assert!(
+                reason.contains("quality"),
+                "Reason should contain rejection text"
+            );
         }
         other => panic!("Expected Rejected, got {:?}", other),
     }
@@ -475,7 +552,12 @@ async fn test_verification_triggers_on_implement() {
     let task = repo.get(task_id).await.unwrap().unwrap();
     let ws = harness::read_workflow_state(&task);
     match ws {
-        WorkflowState::Verifying { phase_index, phase_name, retry_count, .. } => {
+        WorkflowState::Verifying {
+            phase_index,
+            phase_name,
+            retry_count,
+            ..
+        } => {
             assert_eq!(phase_index, 2, "implement is phase index 2");
             assert_eq!(phase_name, "implement");
             assert_eq!(retry_count, 0, "First attempt, no retries yet");
@@ -503,7 +585,14 @@ async fn test_fan_out_and_aggregation() {
 
     let json = harness::run_json(
         dir,
-        &["task", "submit", "Fan-out task", "-t", "Parallel Work", "--json"],
+        &[
+            "task",
+            "submit",
+            "Fan-out task",
+            "-t",
+            "Parallel Work",
+            "--json",
+        ],
     );
     let task_id: uuid::Uuid = harness::json_str(&json["task"], "id").parse().unwrap();
 
@@ -511,14 +600,33 @@ async fn test_fan_out_and_aggregation() {
     service.claim_task(task_id, "overmind").await.unwrap();
 
     // Advance to PhaseReady first, then fan out research phase into 3 slices
-    engine.advance(task_id).await.expect("advance to PhaseReady");
+    engine
+        .advance(task_id)
+        .await
+        .expect("advance to PhaseReady");
     let slices = vec![
-        FanOutSlice { description: "Research area A".into(), agent: Some("test-agent".to_string()), context: Default::default() },
-        FanOutSlice { description: "Research area B".into(), agent: Some("test-agent".to_string()), context: Default::default() },
-        FanOutSlice { description: "Research area C".into(), agent: Some("test-agent".to_string()), context: Default::default() },
+        FanOutSlice {
+            description: "Research area A".into(),
+            agent: Some("test-agent".to_string()),
+            context: Default::default(),
+        },
+        FanOutSlice {
+            description: "Research area B".into(),
+            agent: Some("test-agent".to_string()),
+            context: Default::default(),
+        },
+        FanOutSlice {
+            description: "Research area C".into(),
+            agent: Some("test-agent".to_string()),
+            context: Default::default(),
+        },
     ];
     let fan_result = engine.fan_out(task_id, slices).await.expect("fan_out");
-    assert_eq!(fan_result.subtask_ids.len(), 3, "Should have 3 fan-out subtasks");
+    assert_eq!(
+        fan_result.subtask_ids.len(),
+        3,
+        "Should have 3 fan-out subtasks"
+    );
     assert_eq!(fan_result.phase_name, "research");
     assert_eq!(fan_result.phase_index, 0);
 
@@ -527,7 +635,11 @@ async fn test_fan_out_and_aggregation() {
         let task = repo.get(task_id).await.unwrap().unwrap();
         let ws = harness::read_workflow_state(&task);
         match &ws {
-            WorkflowState::FanningOut { slice_count, subtask_ids, .. } => {
+            WorkflowState::FanningOut {
+                slice_count,
+                subtask_ids,
+                ..
+            } => {
                 assert_eq!(*slice_count, 3);
                 assert_eq!(subtask_ids.len(), 3);
             }
@@ -559,10 +671,18 @@ async fn test_fan_out_and_aggregation() {
     let task = repo.get(task_id).await.unwrap().unwrap();
     let ws = harness::read_workflow_state(&task);
     match &ws {
-        WorkflowState::Aggregating { subtask_ids, phase_name, .. } => {
+        WorkflowState::Aggregating {
+            subtask_ids,
+            phase_name,
+            ..
+        } => {
             assert_eq!(phase_name, "research");
             // 3 original + 1 aggregation subtask
-            assert_eq!(subtask_ids.len(), 4, "Should have 3 fan-out + 1 aggregation subtask");
+            assert_eq!(
+                subtask_ids.len(),
+                4,
+                "Should have 3 fan-out + 1 aggregation subtask"
+            );
         }
         other => panic!("Expected Aggregating, got {:?}", other),
     }
@@ -580,7 +700,14 @@ async fn test_convergent_skip_verification() {
 
     let json = harness::run_json(
         dir,
-        &["task", "submit", "Converge test", "-t", "Converged", "--json"],
+        &[
+            "task",
+            "submit",
+            "Converge test",
+            "-t",
+            "Converged",
+            "--json",
+        ],
     );
     let task_id: uuid::Uuid = harness::json_str(&json["task"], "id").parse().unwrap();
 
@@ -605,7 +732,10 @@ async fn test_convergent_skip_verification() {
     }
 
     harness::complete_subtask(&service, impl_sub).await;
-    engine.handle_phase_complete(task_id, impl_sub).await.unwrap();
+    engine
+        .handle_phase_complete(task_id, impl_sub)
+        .await
+        .unwrap();
 
     // After fan_out subtask completes → Aggregating. Complete aggregation.
     {
@@ -658,14 +788,24 @@ async fn test_cancel_task_during_workflow() {
     // Submit and start workflow
     let json = harness::run_json(
         dir,
-        &["task", "submit", "Cancel during workflow", "-t", "Cancel Mid-flow", "--json"],
+        &[
+            "task",
+            "submit",
+            "Cancel during workflow",
+            "-t",
+            "Cancel Mid-flow",
+            "--json",
+        ],
     );
     let task_id_str = harness::json_str(&json["task"], "id");
 
     // Cancel via CLI
     let cancel_json = harness::run_json(dir, &["task", "cancel", &task_id_str, "--json"]);
     assert_eq!(cancel_json["success"], true);
-    assert_eq!(harness::json_str(&cancel_json["task"], "status"), "canceled");
+    assert_eq!(
+        harness::json_str(&cancel_json["task"], "status"),
+        "canceled"
+    );
 
     // Verify in database
     let (_service, _engine, repo) = harness::open_db(dir).await;
@@ -725,7 +865,11 @@ async fn test_gate_verdict_rework() {
     let task = repo.get(task_id).await.unwrap().unwrap();
     let ws = harness::read_workflow_state(&task);
     match &ws {
-        WorkflowState::PhaseGate { phase_index, phase_name, .. } => {
+        WorkflowState::PhaseGate {
+            phase_index,
+            phase_name,
+            ..
+        } => {
             // Rework sets state to PhaseGate at phase_index - 1
             assert_eq!(*phase_index, 2, "Should be set back to phase 2 (implement)");
             assert_eq!(phase_name, "implement");
@@ -734,9 +878,15 @@ async fn test_gate_verdict_rework() {
     }
 
     // Can advance again to re-run review
-    let re_review = engine.advance(task_id).await.expect("re-advance after rework");
+    let re_review = engine
+        .advance(task_id)
+        .await
+        .expect("re-advance after rework");
     match re_review {
-        AdvanceResult::PhaseReady { phase_index, phase_name } => {
+        AdvanceResult::PhaseReady {
+            phase_index,
+            phase_name,
+        } => {
             assert_eq!(phase_index, 3);
             assert_eq!(phase_name, "review");
         }

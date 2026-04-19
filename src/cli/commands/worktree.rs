@@ -5,11 +5,11 @@ use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{SqliteWorktreeRepository, initialize_default_database};
-use crate::cli::id_resolver::{resolve_task_id, resolve_worktree_id};
 use crate::cli::display::{
-    action_failure, action_success, colorize_status, list_table, output, render_list, short_id,
-    truncate_ellipsis, CommandOutput, DetailView, relative_time_str,
+    CommandOutput, DetailView, action_failure, action_success, colorize_status, list_table, output,
+    relative_time_str, render_list, short_id, truncate_ellipsis,
 };
+use crate::cli::id_resolver::{resolve_task_id, resolve_worktree_id};
 use crate::domain::models::WorktreeStatus;
 use crate::services::{WorktreeConfig, WorktreeService, WorktreeStats};
 
@@ -267,7 +267,9 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
         WorktreeCommands::Create { task_id, base_ref } => {
             let task_uuid = resolve_task_id(&pool, &task_id).await?;
 
-            let worktree = service.create_worktree(task_uuid, base_ref.as_deref()).await?;
+            let worktree = service
+                .create_worktree(task_uuid, base_ref.as_deref())
+                .await?;
 
             let out = WorktreeActionOutput {
                 success: true,
@@ -297,7 +299,9 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
 
         WorktreeCommands::Show { id } => {
             let uuid = resolve_worktree_id(&pool, &id).await?;
-            let worktree = service.get_worktree_for_task(uuid).await?
+            let worktree = service
+                .get_worktree_for_task(uuid)
+                .await?
                 .or(service.get_worktree(uuid).await?);
 
             match worktree {
@@ -393,4 +397,3 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
 
     Ok(())
 }
-

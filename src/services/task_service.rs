@@ -6,14 +6,16 @@ use uuid::Uuid;
 use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{Complexity, ExecutionMode, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::models::workflow_state::WorkflowState;
+use crate::domain::models::{
+    Complexity, ExecutionMode, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType,
+};
 use crate::domain::ports::{TaskFilter, TaskRepository};
-use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, TaskCommand, TaskCommandHandler};
-use crate::services::event_bus::{
-    EventCategory, EventPayload, EventSeverity, UnifiedEvent,
+use crate::services::command_bus::{
+    CommandError, CommandOutcome, CommandResult, TaskCommand, TaskCommandHandler,
 };
 use crate::services::event_bus::EventBus;
+use crate::services::event_bus::{EventCategory, EventPayload, EventSeverity, UnifiedEvent};
 use crate::services::event_factory;
 
 /// Configuration for spawn limits.
@@ -65,7 +67,13 @@ impl SpawnLimitResult {
     }
 
     pub fn requires_specialist(&self) -> bool {
-        matches!(self, Self::LimitExceeded { can_request_extension: true, .. })
+        matches!(
+            self,
+            Self::LimitExceeded {
+                can_request_extension: true,
+                ..
+            }
+        )
     }
 }
 
@@ -183,7 +191,7 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         // Tasks that are already a workflow phase subtask are never enrolled
-        if task.context.custom.contains_key("workflow_phase") {
+        if task.is_workflow_phase_subtask() {
             return None;
         }
 
@@ -203,12 +211,11 @@ impl<T: TaskRepository> TaskService<T> {
 
     /// Extract the goal_id from a task's context custom data.
     ///
-    /// The goal_id is stored as a JSON string in `task.context.custom["goal_id"]`.
-    /// Returns `None` if the key is missing or the value is not a valid UUID.
+    /// Thin wrapper over `Task::goal_id()`; the goal_id is stored as a JSON
+    /// string in `task.context.custom["goal_id"]`. Returns `None` if the key
+    /// is missing or the value is not a valid UUID.
     fn extract_goal_id(task: &Task) -> Option<Uuid> {
-        task.context.custom.get("goal_id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok())
+        task.goal_id()
     }
 
     /// Helper to build a UnifiedEvent with standard fields.
@@ -247,13 +254,19 @@ impl<T: TaskRepository> TaskService<T> {
     ///
     /// Returns `SpawnLimitResult` indicating whether the task can be created,
     /// and if not, whether a limit evaluation specialist should be triggered.
-    pub async fn check_spawn_limits(&self, parent_id: Option<Uuid>) -> DomainResult<SpawnLimitResult> {
+    pub async fn check_spawn_limits(
+        &self,
+        parent_id: Option<Uuid>,
+    ) -> DomainResult<SpawnLimitResult> {
         let Some(parent_id) = parent_id else {
             // No parent = root task, no spawn limits apply
             return Ok(SpawnLimitResult::Allowed);
         };
 
-        let parent = self.task_repo.get(parent_id).await?
+        let parent = self
+            .task_repo
+            .get(parent_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(parent_id))?;
 
         // Check subtask depth
@@ -426,9 +439,11 @@ impl<T: TaskRepository> TaskService<T> {
         // --- Context hints signals ---
         // Anti-patterns and constraints in hints suggest the task needs
         // guardrails that convergence provides.
-        let has_anti_patterns = task.context.hints.iter().any(|h| {
-            h.starts_with("anti-pattern:") || h.starts_with("constraint:")
-        });
+        let has_anti_patterns = task
+            .context
+            .hints
+            .iter()
+            .any(|h| h.starts_with("anti-pattern:") || h.starts_with("constraint:"));
         if has_anti_patterns {
             convergent_score += Self::ANTIPATTERN_HINT_WEIGHT;
         }
@@ -438,9 +453,10 @@ impl<T: TaskRepository> TaskService<T> {
         // other signals strongly push toward Direct.
         if let TaskSource::SubtaskOf(_) = &task.source
             && let Some(parent_exec_mode) = parent_mode
-                && parent_exec_mode.is_convergent() {
-                    convergent_score += Self::PARENT_CONVERGENT_WEIGHT;
-                }
+            && parent_exec_mode.is_convergent()
+        {
+            convergent_score += Self::PARENT_CONVERGENT_WEIGHT;
+        }
 
         // --- Priority signal ---
         // Low priority tasks are "fast-lane": favor Direct execution to
@@ -451,7 +467,9 @@ impl<T: TaskRepository> TaskService<T> {
 
         // --- Threshold decision ---
         if convergent_score >= Self::CONVERGENT_THRESHOLD {
-            ExecutionMode::Convergent { parallel_samples: None }
+            ExecutionMode::Convergent {
+                parallel_samples: None,
+            }
         } else {
             ExecutionMode::Direct
         }
@@ -502,10 +520,11 @@ impl<T: TaskRepository> TaskService<T> {
 
         // Check for duplicate by idempotency key
         if let Some(ref key) = idempotency_key
-            && let Some(existing) = self.task_repo.get_by_idempotency_key(key).await? {
-                tracing::debug!(task_id = %existing.id, "returning existing task (idempotency dedup)");
-                return Ok((existing, events));
-            }
+            && let Some(existing) = self.task_repo.get_by_idempotency_key(key).await?
+        {
+            tracing::debug!(task_id = %existing.id, "returning existing task (idempotency dedup)");
+            return Ok((existing, events));
+        }
 
         // Validate parent exists if specified, and reject subtask creation
         // under workflow-enrolled tasks that are actively tracking phase subtasks.
@@ -516,8 +535,7 @@ impl<T: TaskRepository> TaskService<T> {
             match parent {
                 None => return Err(DomainError::TaskNotFound(pid)),
                 Some(ref p) => {
-                    if let Some(wf_val) = p.context.custom.get("workflow_state")
-                        && let Ok(wf_state) = serde_json::from_value::<WorkflowState>(wf_val.clone())
+                    if let Some(wf_state) = p.workflow_state()
                         && wf_state.has_tracked_subtasks()
                     {
                         return Err(DomainError::ValidationFailed(format!(
@@ -543,8 +561,7 @@ impl<T: TaskRepository> TaskService<T> {
             Some(t) => Task::with_title(t, description),
             None => Task::new(description),
         };
-        task = task.with_priority(priority)
-            .with_source(source);
+        task = task.with_priority(priority).with_source(source);
 
         if let Some(pid) = parent_id {
             task = task.with_parent(pid);
@@ -607,9 +624,7 @@ impl<T: TaskRepository> TaskService<T> {
             let wf_state = WorkflowState::Pending {
                 workflow_name: wf_name.clone(),
             };
-            if let Ok(val) = serde_json::to_value(&wf_state) {
-                task.context.custom.insert("workflow_state".to_string(), val);
-            }
+            let _ = task.set_workflow_state(&wf_state);
         }
 
         task.validate().map_err(DomainError::ValidationFailed)?;
@@ -638,19 +653,20 @@ impl<T: TaskRepository> TaskService<T> {
         ));
 
         // Emit WorkflowEnrolled if auto-enrolled
-        if task.context.custom.contains_key("workflow_state")
-            && let Some(ref wf_name) = task.routing_hints.workflow_name {
-                events.push(Self::make_event(
-                    EventSeverity::Info,
-                    EventCategory::Workflow,
-                    goal_id,
-                    Some(task.id),
-                    EventPayload::WorkflowEnrolled {
-                        task_id: task.id,
-                        workflow_name: wf_name.clone(),
-                    },
-                ));
-            }
+        if task.has_workflow_state()
+            && let Some(ref wf_name) = task.routing_hints.workflow_name
+        {
+            events.push(Self::make_event(
+                EventSeverity::Info,
+                EventCategory::Workflow,
+                goal_id,
+                Some(task.id),
+                EventPayload::WorkflowEnrolled {
+                    task_id: task.id,
+                    workflow_name: wf_name.clone(),
+                },
+            ));
+        }
 
         // If the task is immediately ready (no deps), collect TaskReady event
         if task.status == TaskStatus::Ready {
@@ -686,9 +702,16 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Transition task to Running state (claim it).
-    pub async fn claim_task(&self, task_id: Uuid, agent_type: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+    pub async fn claim_task(
+        &self,
+        task_id: Uuid,
+        agent_type: &str,
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         tracing::info!(%task_id, agent_type, "claiming task");
-        let mut task = self.task_repo.get(task_id).await?
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         if task.status != TaskStatus::Ready {
@@ -701,10 +724,12 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         task.agent_type = Some(agent_type.to_string());
-        task.transition_to(TaskStatus::Running).map_err(|e| DomainError::InvalidStateTransition {
-            from: task.status.as_str().to_string(),
-            to: "running".to_string(),
-            reason: e,
+        task.transition_to(TaskStatus::Running).map_err(|e| {
+            DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "running".to_string(),
+                reason: e,
+            }
         })?;
 
         self.task_repo.update(&task).await?;
@@ -737,13 +762,18 @@ impl<T: TaskRepository> TaskService<T> {
     /// convergence.
     pub async fn complete_task(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         tracing::info!(%task_id, "completing task");
-        let mut task = self.task_repo.get(task_id).await?
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
-        task.transition_to(TaskStatus::Complete).map_err(|e| DomainError::InvalidStateTransition {
-            from: task.status.as_str().to_string(),
-            to: "complete".to_string(),
-            reason: e,
+        task.transition_to(TaskStatus::Complete).map_err(|e| {
+            DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "complete".to_string(),
+                reason: e,
+            }
         })?;
 
         self.task_repo.update(&task).await?;
@@ -794,15 +824,24 @@ impl<T: TaskRepository> TaskService<T> {
     ///
     /// Also emits a `TaskExecutionRecorded` event for opportunistic convergence
     /// memory recording, mirroring the event emitted on success (Part 10.3).
-    pub async fn fail_task(&self, task_id: Uuid, error_message: Option<String>) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+    pub async fn fail_task(
+        &self,
+        task_id: Uuid,
+        error_message: Option<String>,
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         tracing::warn!(%task_id, error = ?error_message, "failing task");
-        let mut task = self.task_repo.get(task_id).await?
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
-        task.transition_to(TaskStatus::Failed).map_err(|e| DomainError::InvalidStateTransition {
-            from: task.status.as_str().to_string(),
-            to: "failed".to_string(),
-            reason: e,
+        task.transition_to(TaskStatus::Failed).map_err(|e| {
+            DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "failed".to_string(),
+                reason: e,
+            }
         })?;
 
         let error_str = error_message.clone().unwrap_or_default();
@@ -861,8 +900,14 @@ impl<T: TaskRepository> TaskService<T> {
     ///
     /// If the task is already in `Ready` status, the transition is treated as
     /// idempotent and returns `Ok` with an empty events vec.
-    pub async fn transition_to_ready(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
-        let mut task = self.task_repo.get(task_id).await?
+    pub async fn transition_to_ready(
+        &self,
+        task_id: Uuid,
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         // Idempotent: already ready
@@ -870,11 +915,12 @@ impl<T: TaskRepository> TaskService<T> {
             return Ok((task, Vec::new()));
         }
 
-        task.transition_to(TaskStatus::Ready).map_err(|e| DomainError::InvalidStateTransition {
-            from: task.status.as_str().to_string(),
-            to: "ready".to_string(),
-            reason: e,
-        })?;
+        task.transition_to(TaskStatus::Ready)
+            .map_err(|e| DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "ready".to_string(),
+                reason: e,
+            })?;
 
         self.task_repo.update(&task).await?;
         tracing::debug!(%task_id, "task transitioned to ready");
@@ -902,8 +948,14 @@ impl<T: TaskRepository> TaskService<T> {
     ///
     /// If the task is already in `Blocked` or a terminal status, the transition
     /// is treated as idempotent and returns `Ok` with an empty events vec.
-    pub async fn transition_to_blocked(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
-        let mut task = self.task_repo.get(task_id).await?
+    pub async fn transition_to_blocked(
+        &self,
+        task_id: Uuid,
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         // Idempotent: already blocked or terminal
@@ -911,10 +963,12 @@ impl<T: TaskRepository> TaskService<T> {
             return Ok((task, Vec::new()));
         }
 
-        task.transition_to(TaskStatus::Blocked).map_err(|e| DomainError::InvalidStateTransition {
-            from: task.status.as_str().to_string(),
-            to: "blocked".to_string(),
-            reason: e,
+        task.transition_to(TaskStatus::Blocked).map_err(|e| {
+            DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "blocked".to_string(),
+                reason: e,
+            }
         })?;
 
         self.task_repo.update(&task).await?;
@@ -941,12 +995,15 @@ impl<T: TaskRepository> TaskService<T> {
     /// resetting the working state while carrying forward learned context.
     pub async fn retry_task(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         tracing::info!(%task_id, "retrying task");
-        let mut task = self.task_repo.get(task_id).await?
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         if !task.can_retry() {
             return Err(DomainError::ValidationFailed(
-                "Task cannot be retried: either not failed or max retries exceeded".to_string()
+                "Task cannot be retried: either not failed or max retries exceeded".to_string(),
             ));
         }
 
@@ -955,11 +1012,14 @@ impl<T: TaskRepository> TaskService<T> {
         // The trap detection looks for "Error: trapped" hints added by
         // fail_task() when the convergence loop reports a Trapped outcome.
         if task.execution_mode.is_convergent() && task.trajectory_id.is_some() {
-            let is_trapped = task.context.hints.iter().any(|h| {
-                h.to_lowercase().contains("trapped")
-            });
+            let is_trapped = task
+                .context
+                .hints
+                .iter()
+                .any(|h| h.to_lowercase().contains("trapped"));
             if is_trapped {
-                task.context.push_hint_bounded("convergence:fresh_start".to_string());
+                task.context
+                    .push_hint_bounded("convergence:fresh_start".to_string());
             }
         }
 
@@ -967,11 +1027,11 @@ impl<T: TaskRepository> TaskService<T> {
         // with fresh idempotency keys.  Without this, the idempotency guard
         // in WorkflowVerificationHandler will match the old verification
         // task and silently skip, leaving the task stuck in Verifying.
-        task.context.custom.remove("verification_retry_count");
-        task.context.custom.remove("verification_feedback");
-        task.context.custom.remove("verification_idempotency_key");
-        task.context.custom.remove("verification_phase_context");
-        task.context.custom.remove("verification_aggregation_summary");
+        task.clear_verification_retry_count();
+        task.clear_verification_feedback();
+        task.clear_verification_idempotency_key();
+        task.clear_verification_phase_context();
+        task.clear_verification_aggregation_summary();
 
         // Reset workflow_state to Pending so the workflow restarts from
         // phase 0.  The workflow_name is preserved via routing_hints.
@@ -979,9 +1039,7 @@ impl<T: TaskRepository> TaskService<T> {
             let wf_state = WorkflowState::Pending {
                 workflow_name: wf_name.clone(),
             };
-            if let Ok(val) = serde_json::to_value(&wf_state) {
-                task.context.custom.insert("workflow_state".to_string(), val);
-            }
+            let _ = task.set_workflow_state(&wf_state);
         }
 
         task.retry().map_err(DomainError::ValidationFailed)?;
@@ -1020,9 +1078,12 @@ impl<T: TaskRepository> TaskService<T> {
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
 
         for attempt in 0..3u32 {
-            let mut task = self.task_repo.get(task_id).await?
+            let mut task = self
+                .task_repo
+                .get(task_id)
+                .await?
                 .ok_or(DomainError::TaskNotFound(task_id))?;
-            task.context.custom.insert("workflow_state".to_string(), value.clone());
+            task.set_workflow_state_value(value.clone());
             task.updated_at = chrono::Utc::now();
             match self.task_repo.update(&task).await {
                 Ok(()) => return Ok(()),
@@ -1049,7 +1110,10 @@ impl<T: TaskRepository> TaskService<T> {
         updates: Vec<(String, serde_json::Value)>,
     ) -> DomainResult<()> {
         for attempt in 0..3u32 {
-            let mut task = self.task_repo.get(task_id).await?
+            let mut task = self
+                .task_repo
+                .get(task_id)
+                .await?
                 .ok_or(DomainError::TaskNotFound(task_id))?;
             for (key, val) in &updates {
                 task.context.custom.insert(key.clone(), val.clone());
@@ -1074,8 +1138,14 @@ impl<T: TaskRepository> TaskService<T> {
     ///
     /// Used by the WorkflowEngine when a phase enters verification.
     /// Idempotent: if already Validating, returns Ok with empty events.
-    pub async fn transition_to_validating(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
-        let mut task = self.task_repo.get(task_id).await?
+    pub async fn transition_to_validating(
+        &self,
+        task_id: Uuid,
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         if task.status == TaskStatus::Validating {
@@ -1089,29 +1159,34 @@ impl<T: TaskRepository> TaskService<T> {
         // Note: we allow Aggregating, PhaseRunning, FanningOut because the normal
         // workflow flow calls transition_to_validating() BEFORE updating WorkflowState
         // to Verifying (the workflow engine does: transition_to_validating → write_state(Verifying)).
-        if let Some(ws_value) = task.context.custom.get("workflow_state")
-            && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone())
-                && matches!(ws, WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }) {
-                    tracing::warn!(
-                        %task_id,
-                        workflow_state = ?ws,
-                        "Refusing to transition task to Validating — workflow state is {:?}, which would cause a deadlock",
-                        ws
-                    );
-                    return Err(DomainError::InvalidStateTransition {
-                        from: task.status.as_str().to_string(),
-                        to: "validating".to_string(),
-                        reason: format!(
-                            "task has workflow state {:?} which is not compatible with Validating — transitioning would cause a deadlock",
-                            ws
-                        ),
-                    });
-                }
+        if let Some(ws) = task.workflow_state()
+            && matches!(
+                ws,
+                WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }
+            )
+        {
+            tracing::warn!(
+                %task_id,
+                workflow_state = ?ws,
+                "Refusing to transition task to Validating — workflow state is {:?}, which would cause a deadlock",
+                ws
+            );
+            return Err(DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "validating".to_string(),
+                reason: format!(
+                    "task has workflow state {:?} which is not compatible with Validating — transitioning would cause a deadlock",
+                    ws
+                ),
+            });
+        }
 
-        task.transition_to(TaskStatus::Validating).map_err(|e| DomainError::InvalidStateTransition {
-            from: task.status.as_str().to_string(),
-            to: "validating".to_string(),
-            reason: e,
+        task.transition_to(TaskStatus::Validating).map_err(|e| {
+            DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "validating".to_string(),
+                reason: e,
+            }
         })?;
 
         self.task_repo.update(&task).await?;
@@ -1134,18 +1209,26 @@ impl<T: TaskRepository> TaskService<T> {
     /// Used by the WorkflowEngine when verification passes and the workflow
     /// needs the parent task back in Running state to continue.
     /// Idempotent: if already Running, returns Ok with empty events.
-    pub async fn transition_to_running(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
-        let mut task = self.task_repo.get(task_id).await?
+    pub async fn transition_to_running(
+        &self,
+        task_id: Uuid,
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         if task.status == TaskStatus::Running {
             return Ok((task, Vec::new()));
         }
 
-        task.transition_to(TaskStatus::Running).map_err(|e| DomainError::InvalidStateTransition {
-            from: task.status.as_str().to_string(),
-            to: "running".to_string(),
-            reason: e,
+        task.transition_to(TaskStatus::Running).map_err(|e| {
+            DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "running".to_string(),
+                reason: e,
+            }
         })?;
 
         self.task_repo.update(&task).await?;
@@ -1155,21 +1238,30 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Cancel a task.
-    pub async fn cancel_task(&self, task_id: Uuid, reason: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+    pub async fn cancel_task(
+        &self,
+        task_id: Uuid,
+        reason: &str,
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         tracing::info!(%task_id, reason, "cancelling task");
-        let mut task = self.task_repo.get(task_id).await?
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         if task.is_terminal() {
             return Err(DomainError::ValidationFailed(
-                "Cannot cancel a terminal task".to_string()
+                "Cannot cancel a terminal task".to_string(),
             ));
         }
 
-        task.transition_to(TaskStatus::Canceled).map_err(|e| DomainError::InvalidStateTransition {
-            from: task.status.as_str().to_string(),
-            to: "canceled".to_string(),
-            reason: e,
+        task.transition_to(TaskStatus::Canceled).map_err(|e| {
+            DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "canceled".to_string(),
+                reason: e,
+            }
         })?;
 
         self.task_repo.update(&task).await?;
@@ -1197,8 +1289,16 @@ impl<T: TaskRepository> TaskService<T> {
     /// deadlocked (e.g. stuck in Validating with no verifier running).
     /// Updates the workflow_state in context.custom to match the new status
     /// when applicable.
-    pub async fn force_transition(&self, task_id: Uuid, new_status: TaskStatus, reason: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
-        let mut task = self.task_repo.get(task_id).await?
+    pub async fn force_transition(
+        &self,
+        task_id: Uuid,
+        new_status: TaskStatus,
+        reason: &str,
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         let old_status = task.status;
@@ -1218,29 +1318,25 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         // Update workflow_state in context.custom if present
-        if let Some(ws_value) = task.context.custom.get("workflow_state")
-            && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone()) {
-                let workflow_name = ws.workflow_name().to_string();
-                let new_ws = match new_status {
-                    TaskStatus::Complete => Some(WorkflowState::Completed { workflow_name }),
-                    TaskStatus::Failed => Some(WorkflowState::Failed {
-                        workflow_name,
-                        error: reason.to_string(),
-                    }),
-                    TaskStatus::Canceled => Some(WorkflowState::Failed {
-                        workflow_name,
-                        error: "canceled".to_string(),
-                    }),
-                    // For Running (retry), leave workflow_state as-is
-                    _ => None,
-                };
-                if let Some(new_ws) = new_ws {
-                    task.context.custom.insert(
-                        "workflow_state".to_string(),
-                        serde_json::to_value(&new_ws).unwrap_or_default(),
-                    );
-                }
+        if let Some(ws) = task.workflow_state() {
+            let workflow_name = ws.workflow_name().to_string();
+            let new_ws = match new_status {
+                TaskStatus::Complete => Some(WorkflowState::Completed { workflow_name }),
+                TaskStatus::Failed => Some(WorkflowState::Failed {
+                    workflow_name,
+                    error: reason.to_string(),
+                }),
+                TaskStatus::Canceled => Some(WorkflowState::Failed {
+                    workflow_name,
+                    error: "canceled".to_string(),
+                }),
+                // For Running (retry), leave workflow_state as-is
+                _ => None,
+            };
+            if let Some(new_ws) = new_ws {
+                let _ = task.set_workflow_state(&new_ws);
             }
+        }
 
         self.task_repo.update(&task).await?;
 
@@ -1297,7 +1393,9 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Get task status counts.
-    pub async fn get_status_counts(&self) -> DomainResult<std::collections::HashMap<TaskStatus, u64>> {
+    pub async fn get_status_counts(
+        &self,
+    ) -> DomainResult<std::collections::HashMap<TaskStatus, u64>> {
         self.task_repo.count_by_status().await
     }
 
@@ -1396,7 +1494,9 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         let deps = self.task_repo.get_dependencies(task.id).await?;
-        Ok(deps.iter().any(|d| d.status == TaskStatus::Failed || d.status == TaskStatus::Canceled))
+        Ok(deps
+            .iter()
+            .any(|d| d.status == TaskStatus::Failed || d.status == TaskStatus::Canceled))
     }
 
     /// Check and update task readiness.
@@ -1415,18 +1515,18 @@ impl<T: TaskRepository> TaskService<T> {
                 });
             }
         } else if self.are_dependencies_complete(task).await?
-            && let Err(e) = task.transition_to(TaskStatus::Ready) {
-                tracing::warn!(task_id = %task.id, error = %e, "Failed to transition task to Ready");
-                return Err(DomainError::InvalidStateTransition {
-                    from: task.status.as_str().to_string(),
-                    to: "ready".to_string(),
-                    reason: e,
-                });
-            }
+            && let Err(e) = task.transition_to(TaskStatus::Ready)
+        {
+            tracing::warn!(task_id = %task.id, error = %e, "Failed to transition task to Ready");
+            return Err(DomainError::InvalidStateTransition {
+                from: task.status.as_str().to_string(),
+                to: "ready".to_string(),
+                reason: e,
+            });
+        }
 
         Ok(())
     }
-
 }
 
 #[async_trait]
@@ -1463,30 +1563,48 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                         execution_mode,
                     )
                     .await?;
-                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events,
+                })
             }
             TaskCommand::Claim {
                 task_id,
                 agent_type,
             } => {
                 let (task, events) = self.claim_task(task_id, &agent_type).await?;
-                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events,
+                })
             }
             TaskCommand::Complete { task_id, .. } => {
                 let (task, events) = self.complete_task(task_id).await?;
-                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events,
+                })
             }
             TaskCommand::Fail { task_id, error } => {
                 let (task, events) = self.fail_task(task_id, error).await?;
-                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events,
+                })
             }
             TaskCommand::Retry { task_id } => {
                 let (task, events) = self.retry_task(task_id).await?;
-                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events,
+                })
             }
             TaskCommand::Cancel { task_id, reason } => {
                 let (task, events) = self.cancel_task(task_id, &reason).await?;
-                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events,
+                })
             }
             TaskCommand::Assign {
                 task_id,
@@ -1504,12 +1622,16 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                         from: task.status.as_str().to_string(),
                         to: "ready (assign)".to_string(),
                         reason: "task must be in Ready state to assign an agent_type".to_string(),
-                    }.into());
+                    }
+                    .into());
                 }
                 task.agent_type = Some(agent_type);
                 task.updated_at = chrono::Utc::now();
                 self.task_repo.update(&task).await?;
-                Ok(CommandOutcome { result: CommandResult::Task(task), events: vec![] })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events: vec![],
+                })
             }
             TaskCommand::Transition {
                 task_id,
@@ -1527,24 +1649,27 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 // is used by goal_processing direct execution when
                 // verify_on_completion is set.
                 if new_status == TaskStatus::Validating
-                    && let Some(ws_value) = task.context.custom.get("workflow_state")
-                        && let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone())
-                            && matches!(ws, WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }) {
-                                tracing::warn!(
-                                    %task_id,
-                                    workflow_state = ?ws,
-                                    "Refusing Transition command to Validating — workflow state is {:?}, which would cause a deadlock",
-                                    ws
-                                );
-                                return Err(DomainError::InvalidStateTransition {
-                                    from: task.status.as_str().to_string(),
-                                    to: "validating".to_string(),
-                                    reason: format!(
-                                        "task has workflow state {:?} which is not compatible with Validating — transitioning would cause a deadlock",
-                                        ws
-                                    ),
-                                }.into());
-                            }
+                    && let Some(ws) = task.workflow_state()
+                    && matches!(
+                        ws,
+                        WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }
+                    )
+                {
+                    tracing::warn!(
+                        %task_id,
+                        workflow_state = ?ws,
+                        "Refusing Transition command to Validating — workflow state is {:?}, which would cause a deadlock",
+                        ws
+                    );
+                    return Err(DomainError::InvalidStateTransition {
+                            from: task.status.as_str().to_string(),
+                            to: "validating".to_string(),
+                            reason: format!(
+                                "task has workflow state {:?} which is not compatible with Validating — transitioning would cause a deadlock",
+                                ws
+                            ),
+                        }.into());
+                }
 
                 task.transition_to(new_status).map_err(|e| {
                     DomainError::InvalidStateTransition {
@@ -1588,7 +1713,10 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                     ));
                 }
 
-                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events,
+                })
             }
             TaskCommand::ForceTransition {
                 task_id,
@@ -1596,7 +1724,10 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 reason,
             } => {
                 let (task, events) = self.force_transition(task_id, new_status, &reason).await?;
-                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Task(task),
+                    events,
+                })
             }
         }
     }
@@ -1605,7 +1736,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_migrated_test_pool, SqliteTaskRepository};
+    use crate::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
 
     async fn setup_service() -> TaskService<SqliteTaskRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
@@ -1617,20 +1748,23 @@ mod tests {
     async fn test_submit_task() {
         let service = setup_service().await;
 
-        let (task, events) = service.submit_task(
-            Some("Test Task".to_string()),
-            "Description".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, events) = service
+            .submit_task(
+                Some("Test Task".to_string()),
+                "Description".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(task.title, "Test Task");
         assert_eq!(task.status, TaskStatus::Ready); // No deps, should be ready
@@ -1642,36 +1776,42 @@ mod tests {
         let service = setup_service().await;
 
         // Create a dependency task
-        let (dep, _) = service.submit_task(
-            Some("Dependency".to_string()),
-            "Must complete first".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (dep, _) = service
+            .submit_task(
+                Some("Dependency".to_string()),
+                "Must complete first".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Create main task that depends on it
-        let (main, _) = service.submit_task(
-            Some("Main Task".to_string()),
-            "Depends on first".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![dep.id],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (main, _) = service
+            .submit_task(
+                Some("Main Task".to_string()),
+                "Depends on first".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![dep.id],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Main should be pending (dependency not complete)
         assert_eq!(main.status, TaskStatus::Pending);
@@ -1692,35 +1832,41 @@ mod tests {
     async fn test_idempotency() {
         let service = setup_service().await;
 
-        let (task1, _) = service.submit_task(
-            Some("Task".to_string()),
-            "Description".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            Some("unique-key".to_string()),
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task1, _) = service
+            .submit_task(
+                Some("Task".to_string()),
+                "Description".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                Some("unique-key".to_string()),
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let (task2, _) = service.submit_task(
-            Some("Different Task".to_string()),
-            "Different Description".to_string(),
-            None,
-            TaskPriority::High,
-            None,
-            vec![],
-            None,
-            Some("unique-key".to_string()),
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task2, _) = service
+            .submit_task(
+                Some("Different Task".to_string()),
+                "Different Description".to_string(),
+                None,
+                TaskPriority::High,
+                None,
+                vec![],
+                None,
+                Some("unique-key".to_string()),
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Should return same task
         assert_eq!(task1.id, task2.id);
@@ -1731,20 +1877,23 @@ mod tests {
     async fn test_claim_and_complete() {
         let service = setup_service().await;
 
-        let (task, _) = service.submit_task(
-            Some("Test".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Test".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         let (claimed, _) = service.claim_task(task.id, "test-agent").await.unwrap();
         assert_eq!(claimed.status, TaskStatus::Running);
@@ -1759,23 +1908,29 @@ mod tests {
     async fn test_fail_and_retry() {
         let service = setup_service().await;
 
-        let (task, _) = service.submit_task(
-            Some("Test".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Test".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
-        let (failed, _) = service.fail_task(task.id, Some("Test error".to_string())).await.unwrap();
+        let (failed, _) = service
+            .fail_task(task.id, Some("Test error".to_string()))
+            .await
+            .unwrap();
         assert_eq!(failed.status, TaskStatus::Failed);
 
         let (retried, _) = service.retry_task(task.id).await.unwrap();
@@ -1790,10 +1945,11 @@ mod tests {
         let mut task = Task::new("Implement a complex feature with many moving parts");
         task.routing_hints.complexity = Complexity::Complex;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        assert!(
+            mode.is_convergent(),
+            "Complex tasks should classify as Convergent"
         );
-        assert!(mode.is_convergent(), "Complex tasks should classify as Convergent");
     }
 
     #[test]
@@ -1801,9 +1957,7 @@ mod tests {
         let mut task = Task::new("Rename a variable");
         task.routing_hints.complexity = Complexity::Trivial;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         assert!(mode.is_direct(), "Trivial tasks should classify as Direct");
     }
 
@@ -1812,9 +1966,7 @@ mod tests {
         let mut task = Task::new("Add a config field");
         task.routing_hints.complexity = Complexity::Simple;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         assert!(mode.is_direct(), "Simple tasks should classify as Direct");
     }
 
@@ -1823,47 +1975,58 @@ mod tests {
         let mut task = Task::new("Short description of a moderate task");
         task.routing_hints.complexity = Complexity::Moderate;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        assert!(
+            mode.is_direct(),
+            "Moderate tasks with short descriptions should be Direct"
         );
-        assert!(mode.is_direct(), "Moderate tasks with short descriptions should be Direct");
     }
 
     #[test]
     fn test_classify_moderate_long_description_as_convergent() {
         // Build a description with > 200 words and acceptance criteria keywords
-        let words: String = (0..210).map(|i| format!("word{}", i)).collect::<Vec<_>>().join(" ");
+        let words: String = (0..210)
+            .map(|i| format!("word{}", i))
+            .collect::<Vec<_>>()
+            .join(" ");
         let desc = format!("{} acceptance criteria: must pass all tests", words);
         let mut task = Task::new(desc);
         task.routing_hints.complexity = Complexity::Moderate;
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         // 2 (long moderate) + 2 (acceptance criteria) = 4 >= 3
-        assert!(mode.is_convergent(), "Moderate task with long desc + acceptance criteria should be Convergent");
+        assert!(
+            mode.is_convergent(),
+            "Moderate task with long desc + acceptance criteria should be Convergent"
+        );
     }
 
     #[test]
     fn test_classify_with_anti_pattern_hints() {
         let mut task = Task::new("Fix something with constraints");
         task.routing_hints.complexity = Complexity::Moderate;
-        task.context.hints.push("anti-pattern: do not use unwrap".to_string());
-        task.context.hints.push("constraint: must preserve backwards compat".to_string());
+        task.context
+            .hints
+            .push("anti-pattern: do not use unwrap".to_string());
+        task.context
+            .hints
+            .push("constraint: must preserve backwards compat".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         // 0 (moderate, short desc) + 2 (has anti-pattern/constraint) = 2 < 3
-        assert!(mode.is_direct(), "Moderate with hints but no other signals stays Direct");
+        assert!(
+            mode.is_direct(),
+            "Moderate with hints but no other signals stays Direct"
+        );
 
         // Now add acceptance criteria to push over threshold
         task.description = "Fix something. Verify that all tests pass.".to_string();
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         // 0 + 2 (hints) + 2 (acceptance keyword) = 4 >= 3
-        assert!(mode.is_convergent(), "Moderate + hints + acceptance keywords should be Convergent");
+        assert!(
+            mode.is_convergent(),
+            "Moderate + hints + acceptance keywords should be Convergent"
+        );
     }
 
     #[test]
@@ -1874,11 +2037,18 @@ mod tests {
         // Default complexity is Moderate, which alone gives 0 points
         // Parent inheritance adds +3
 
-        let parent_mode = ExecutionMode::Convergent { parallel_samples: None };
+        let parent_mode = ExecutionMode::Convergent {
+            parallel_samples: None,
+        };
         let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, Some(&parent_mode), &None,
+            &task,
+            Some(&parent_mode),
+            &None,
         );
-        assert!(mode.is_convergent(), "Subtasks of convergent parents should inherit Convergent");
+        assert!(
+            mode.is_convergent(),
+            "Subtasks of convergent parents should inherit Convergent"
+        );
     }
 
     #[test]
@@ -1888,9 +2058,7 @@ mod tests {
         task.priority = TaskPriority::Low;
         // acceptance keyword: +2, low priority: -2 = 0 < 3
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         assert!(mode.is_direct(), "Low priority should push toward Direct");
     }
 
@@ -1901,9 +2069,14 @@ mod tests {
 
         let default_mode = Some(ExecutionMode::Direct);
         let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &default_mode,
+            &task,
+            None,
+            &default_mode,
         );
-        assert!(mode.is_direct(), "Operator default_execution_mode should override heuristic");
+        assert!(
+            mode.is_direct(),
+            "Operator default_execution_mode should override heuristic"
+        );
     }
 
     #[test]
@@ -1911,11 +2084,18 @@ mod tests {
         let mut task = Task::new("Simple task");
         task.routing_hints.complexity = Complexity::Simple;
 
-        let default_mode = Some(ExecutionMode::Convergent { parallel_samples: None });
+        let default_mode = Some(ExecutionMode::Convergent {
+            parallel_samples: None,
+        });
         let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &default_mode,
+            &task,
+            None,
+            &default_mode,
         );
-        assert!(mode.is_convergent(), "Operator default Convergent should override even for simple tasks");
+        assert!(
+            mode.is_convergent(),
+            "Operator default Convergent should override even for simple tasks"
+        );
     }
 
     // --- Agent-role signal tests ---
@@ -1927,10 +2107,11 @@ mod tests {
         task.routing_hints.complexity = Complexity::Moderate;
         task.agent_type = Some("implementation-specialist".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        assert!(
+            mode.is_convergent(),
+            "Implementer agent + acceptance keyword should be Convergent"
         );
-        assert!(mode.is_convergent(), "Implementer agent + acceptance keyword should be Convergent");
     }
 
     #[test]
@@ -1940,10 +2121,11 @@ mod tests {
         task.routing_hints.complexity = Complexity::Moderate;
         task.agent_type = Some("researcher".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        assert!(
+            mode.is_direct(),
+            "Researcher agent on moderate task should be Direct"
         );
-        assert!(mode.is_direct(), "Researcher agent on moderate task should be Direct");
     }
 
     #[test]
@@ -1955,19 +2137,22 @@ mod tests {
         task.routing_hints.complexity = Complexity::Complex;
         task.agent_type = Some("researcher".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         // Score: −2 + 3 = 1 < 3 → Direct (complexity partially counters role)
-        assert!(mode.is_direct(), "Researcher on complex task: role tempers complexity but doesn't dominate");
+        assert!(
+            mode.is_direct(),
+            "Researcher on complex task: role tempers complexity but doesn't dominate"
+        );
 
         // With an additional acceptance keyword, it should flip to Convergent
-        task.description = "Research and analyze complex architecture. Verify that the design holds.".to_string();
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        task.description =
+            "Research and analyze complex architecture. Verify that the design holds.".to_string();
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         // Score: −2 + 3 + 2 = 3 >= 3 → Convergent
-        assert!(mode.is_convergent(), "Researcher on complex task with acceptance keywords should be Convergent");
+        assert!(
+            mode.is_convergent(),
+            "Researcher on complex task with acceptance keywords should be Convergent"
+        );
     }
 
     #[test]
@@ -1979,10 +2164,11 @@ mod tests {
         task.routing_hints.complexity = Complexity::Trivial;
         task.agent_type = Some("implementer".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
+        assert!(
+            mode.is_direct(),
+            "Implementer on trivial task should stay Direct"
         );
-        assert!(mode.is_direct(), "Implementer on trivial task should stay Direct");
     }
 
     #[test]
@@ -1992,19 +2178,21 @@ mod tests {
         task.routing_hints.complexity = Complexity::Moderate;
         task.agent_type = Some("senior-developer".to_string());
 
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         // Score: +2 (agent) + 0 (moderate, short) = 2 < 3 → Direct
-        assert!(mode.is_direct(), "Developer agent alone on moderate task should be Direct");
+        assert!(
+            mode.is_direct(),
+            "Developer agent alone on moderate task should be Direct"
+        );
 
         // Add acceptance criteria to push over
         task.description = "Build the feature. Must pass integration tests.".to_string();
-        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
-            &task, None, &None,
-        );
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(&task, None, &None);
         // Score: +2 (agent) + 2 (acceptance) = 4 >= 3 → Convergent
-        assert!(mode.is_convergent(), "Developer agent + acceptance criteria should be Convergent");
+        assert!(
+            mode.is_convergent(),
+            "Developer agent + acceptance criteria should be Convergent"
+        );
     }
 
     // --- Trajectory-aware retry tests ---
@@ -2013,62 +2201,82 @@ mod tests {
     async fn test_retry_convergent_preserves_trajectory_id() {
         let service = setup_service().await;
 
-        let (task, _) = service.submit_task(
-            Some("Convergent Task".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Convergent Task".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Manually set convergent mode and trajectory_id (normally done by orchestrator)
         let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
-        task_updated.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
+        task_updated.execution_mode = ExecutionMode::Convergent {
+            parallel_samples: None,
+        };
         task_updated.trajectory_id = Some(Uuid::new_v4());
         // Transition to Ready -> Running -> Failed so we can retry
         task_updated.status = TaskStatus::Ready;
         service.task_repo.update(&task_updated).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
-        service.fail_task(task.id, Some("convergence exhausted".to_string())).await.unwrap();
+        service
+            .fail_task(task.id, Some("convergence exhausted".to_string()))
+            .await
+            .unwrap();
 
-        let trajectory_before = service.get_task(task.id).await.unwrap().unwrap().trajectory_id;
+        let trajectory_before = service
+            .get_task(task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .trajectory_id;
         let (retried, _) = service.retry_task(task.id).await.unwrap();
 
         assert_eq!(retried.status, TaskStatus::Ready);
-        assert_eq!(retried.trajectory_id, trajectory_before,
-            "trajectory_id must be preserved on retry for convergent tasks");
+        assert_eq!(
+            retried.trajectory_id, trajectory_before,
+            "trajectory_id must be preserved on retry for convergent tasks"
+        );
     }
 
     #[tokio::test]
     async fn test_retry_trapped_convergent_adds_fresh_start_hint() {
         let service = setup_service().await;
 
-        let (task, _) = service.submit_task(
-            Some("Trapped Task".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Trapped Task".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Set up as convergent with trajectory
         let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
-        task_updated.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
+        task_updated.execution_mode = ExecutionMode::Convergent {
+            parallel_samples: None,
+        };
         task_updated.trajectory_id = Some(Uuid::new_v4());
         task_updated.status = TaskStatus::Ready;
         service.task_repo.update(&task_updated).await.unwrap();
@@ -2076,11 +2284,18 @@ mod tests {
         service.claim_task(task.id, "test-agent").await.unwrap();
         // Fail with "trapped" in the error message — this is what the convergence
         // loop does when LoopControl::Trapped fires.
-        service.fail_task(task.id, Some("trapped in FixedPoint attractor".to_string())).await.unwrap();
+        service
+            .fail_task(task.id, Some("trapped in FixedPoint attractor".to_string()))
+            .await
+            .unwrap();
 
         let (retried, _) = service.retry_task(task.id).await.unwrap();
         assert!(
-            retried.context.hints.iter().any(|h| h == "convergence:fresh_start"),
+            retried
+                .context
+                .hints
+                .iter()
+                .any(|h| h == "convergence:fresh_start"),
             "Retrying a trapped convergent task should add convergence:fresh_start hint"
         );
     }
@@ -2089,59 +2304,87 @@ mod tests {
     async fn test_retry_clears_verification_state() {
         let service = setup_service().await;
 
-        let (task, _) = service.submit_task(
-            Some("Workflow Task".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Workflow Task".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Simulate a task that went through workflow verification
         let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
         task_updated.status = TaskStatus::Ready;
         task_updated.routing_hints.workflow_name = Some("code".to_string());
-        task_updated.context.custom.insert(
-            "workflow_state".to_string(),
+        task_updated.set_workflow_state_value(
             serde_json::json!({"state": "verifying", "workflow_name": "code", "phase_index": 2, "phase_name": "implement", "subtask_ids": [], "retry_count": 2}),
         );
-        task_updated.context.custom.insert("verification_retry_count".to_string(), serde_json::json!(2));
-        task_updated.context.custom.insert("verification_feedback".to_string(), serde_json::json!(["partial"]));
-        task_updated.context.custom.insert("verification_idempotency_key".to_string(), serde_json::json!("wf-verify:old-key"));
-        task_updated.context.custom.insert("verification_phase_context".to_string(), serde_json::json!("phase 3"));
-        task_updated.context.custom.insert("verification_aggregation_summary".to_string(), serde_json::json!("summary"));
+        task_updated.set_verification_retry_count(2);
+        task_updated.set_verification_feedback(serde_json::json!(["partial"]));
+        task_updated.set_verification_idempotency_key("wf-verify:old-key");
+        task_updated.set_verification_phase_context("phase 3");
+        task_updated.set_verification_aggregation_summary(serde_json::json!("summary"));
         service.task_repo.update(&task_updated).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
-        service.fail_task(task.id, Some("stale-timeout".to_string())).await.unwrap();
+        service
+            .fail_task(task.id, Some("stale-timeout".to_string()))
+            .await
+            .unwrap();
 
         let (retried, _) = service.retry_task(task.id).await.unwrap();
 
         assert_eq!(retried.status, TaskStatus::Ready);
-        assert!(!retried.context.custom.contains_key("verification_retry_count"),
-            "verification_retry_count must be cleared on retry");
-        assert!(!retried.context.custom.contains_key("verification_feedback"),
-            "verification_feedback must be cleared on retry");
-        assert!(!retried.context.custom.contains_key("verification_idempotency_key"),
-            "verification_idempotency_key must be cleared on retry");
-        assert!(!retried.context.custom.contains_key("verification_phase_context"),
-            "verification_phase_context must be cleared on retry");
-        assert!(!retried.context.custom.contains_key("verification_aggregation_summary"),
-            "verification_aggregation_summary must be cleared on retry");
+        assert!(
+            retried.verification_retry_count().is_none(),
+            "verification_retry_count must be cleared on retry"
+        );
+        assert!(
+            !retried
+                .context
+                .custom
+                .contains_key(crate::domain::models::task::KEY_VERIFICATION_FEEDBACK),
+            "verification_feedback must be cleared on retry"
+        );
+        assert!(
+            retried.verification_idempotency_key().is_none(),
+            "verification_idempotency_key must be cleared on retry"
+        );
+        assert!(
+            !retried
+                .context
+                .custom
+                .contains_key(crate::domain::models::task::KEY_VERIFICATION_PHASE_CONTEXT),
+            "verification_phase_context must be cleared on retry"
+        );
+        assert!(
+            !retried
+                .context
+                .custom
+                .contains_key(crate::domain::models::task::KEY_VERIFICATION_AGGREGATION_SUMMARY),
+            "verification_aggregation_summary must be cleared on retry"
+        );
 
         // workflow_state should be reset to Pending
-        let ws = retried.context.custom.get("workflow_state").unwrap();
-        let ws: WorkflowState = serde_json::from_value(ws.clone()).unwrap();
+        let ws = retried
+            .workflow_state()
+            .expect("workflow_state must be reset to Pending");
         match ws {
             WorkflowState::Pending { workflow_name } => {
-                assert_eq!(workflow_name, "code", "workflow_state must reset to Pending with original workflow name");
+                assert_eq!(
+                    workflow_name, "code",
+                    "workflow_state must reset to Pending with original workflow name"
+                );
             }
             other => panic!("Expected Pending workflow_state, got {:?}", other),
         }
@@ -2153,60 +2396,90 @@ mod tests {
     async fn test_complete_task_emits_execution_recorded_event() {
         let service = setup_service().await;
 
-        let (task, _) = service.submit_task(
-            Some("Test".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Test".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
         let (_, events) = service.complete_task(task.id).await.unwrap();
 
         // Should have TaskCompleted + TaskExecutionRecorded
-        assert!(events.len() >= 2, "complete_task should emit at least 2 events");
+        assert!(
+            events.len() >= 2,
+            "complete_task should emit at least 2 events"
+        );
         let recorded = events.iter().find(|e| {
-            matches!(&e.payload, EventPayload::TaskExecutionRecorded { succeeded: true, .. })
+            matches!(
+                &e.payload,
+                EventPayload::TaskExecutionRecorded {
+                    succeeded: true,
+                    ..
+                }
+            )
         });
-        assert!(recorded.is_some(), "Should emit TaskExecutionRecorded with succeeded=true");
+        assert!(
+            recorded.is_some(),
+            "Should emit TaskExecutionRecorded with succeeded=true"
+        );
     }
 
     #[tokio::test]
     async fn test_fail_task_emits_execution_recorded_event() {
         let service = setup_service().await;
 
-        let (task, _) = service.submit_task(
-            Some("Test".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Test".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
-        let (_, events) = service.fail_task(task.id, Some("boom".to_string())).await.unwrap();
+        let (_, events) = service
+            .fail_task(task.id, Some("boom".to_string()))
+            .await
+            .unwrap();
 
         // Should have TaskFailed + TaskExecutionRecorded
         assert!(events.len() >= 2, "fail_task should emit at least 2 events");
         let recorded = events.iter().find(|e| {
-            matches!(&e.payload, EventPayload::TaskExecutionRecorded { succeeded: false, .. })
+            matches!(
+                &e.payload,
+                EventPayload::TaskExecutionRecorded {
+                    succeeded: false,
+                    ..
+                }
+            )
         });
-        assert!(recorded.is_some(), "Should emit TaskExecutionRecorded with succeeded=false");
+        assert!(
+            recorded.is_some(),
+            "Should emit TaskExecutionRecorded with succeeded=false"
+        );
     }
 
     // --- with_default_execution_mode builder test ---
@@ -2215,29 +2488,34 @@ mod tests {
     async fn test_submit_task_respects_default_execution_mode() {
         let pool = create_migrated_test_pool().await.unwrap();
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
-        let service = TaskService::new(task_repo)
-            .with_default_execution_mode(Some(ExecutionMode::Direct));
+        let service =
+            TaskService::new(task_repo).with_default_execution_mode(Some(ExecutionMode::Direct));
 
         // Submit a complex task — normally would be classified as Convergent
         let mut ctx = TaskContext::default();
         ctx.hints.push("anti-pattern: avoid unsafe".to_string());
-        let (task, _) = service.submit_task(
-            Some("Complex Task".to_string()),
-            "This is a complex task that should verify that all tests pass".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            Some(ctx),
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Complex Task".to_string()),
+                "This is a complex task that should verify that all tests pass".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                Some(ctx),
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
-        assert!(task.execution_mode.is_direct(),
-            "When default_execution_mode is Direct, heuristic should be skipped");
+        assert!(
+            task.execution_mode.is_direct(),
+            "When default_execution_mode is Direct, heuristic should be skipped"
+        );
     }
 
     #[tokio::test]
@@ -2245,12 +2523,23 @@ mod tests {
         let service = setup_service().await;
 
         // Create and complete a task
-        let (task, _) = service.submit_task(
-            Some("Old Task".to_string()),
-            "To be pruned".to_string(),
-            None, TaskPriority::Normal, None, vec![], None, None,
-            TaskSource::Human, None, None, None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Old Task".to_string()),
+                "To be pruned".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         service.claim_task(task.id, "agent").await.unwrap();
         service.complete_task(task.id).await.unwrap();
 
@@ -2271,12 +2560,23 @@ mod tests {
     async fn test_prune_dry_run_does_not_delete() {
         let service = setup_service().await;
 
-        let (task, _) = service.submit_task(
-            Some("Dry Run Task".to_string()),
-            "Should survive".to_string(),
-            None, TaskPriority::Normal, None, vec![], None, None,
-            TaskSource::Human, None, None, None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Dry Run Task".to_string()),
+                "Should survive".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         service.claim_task(task.id, "agent").await.unwrap();
         service.complete_task(task.id).await.unwrap();
 
@@ -2298,21 +2598,43 @@ mod tests {
         let service = setup_service().await;
 
         // Create a completed dep and a running dependent
-        let (dep, _) = service.submit_task(
-            Some("Completed Dep".to_string()),
-            "Dep".to_string(),
-            None, TaskPriority::Normal, None, vec![], None, None,
-            TaskSource::Human, None, None, None,
-        ).await.unwrap();
+        let (dep, _) = service
+            .submit_task(
+                Some("Completed Dep".to_string()),
+                "Dep".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         service.claim_task(dep.id, "agent").await.unwrap();
         service.complete_task(dep.id).await.unwrap();
 
-        let (main, _) = service.submit_task(
-            Some("Running Main".to_string()),
-            "Main".to_string(),
-            None, TaskPriority::Normal, None, vec![dep.id], None, None,
-            TaskSource::Human, None, None, None,
-        ).await.unwrap();
+        let (main, _) = service
+            .submit_task(
+                Some("Running Main".to_string()),
+                "Main".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![dep.id],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         // Transition main to running via the reconciliation path:
         // main is Pending because dep was already complete when we submitted.
         // Re-fetch and manually set to Ready then claim.
@@ -2338,21 +2660,43 @@ mod tests {
         let service = setup_service().await;
 
         // Same setup as above
-        let (dep, _) = service.submit_task(
-            Some("Completed Dep".to_string()),
-            "Dep".to_string(),
-            None, TaskPriority::Normal, None, vec![], None, None,
-            TaskSource::Human, None, None, None,
-        ).await.unwrap();
+        let (dep, _) = service
+            .submit_task(
+                Some("Completed Dep".to_string()),
+                "Dep".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         service.claim_task(dep.id, "agent").await.unwrap();
         service.complete_task(dep.id).await.unwrap();
 
-        let (main, _) = service.submit_task(
-            Some("Running Main".to_string()),
-            "Main".to_string(),
-            None, TaskPriority::Normal, None, vec![dep.id], None, None,
-            TaskSource::Human, None, None, None,
-        ).await.unwrap();
+        let (main, _) = service
+            .submit_task(
+                Some("Running Main".to_string()),
+                "Main".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![dep.id],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         let mut main_task = service.get_task(main.id).await.unwrap().unwrap();
         main_task.status = TaskStatus::Ready;
         service.task_repo.update(&main_task).await.unwrap();
@@ -2374,25 +2718,32 @@ mod tests {
 
         // Submit a complex task — heuristic should classify as Convergent
         let mut ctx = TaskContext::default();
-        ctx.hints.push("constraint: must preserve API compatibility".to_string());
-        let (task, _) = service.submit_task(
-            Some("Complex Feature".to_string()),
-            "Implement the full OAuth2 flow. Ensure that all integration tests pass.".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            Some(ctx),
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        ctx.hints
+            .push("constraint: must preserve API compatibility".to_string());
+        let (task, _) = service
+            .submit_task(
+                Some("Complex Feature".to_string()),
+                "Implement the full OAuth2 flow. Ensure that all integration tests pass."
+                    .to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                Some(ctx),
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Default complexity is Moderate. "ensure that" keyword = +2, constraint hint = +2 => 4 >= 3
-        assert!(task.execution_mode.is_convergent(),
-            "Task with acceptance criteria + constraints should be inferred as Convergent");
+        assert!(
+            task.execution_mode.is_convergent(),
+            "Task with acceptance criteria + constraints should be inferred as Convergent"
+        );
     }
 
     #[tokio::test]
@@ -2400,20 +2751,23 @@ mod tests {
         let service = setup_service().await;
 
         // Create a parent task (will auto-enroll as Pending workflow)
-        let (mut parent, _) = service.submit_task(
-            Some("Workflow Parent".to_string()),
-            "A workflow-enrolled task".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (mut parent, _) = service
+            .submit_task(
+                Some("Workflow Parent".to_string()),
+                "A workflow-enrolled task".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Simulate the workflow engine advancing to PhaseRunning
         // (submit_task auto-enrolls as Pending; we need an active phase)
@@ -2423,32 +2777,37 @@ mod tests {
             phase_name: "research".to_string(),
             subtask_ids: vec![uuid::Uuid::new_v4()],
         };
-        parent.context.custom.insert(
-            "workflow_state".to_string(),
-            serde_json::to_value(&wf_state).unwrap(),
-        );
+        parent.set_workflow_state(&wf_state).unwrap();
         service.task_repo.update(&parent).await.unwrap();
 
         // Attempting to create a subtask under the workflow parent should fail
-        let result = service.submit_task(
-            Some("Rogue Subtask".to_string()),
-            "Should be rejected".to_string(),
-            Some(parent.id),
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await;
+        let result = service
+            .submit_task(
+                Some("Rogue Subtask".to_string()),
+                "Should be rejected".to_string(),
+                Some(parent.id),
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await;
 
-        assert!(result.is_err(), "Should reject subtask under workflow-enrolled parent");
+        assert!(
+            result.is_err(),
+            "Should reject subtask under workflow-enrolled parent"
+        );
         match result.unwrap_err() {
             DomainError::ValidationFailed(msg) => {
-                assert!(msg.contains("workflow-enrolled"), "Error should mention workflow: {msg}");
+                assert!(
+                    msg.contains("workflow-enrolled"),
+                    "Error should mention workflow: {msg}"
+                );
             }
             other => panic!("Expected ValidationFailed, got: {other:?}"),
         }
@@ -2460,36 +2819,42 @@ mod tests {
 
         // Create a normal parent that won't be auto-enrolled in a workflow.
         // Use TaskType::Verification to bypass the infer_workflow_name logic.
-        let (parent, _) = service.submit_task(
-            Some("Normal Parent".to_string()),
-            "Not enrolled in any workflow".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            Some(TaskType::Verification),
-            None,
-        ).await.unwrap();
+        let (parent, _) = service
+            .submit_task(
+                Some("Normal Parent".to_string()),
+                "Not enrolled in any workflow".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                Some(TaskType::Verification),
+                None,
+            )
+            .await
+            .unwrap();
 
         // Creating a subtask under a non-workflow parent should succeed
-        let (child, _) = service.submit_task(
-            Some("Normal Subtask".to_string()),
-            "Should succeed".to_string(),
-            Some(parent.id),
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (child, _) = service
+            .submit_task(
+                Some("Normal Subtask".to_string()),
+                "Should succeed".to_string(),
+                Some(parent.id),
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(child.parent_id, Some(parent.id));
     }
@@ -2502,58 +2867,70 @@ mod tests {
         let service = setup_service().await;
 
         // Create task A (no deps)
-        let (a, _) = service.submit_task(
-            Some("A".to_string()),
-            "Task A".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (a, _) = service
+            .submit_task(
+                Some("A".to_string()),
+                "Task A".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Create task B depending on A (valid)
-        let (b, _) = service.submit_task(
-            Some("B".to_string()),
-            "Task B depends on A".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![a.id],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (b, _) = service
+            .submit_task(
+                Some("B".to_string()),
+                "Task B depends on A".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![a.id],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Now try to submit task C with depends_on = [b.id], then use the repo to add
         // a dependency from A to C, completing the cycle A->C->B->A.
-        let (c, _) = service.submit_task(
-            Some("C".to_string()),
-            "Task C depends on B".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![b.id],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (c, _) = service
+            .submit_task(
+                Some("C".to_string()),
+                "Task C depends on B".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![b.id],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Adding A depends on C would create cycle: A->C->B->A
         // Use the repo directly since TaskService doesn't expose add_dependency
         let result = service.task_repo.add_dependency(a.id, c.id).await;
-        assert!(result.is_err(), "Adding A->C dependency should fail since C->B->A creates a cycle");
+        assert!(
+            result.is_err(),
+            "Adding A->C dependency should fail since C->B->A creates a cycle"
+        );
         assert!(
             matches!(result.unwrap_err(), DomainError::DependencyCycle(_)),
             "Expected DependencyCycle error for transitive cycle via submit_task"
@@ -2567,20 +2944,23 @@ mod tests {
         let service = setup_service().await;
 
         // Create and claim a task so it's Running
-        let (task, _) = service.submit_task(
-            Some("Test".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Test".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         service.claim_task(task.id, "test-agent").await.unwrap();
 
         // Set workflow state to PhaseReady (not Verifying)
@@ -2590,10 +2970,7 @@ mod tests {
             phase_name: "implement".to_string(),
         };
         let mut running_task = service.get_task(task.id).await.unwrap().unwrap();
-        running_task.context.custom.insert(
-            "workflow_state".to_string(),
-            serde_json::to_value(&ws).unwrap(),
-        );
+        running_task.set_workflow_state(&ws).unwrap();
         service.task_repo.update(&running_task).await.unwrap();
 
         // transition_to_validating should fail
@@ -2615,20 +2992,23 @@ mod tests {
         let service = setup_service().await;
 
         // Create and claim a task so it's Running
-        let (task, _) = service.submit_task(
-            Some("Test".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Test".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         service.claim_task(task.id, "test-agent").await.unwrap();
 
         // Set workflow state to Verifying
@@ -2640,10 +3020,7 @@ mod tests {
             retry_count: 0,
         };
         let mut running_task = service.get_task(task.id).await.unwrap().unwrap();
-        running_task.context.custom.insert(
-            "workflow_state".to_string(),
-            serde_json::to_value(&ws).unwrap(),
-        );
+        running_task.set_workflow_state(&ws).unwrap();
         service.task_repo.update(&running_task).await.unwrap();
 
         // transition_to_validating should succeed
@@ -2664,20 +3041,23 @@ mod tests {
         let service = setup_service().await;
 
         // Create and claim a task so it's Running
-        let (task, _) = service.submit_task(
-            Some("Test".to_string()),
-            "Desc".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        let (task, _) = service
+            .submit_task(
+                Some("Test".to_string()),
+                "Desc".to_string(),
+                None,
+                TaskPriority::Normal,
+                None,
+                vec![],
+                None,
+                None,
+                TaskSource::Human,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         service.claim_task(task.id, "test-agent").await.unwrap();
 
         // Set workflow state to Verifying so we can transition to Validating
@@ -2689,10 +3069,7 @@ mod tests {
             retry_count: 0,
         };
         let mut running_task = service.get_task(task.id).await.unwrap().unwrap();
-        running_task.context.custom.insert(
-            "workflow_state".to_string(),
-            serde_json::to_value(&verifying_ws).unwrap(),
-        );
+        running_task.set_workflow_state(&verifying_ws).unwrap();
         service.task_repo.update(&running_task).await.unwrap();
 
         // Transition to Validating (allowed because workflow state is Verifying)
@@ -2706,14 +3083,13 @@ mod tests {
             phase_name: "implement".to_string(),
         };
         let mut validating_task = service.get_task(task.id).await.unwrap().unwrap();
-        validating_task.context.custom.insert(
-            "workflow_state".to_string(),
-            serde_json::to_value(&ws).unwrap(),
-        );
+        validating_task.set_workflow_state(&ws).unwrap();
         service.task_repo.update(&validating_task).await.unwrap();
 
         // Force transition to Failed
-        let result = service.force_transition(task.id, TaskStatus::Failed, "test reason").await;
+        let result = service
+            .force_transition(task.id, TaskStatus::Failed, "test reason")
+            .await;
         assert!(
             result.is_ok(),
             "force_transition should succeed: {:?}",
@@ -2721,12 +3097,16 @@ mod tests {
         );
 
         let (updated, _) = result.unwrap();
-        assert_eq!(updated.status, TaskStatus::Failed, "Task status should be Failed after force_transition");
+        assert_eq!(
+            updated.status,
+            TaskStatus::Failed,
+            "Task status should be Failed after force_transition"
+        );
 
         // Verify workflow state was also updated to Failed
-        let ws_val = updated.context.custom.get("workflow_state")
+        let updated_ws = updated
+            .workflow_state()
             .expect("workflow_state should still be present");
-        let updated_ws: WorkflowState = serde_json::from_value(ws_val.clone()).unwrap();
         assert!(
             matches!(updated_ws, WorkflowState::Failed { .. }),
             "WorkflowState should be Failed after force_transition to Failed, got {:?}",

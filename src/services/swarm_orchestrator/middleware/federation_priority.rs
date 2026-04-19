@@ -52,12 +52,7 @@ impl FederationPriorityMiddleware {
     }
 
     fn extract_goal_id(ctx: &PreSpawnContext) -> Option<Uuid> {
-        ctx.task
-            .context
-            .custom
-            .get("goal_id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok())
+        ctx.task.goal_id()
     }
 }
 
@@ -73,10 +68,7 @@ impl PreSpawnMiddleware for FederationPriorityMiddleware {
         "federation-priority"
     }
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision> {
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
         let Some(goal_id) = Self::extract_goal_id(ctx) else {
             return Ok(PreSpawnDecision::Continue);
         };
@@ -111,8 +103,7 @@ impl PreSpawnMiddleware for FederationPriorityMiddleware {
 
         let previous = ctx.task.priority;
         ctx.task.priority = desired;
-        ctx.federation_priority_bumps =
-            ctx.federation_priority_bumps.saturating_add(1);
+        ctx.federation_priority_bumps = ctx.federation_priority_bumps.saturating_add(1);
 
         tracing::info!(
             task_id = %ctx.task.id,
@@ -144,15 +135,13 @@ impl PreSpawnMiddleware for FederationPriorityMiddleware {
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_migrated_test_pool, SqliteAgentRepository, SqliteGoalRepository,
-        SqliteTaskRepository,
+        SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
+        create_migrated_test_pool,
     };
     use crate::domain::models::{Goal, Task};
     use crate::domain::ports::{AgentRepository, GoalRepository, TaskRepository};
     use crate::services::swarm_orchestrator::middleware::PreSpawnContext;
-    use crate::services::{
-        AuditLogService, CircuitBreakerService, Guardrails,
-    };
+    use crate::services::{AuditLogService, CircuitBreakerService, Guardrails};
     use std::sync::Arc;
     use tokio::sync::Semaphore;
 
@@ -173,10 +162,7 @@ mod tests {
         let mut task = Task::with_title("fp-test", "priority bump test");
         task.priority = task_priority;
         if let Some(gid) = goal_id_in_task {
-            task.context.custom.insert(
-                "goal_id".to_string(),
-                serde_json::Value::String(gid.to_string()),
-            );
+            task.set_goal_id(gid);
         }
 
         let task_repo: Arc<dyn TaskRepository> = task_repo_concrete;
@@ -202,8 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_op_when_task_has_no_goal_id() {
-        let mut ctx =
-            make_ctx_with_goal(None, TaskPriority::Normal, None).await;
+        let mut ctx = make_ctx_with_goal(None, TaskPriority::Normal, None).await;
         let before = ctx.task.priority;
 
         let decision = FederationPriorityMiddleware::new()
@@ -220,9 +205,7 @@ mod tests {
     async fn no_op_when_goal_priority_is_not_higher() {
         let goal = Goal::new("g", "d").with_priority(GoalPriority::Normal);
         let gid = goal.id;
-        let mut ctx =
-            make_ctx_with_goal(Some(goal), TaskPriority::High, Some(gid))
-                .await;
+        let mut ctx = make_ctx_with_goal(Some(goal), TaskPriority::High, Some(gid)).await;
 
         let decision = FederationPriorityMiddleware::new()
             .handle(&mut ctx)
@@ -238,9 +221,7 @@ mod tests {
     async fn bumps_task_priority_up_to_goal_priority() {
         let goal = Goal::new("g", "d").with_priority(GoalPriority::Critical);
         let gid = goal.id;
-        let mut ctx =
-            make_ctx_with_goal(Some(goal), TaskPriority::Normal, Some(gid))
-                .await;
+        let mut ctx = make_ctx_with_goal(Some(goal), TaskPriority::Normal, Some(gid)).await;
 
         let decision = FederationPriorityMiddleware::new()
             .handle(&mut ctx)
@@ -256,8 +237,7 @@ mod tests {
     async fn missing_goal_is_non_fatal() {
         // goal_id present on task but the goal row doesn't exist.
         let stray = Uuid::new_v4();
-        let mut ctx =
-            make_ctx_with_goal(None, TaskPriority::Normal, Some(stray)).await;
+        let mut ctx = make_ctx_with_goal(None, TaskPriority::Normal, Some(stray)).await;
 
         let decision = FederationPriorityMiddleware::new()
             .handle(&mut ctx)

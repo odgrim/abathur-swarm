@@ -15,15 +15,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::services::command_bus::{
-    CommandBus, CommandEnvelope, CommandSource, DomainCommand,
-};
+use crate::services::command_bus::{CommandBus, CommandEnvelope, CommandSource, DomainCommand};
 use crate::services::event_bus::{
-    EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
+    EventCategory, EventId, EventPayload, EventSeverity, HumanEscalationPayload, SequenceNumber,
+    UnifiedEvent,
 };
 use crate::services::event_reactor::{
-    EventFilter, EventHandler, HandlerContext, HandlerId, HandlerMetadata, HandlerPriority,
-    ErrorStrategy, Reaction,
+    ErrorStrategy, EventFilter, EventHandler, HandlerContext, HandlerId, HandlerMetadata,
+    HandlerPriority, Reaction,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,10 +73,7 @@ pub enum TriggerCondition {
     /// Fire on every matching event.
     Always,
     /// Fire only after N matching events arrive within a time window.
-    CountThreshold {
-        count: u32,
-        window_secs: u64,
-    },
+    CountThreshold { count: u32, window_secs: u64 },
     /// Fire when an expected event does NOT arrive within a deadline after
     /// a triggering event. For example: "If TaskStarted fires but no
     /// TaskCompleted arrives within 1800s, escalate."
@@ -104,9 +100,7 @@ pub enum TriggerCondition {
     /// When this condition is set, the rule's filter is automatically configured to
     /// match `ScheduledEventFired` events, and a corresponding schedule is registered
     /// with the EventScheduler.
-    Cron {
-        expression: String,
-    },
+    Cron { expression: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -124,9 +118,7 @@ pub enum TriggerAction {
         severity: EventSeverity,
     },
     /// Issue a domain command through the CommandBus.
-    IssueCommand {
-        command: SerializableDomainCommand,
-    },
+    IssueCommand { command: SerializableDomainCommand },
     /// Both emit an event and issue a command.
     EmitAndCommand {
         payload: TriggerEventPayload,
@@ -161,14 +153,16 @@ impl TriggerEventPayload {
                 schedule_id: Uuid::new_v4(),
                 name: name.clone(),
             },
-            Self::HumanEscalation { reason } => EventPayload::HumanEscalationNeeded {
-                goal_id: None,
-                task_id: None,
-                reason: reason.clone(),
-                urgency: "medium".to_string(),
-                questions: vec![],
-                is_blocking: false,
-            },
+            Self::HumanEscalation { reason } => {
+                EventPayload::HumanEscalationNeeded(HumanEscalationPayload {
+                    goal_id: None,
+                    task_id: None,
+                    reason: reason.clone(),
+                    urgency: "medium".to_string(),
+                    questions: vec![],
+                    is_blocking: false,
+                })
+            }
             Self::ReconciliationRequested => EventPayload::ScheduledEventFired {
                 schedule_id: Uuid::new_v4(),
                 name: "reconciliation".to_string(),
@@ -199,15 +193,9 @@ pub enum SerializableDomainCommand {
     /// Promote a memory.
     PromoteMemory { memory_id: Uuid },
     /// Transition a goal's status.
-    TransitionGoalStatus {
-        goal_id: Uuid,
-        new_status: String,
-    },
+    TransitionGoalStatus { goal_id: Uuid, new_status: String },
     /// Cancel a task.
-    CancelTask {
-        task_id: Uuid,
-        reason: String,
-    },
+    CancelTask { task_id: Uuid, reason: String },
     /// Fail a task. If `task_id` is None, resolve from source event's task_id
     /// (used by absence-based rules where the task_id is dynamic).
     FailTask {
@@ -215,9 +203,7 @@ pub enum SerializableDomainCommand {
         error: String,
     },
     /// Retry a failed task.
-    RetryTask {
-        task_id: Uuid,
-    },
+    RetryTask { task_id: Uuid },
     /// Submit a new task.
     SubmitTask {
         title: String,
@@ -226,13 +212,9 @@ pub enum SerializableDomainCommand {
         agent_type: Option<String>,
     },
     /// Pause a goal.
-    PauseGoal {
-        goal_id: Uuid,
-    },
+    PauseGoal { goal_id: Uuid },
     /// Delete a memory.
-    ForgetMemory {
-        memory_id: Uuid,
-    },
+    ForgetMemory { memory_id: Uuid },
     /// Run full memory maintenance.
     RunMemoryMaintenance,
 }
@@ -260,7 +242,11 @@ pub struct TriggerRule {
 }
 
 impl TriggerRule {
-    pub fn new(name: impl Into<String>, filter: SerializableEventFilter, action: TriggerAction) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        filter: SerializableEventFilter,
+        action: TriggerAction,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
@@ -387,7 +373,10 @@ impl TriggerRuleEngine {
     }
 
     /// Add a repository for persisting rule fire state.
-    pub fn with_rule_repo(mut self, repo: Arc<dyn crate::domain::ports::TriggerRuleRepository>) -> Self {
+    pub fn with_rule_repo(
+        mut self,
+        repo: Arc<dyn crate::domain::ports::TriggerRuleRepository>,
+    ) -> Self {
         self.rule_repo = Some(repo);
         self
     }
@@ -399,7 +388,10 @@ impl TriggerRuleEngine {
     }
 
     /// Attach an EventScheduler for cron trigger registration.
-    pub fn with_event_scheduler(mut self, scheduler: Arc<crate::services::event_scheduler::EventScheduler>) -> Self {
+    pub fn with_event_scheduler(
+        mut self,
+        scheduler: Arc<crate::services::event_scheduler::EventScheduler>,
+    ) -> Self {
         self.event_scheduler = Some(scheduler);
         self
     }
@@ -413,7 +405,9 @@ impl TriggerRuleEngine {
         let sched_event = crate::services::event_scheduler::ScheduledEvent {
             id: Uuid::new_v4(),
             name: rule.cron_schedule_name(),
-            schedule: crate::services::event_scheduler::ScheduleType::Cron { expression: expression.to_string() },
+            schedule: crate::services::event_scheduler::ScheduleType::Cron {
+                expression: expression.to_string(),
+            },
             category: EventCategory::Scheduler,
             severity: EventSeverity::Info,
             goal_id: None,
@@ -538,7 +532,9 @@ impl TriggerRuleEngine {
                 deadline_secs: row.deadline_secs as u64,
                 expected_type: row.expected_payload_type,
                 task_id: row.scope_task_id.and_then(|s| Uuid::parse_str(&s).ok()),
-                correlation_id: row.scope_correlation_id.and_then(|s| Uuid::parse_str(&s).ok()),
+                correlation_id: row
+                    .scope_correlation_id
+                    .and_then(|s| Uuid::parse_str(&s).ok()),
                 agent_type: None, // Not persisted; timer will use its deadline_secs directly
             };
 
@@ -618,10 +614,7 @@ impl TriggerRuleEngine {
                 task_id: None,
                 correlation_id: None,
                 source_process_id: None,
-                payload: EventPayload::TriggerRuleCreated {
-                    rule_id,
-                    rule_name,
-                },
+                payload: EventPayload::TriggerRuleCreated { rule_id, rule_name },
             };
             bus.publish(event).await;
         }
@@ -673,10 +666,7 @@ impl TriggerRuleEngine {
     /// Evaluate all rules against an event; returns events to emit.
     ///
     /// Commands are dispatched inline via the `CommandBus`.
-    async fn evaluate(
-        &self,
-        event: &UnifiedEvent,
-    ) -> Vec<UnifiedEvent> {
+    async fn evaluate(&self, event: &UnifiedEvent) -> Vec<UnifiedEvent> {
         let mut reactions = Vec::new();
         let mut fired_rules: Vec<TriggerRule> = Vec::new();
 
@@ -691,8 +681,7 @@ impl TriggerRuleEngine {
                 timer_list.retain(|timer| {
                     // Cancel timer if the expected event arrived (scoped by task_id)
                     let type_match = timer.expected_type == event_type;
-                    let scope_match = timer.task_id.is_none()
-                        || timer.task_id == event.task_id;
+                    let scope_match = timer.task_id.is_none() || timer.task_id == event.task_id;
                     if type_match && scope_match {
                         cancelled.push(timer.id);
                         false
@@ -726,7 +715,8 @@ impl TriggerRuleEngine {
                 if let Some(timer_list) = timers.get_mut(&rule.id) {
                     let mut expired_indices = Vec::new();
                     for (i, timer) in timer_list.iter().enumerate() {
-                        let deadline = timer.started_at + chrono::Duration::seconds(timer.deadline_secs as i64);
+                        let deadline = timer.started_at
+                            + chrono::Duration::seconds(timer.deadline_secs as i64);
                         if now > deadline {
                             expired_indices.push(i);
                         }
@@ -778,34 +768,51 @@ impl TriggerRuleEngine {
                         };
 
                         // Override FailTask error messages with the actual deadline used
-                        let override_fail_error = |cmd: &SerializableDomainCommand| -> SerializableDomainCommand {
-                            if let SerializableDomainCommand::FailTask { task_id, .. } = cmd {
-                                let minutes = expired.deadline_secs / 60;
-                                let agent_info = expired.agent_type.as_deref().unwrap_or("unknown");
-                                SerializableDomainCommand::FailTask {
-                                    task_id: *task_id,
-                                    error: format!(
-                                        "Task claimed but not completed within {} minutes (agent_type: {}) — timed out",
-                                        minutes, agent_info
-                                    ),
+                        let override_fail_error =
+                            |cmd: &SerializableDomainCommand| -> SerializableDomainCommand {
+                                if let SerializableDomainCommand::FailTask { task_id, .. } = cmd {
+                                    let minutes = expired.deadline_secs / 60;
+                                    let agent_info =
+                                        expired.agent_type.as_deref().unwrap_or("unknown");
+                                    SerializableDomainCommand::FailTask {
+                                        task_id: *task_id,
+                                        error: format!(
+                                            "Task claimed but not completed within {} minutes (agent_type: {}) — timed out",
+                                            minutes, agent_info
+                                        ),
+                                    }
+                                } else {
+                                    cmd.clone()
                                 }
-                            } else {
-                                cmd.clone()
-                            }
-                        };
+                            };
 
                         match &rule.action {
-                            TriggerAction::EmitEvent { payload, category, severity } => {
-                                reactions.push(self.build_event(payload, *category, *severity, &synthetic));
+                            TriggerAction::EmitEvent {
+                                payload,
+                                category,
+                                severity,
+                            } => {
+                                reactions.push(
+                                    self.build_event(payload, *category, *severity, &synthetic),
+                                );
                             }
                             TriggerAction::IssueCommand { command } => {
                                 let cmd = override_fail_error(command);
-                                self.dispatch_command(&cmd, &rule.name, Some(&synthetic)).await;
+                                self.dispatch_command(&cmd, &rule.name, Some(&synthetic))
+                                    .await;
                             }
-                            TriggerAction::EmitAndCommand { payload, category, severity, command } => {
-                                reactions.push(self.build_event(payload, *category, *severity, &synthetic));
+                            TriggerAction::EmitAndCommand {
+                                payload,
+                                category,
+                                severity,
+                                command,
+                            } => {
+                                reactions.push(
+                                    self.build_event(payload, *category, *severity, &synthetic),
+                                );
                                 let cmd = override_fail_error(command);
-                                self.dispatch_command(&cmd, &rule.name, Some(&synthetic)).await;
+                                self.dispatch_command(&cmd, &rule.name, Some(&synthetic))
+                                    .await;
                             }
                         }
 
@@ -839,12 +846,13 @@ impl TriggerRuleEngine {
 
                 // 2. Cooldown check
                 if let Some(cooldown) = rule.cooldown
-                    && let Some(last) = rule.last_fired {
-                        let elapsed = (now - last).to_std().unwrap_or_default();
-                        if elapsed < cooldown {
-                            continue;
-                        }
+                    && let Some(last) = rule.last_fired
+                {
+                    let elapsed = (now - last).to_std().unwrap_or_default();
+                    if elapsed < cooldown {
+                        continue;
                     }
+                }
 
                 // 3. Condition check
                 let condition_met = match &rule.condition {
@@ -861,17 +869,27 @@ impl TriggerRuleEngine {
 
                         window.len() >= *count as usize
                     }
-                    TriggerCondition::Absence { trigger_type, expected_type, deadline_secs, agent_type_deadline_overrides } => {
+                    TriggerCondition::Absence {
+                        trigger_type,
+                        expected_type,
+                        deadline_secs,
+                        agent_type_deadline_overrides,
+                    } => {
                         // If the current event matches the trigger_type, start a timer
                         if event_type == *trigger_type {
                             // Extract agent_type from the event payload for per-agent overrides
                             let event_agent_type = match &event.payload {
-                                EventPayload::TaskClaimed { agent_type, .. } => Some(agent_type.clone()),
+                                EventPayload::TaskClaimed { agent_type, .. } => {
+                                    Some(agent_type.clone())
+                                }
                                 _ => None,
                             };
                             // Use agent-specific deadline if configured, otherwise default
-                            let effective_deadline = event_agent_type.as_ref()
-                                .and_then(|at| agent_type_deadline_overrides.as_ref()?.get(at).copied())
+                            let effective_deadline = event_agent_type
+                                .as_ref()
+                                .and_then(|at| {
+                                    agent_type_deadline_overrides.as_ref()?.get(at).copied()
+                                })
                                 .unwrap_or(*deadline_secs);
                             let timer = AbsenceTimer {
                                 id: Uuid::new_v4(),
@@ -927,7 +945,8 @@ impl TriggerRuleEngine {
                         reactions.push(self.build_event(payload, *category, *severity, event));
                     }
                     TriggerAction::IssueCommand { command } => {
-                        self.dispatch_command(command, &rule.name, Some(event)).await;
+                        self.dispatch_command(command, &rule.name, Some(event))
+                            .await;
                     }
                     TriggerAction::EmitAndCommand {
                         payload,
@@ -936,7 +955,8 @@ impl TriggerRuleEngine {
                         command,
                     } => {
                         reactions.push(self.build_event(payload, *category, *severity, event));
-                        self.dispatch_command(command, &rule.name, Some(event)).await;
+                        self.dispatch_command(command, &rule.name, Some(event))
+                            .await;
                     }
                 }
 
@@ -993,8 +1013,15 @@ impl TriggerRuleEngine {
         }
     }
 
-    async fn dispatch_command(&self, cmd: &SerializableDomainCommand, rule_name: &str, source: Option<&UnifiedEvent>) {
-        use crate::domain::models::{AccessorId, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource};
+    async fn dispatch_command(
+        &self,
+        cmd: &SerializableDomainCommand,
+        rule_name: &str,
+        source: Option<&UnifiedEvent>,
+    ) {
+        use crate::domain::models::{
+            AccessorId, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource,
+        };
         use crate::services::command_bus::{GoalCommand, MemoryCommand, TaskCommand};
 
         let domain_cmd = match cmd {
@@ -1018,7 +1045,10 @@ impl TriggerRuleEngine {
             }
             SerializableDomainCommand::PromoteMemory { memory_id } => {
                 // Recall triggers auto-promotion; for explicit promote we recall.
-                DomainCommand::Memory(MemoryCommand::Recall { id: *memory_id, accessor: AccessorId::system("trigger-rule") })
+                DomainCommand::Memory(MemoryCommand::Recall {
+                    id: *memory_id,
+                    accessor: AccessorId::system("trigger-rule"),
+                })
             }
             SerializableDomainCommand::TransitionGoalStatus {
                 goal_id,
@@ -1044,7 +1074,10 @@ impl TriggerRuleEngine {
                         error: Some(error.clone()),
                     }),
                     None => {
-                        tracing::warn!(rule_name, "FailTask: no task_id available — cannot resolve from source event");
+                        tracing::warn!(
+                            rule_name,
+                            "FailTask: no task_id available — cannot resolve from source event"
+                        );
                         return;
                     }
                 }
@@ -1140,9 +1173,9 @@ impl EventHandler for TriggerRuleEngine {
 pub fn normalize_cron_expression(expression: &str) -> String {
     let fields: Vec<&str> = expression.split_whitespace().collect();
     match fields.len() {
-        5 => format!("0 {} *", expression),   // 5-field → 7-field
-        6 => format!("{} *", expression),      // 6-field → 7-field
-        _ => expression.to_string(),           // 7-field or invalid — pass through
+        5 => format!("0 {} *", expression), // 5-field → 7-field
+        6 => format!("{} *", expression),   // 6-field → 7-field
+        _ => expression.to_string(),        // 7-field or invalid — pass through
     }
 }
 
@@ -1391,17 +1424,26 @@ mod tests {
     fn test_cron_trigger_rule_helpers() {
         let filter = TriggerRule::cron_event_filter();
         assert_eq!(filter.categories, vec![EventCategory::Scheduler]);
-        assert_eq!(filter.payload_types, vec!["ScheduledEventFired".to_string()]);
+        assert_eq!(
+            filter.payload_types,
+            vec!["ScheduledEventFired".to_string()]
+        );
 
-        let rule = TriggerRule::new("test-cron", filter, TriggerAction::IssueCommand {
-            command: SerializableDomainCommand::SubmitTask {
-                title: "test".to_string(),
-                description: "test".to_string(),
-                priority: "normal".to_string(),
-                agent_type: None,
+        let rule = TriggerRule::new(
+            "test-cron",
+            filter,
+            TriggerAction::IssueCommand {
+                command: SerializableDomainCommand::SubmitTask {
+                    title: "test".to_string(),
+                    description: "test".to_string(),
+                    priority: "normal".to_string(),
+                    agent_type: None,
+                },
             },
-        })
-        .with_condition(TriggerCondition::Cron { expression: "0 * * * *".to_string() });
+        )
+        .with_condition(TriggerCondition::Cron {
+            expression: "0 * * * *".to_string(),
+        });
 
         assert!(rule.is_cron());
         assert_eq!(rule.cron_expression(), Some("0 * * * *"));
@@ -1409,7 +1451,8 @@ mod tests {
         assert!(rule.cron_schedule_name().contains(&rule.id.to_string()));
 
         // Non-cron rule should return false/None
-        let always_rule = TriggerRule::new("test-always",
+        let always_rule = TriggerRule::new(
+            "test-always",
             SerializableEventFilter {
                 categories: vec![],
                 min_severity: None,
@@ -1432,15 +1475,21 @@ mod tests {
 
     #[test]
     fn test_cron_condition_matches_own_event() {
-        let rule = TriggerRule::new("my-cron", TriggerRule::cron_event_filter(), TriggerAction::IssueCommand {
-            command: SerializableDomainCommand::SubmitTask {
-                title: "t".to_string(),
-                description: "d".to_string(),
-                priority: "normal".to_string(),
-                agent_type: None,
+        let rule = TriggerRule::new(
+            "my-cron",
+            TriggerRule::cron_event_filter(),
+            TriggerAction::IssueCommand {
+                command: SerializableDomainCommand::SubmitTask {
+                    title: "t".to_string(),
+                    description: "d".to_string(),
+                    priority: "normal".to_string(),
+                    agent_type: None,
+                },
             },
-        })
-        .with_condition(TriggerCondition::Cron { expression: "0 0 * * *".to_string() });
+        )
+        .with_condition(TriggerCondition::Cron {
+            expression: "0 0 * * *".to_string(),
+        });
 
         // Matching event — name matches rule's cron_schedule_name
         let matching = make_test_event(
@@ -1478,15 +1527,21 @@ mod tests {
 
     #[test]
     fn test_cron_condition_ignores_non_scheduler_events() {
-        let rule = TriggerRule::new("cron-ignore-test", TriggerRule::cron_event_filter(), TriggerAction::IssueCommand {
-            command: SerializableDomainCommand::SubmitTask {
-                title: "t".to_string(),
-                description: "d".to_string(),
-                priority: "normal".to_string(),
-                agent_type: None,
+        let rule = TriggerRule::new(
+            "cron-ignore-test",
+            TriggerRule::cron_event_filter(),
+            TriggerAction::IssueCommand {
+                command: SerializableDomainCommand::SubmitTask {
+                    title: "t".to_string(),
+                    description: "d".to_string(),
+                    priority: "normal".to_string(),
+                    agent_type: None,
+                },
             },
-        })
-        .with_condition(TriggerCondition::Cron { expression: "0 0 * * *".to_string() });
+        )
+        .with_condition(TriggerCondition::Cron {
+            expression: "0 0 * * *".to_string(),
+        });
 
         // TaskFailed event should not match the filter (wrong category + payload type)
         let task_event = make_test_event(
@@ -1519,15 +1574,17 @@ mod tests {
             trigger_type: "TaskClaimed".to_string(),
             expected_type: "TaskCompleted".to_string(),
             deadline_secs: 1800,
-            agent_type_deadline_overrides: Some(HashMap::from([
-                ("overmind".to_string(), 7200),
-            ])),
+            agent_type_deadline_overrides: Some(HashMap::from([("overmind".to_string(), 7200)])),
         };
         let json = serde_json::to_string(&condition).unwrap();
         let deserialized: TriggerCondition = serde_json::from_str(&json).unwrap();
 
         match deserialized {
-            TriggerCondition::Absence { deadline_secs, agent_type_deadline_overrides, .. } => {
+            TriggerCondition::Absence {
+                deadline_secs,
+                agent_type_deadline_overrides,
+                ..
+            } => {
                 assert_eq!(deadline_secs, 1800);
                 let overrides = agent_type_deadline_overrides.unwrap();
                 assert_eq!(overrides.get("overmind"), Some(&7200));
@@ -1543,7 +1600,11 @@ mod tests {
         let condition: TriggerCondition = serde_json::from_str(json).unwrap();
 
         match condition {
-            TriggerCondition::Absence { deadline_secs, agent_type_deadline_overrides, .. } => {
+            TriggerCondition::Absence {
+                deadline_secs,
+                agent_type_deadline_overrides,
+                ..
+            } => {
                 assert_eq!(deadline_secs, 1800);
                 assert!(agent_type_deadline_overrides.is_none());
             }
@@ -1554,10 +1615,17 @@ mod tests {
     #[test]
     fn test_builtin_task_completion_timeout_has_overmind_override() {
         let rules = builtin_trigger_rules();
-        let timeout_rule = rules.iter().find(|r| r.name == "task-completion-timeout").unwrap();
+        let timeout_rule = rules
+            .iter()
+            .find(|r| r.name == "task-completion-timeout")
+            .unwrap();
 
         match &timeout_rule.condition {
-            TriggerCondition::Absence { deadline_secs, agent_type_deadline_overrides, .. } => {
+            TriggerCondition::Absence {
+                deadline_secs,
+                agent_type_deadline_overrides,
+                ..
+            } => {
                 assert_eq!(*deadline_secs, 1800);
                 let overrides = agent_type_deadline_overrides.as_ref().unwrap();
                 assert_eq!(overrides.get("overmind"), Some(&7200));

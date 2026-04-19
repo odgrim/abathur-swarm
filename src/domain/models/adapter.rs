@@ -251,12 +251,9 @@ impl AdapterManifest {
             return Err("Adapter must declare at least one capability".to_string());
         }
         // Validate direction vs capabilities
-        if self.direction.supports_ingestion()
-            && !self.has_capability(AdapterCapability::PollItems)
+        if self.direction.supports_ingestion() && !self.has_capability(AdapterCapability::PollItems)
         {
-            return Err(
-                "Ingestion adapters must declare the PollItems capability".to_string(),
-            );
+            return Err("Ingestion adapters must declare the PollItems capability".to_string());
         }
         Ok(())
     }
@@ -569,9 +566,12 @@ mod tests {
 
     #[test]
     fn test_manifest_validation_invalid_name_chars() {
-        let manifest =
-            AdapterManifest::new("My Adapter!", AdapterType::Prompt, AdapterDirection::Ingestion)
-                .with_capability(AdapterCapability::PollItems);
+        let manifest = AdapterManifest::new(
+            "My Adapter!",
+            AdapterType::Prompt,
+            AdapterDirection::Ingestion,
+        )
+        .with_capability(AdapterCapability::PollItems);
 
         let err = manifest.validate().unwrap_err();
         assert!(err.contains("lowercase"));
@@ -656,10 +656,7 @@ mod tests {
     #[test]
     fn test_egress_action_create_item() {
         let mut fields = HashMap::new();
-        fields.insert(
-            "labels".to_string(),
-            serde_json::json!(["bug", "critical"]),
-        );
+        fields.insert("labels".to_string(), serde_json::json!(["bug", "critical"]));
         let action = EgressAction::CreateItem {
             title: "New bug".to_string(),
             description: "Something is broken".to_string(),
@@ -687,7 +684,8 @@ mod tests {
 
     #[test]
     fn test_egress_result_ok() {
-        let result = EgressResult::ok_with_id("PROJ-123").with_url("https://jira.example.com/PROJ-123");
+        let result =
+            EgressResult::ok_with_id("PROJ-123").with_url("https://jira.example.com/PROJ-123");
         assert!(result.success);
         assert_eq!(result.external_id.as_deref(), Some("PROJ-123"));
         assert!(result.external_url.is_some());
@@ -721,13 +719,10 @@ mod tests {
 
     #[test]
     fn test_manifest_has_capability() {
-        let manifest = AdapterManifest::new(
-            "test",
-            AdapterType::Native,
-            AdapterDirection::Bidirectional,
-        )
-        .with_capability(AdapterCapability::PollItems)
-        .with_capability(AdapterCapability::UpdateStatus);
+        let manifest =
+            AdapterManifest::new("test", AdapterType::Native, AdapterDirection::Bidirectional)
+                .with_capability(AdapterCapability::PollItems)
+                .with_capability(AdapterCapability::UpdateStatus);
 
         assert!(manifest.has_capability(AdapterCapability::PollItems));
         assert!(manifest.has_capability(AdapterCapability::UpdateStatus));
@@ -736,13 +731,9 @@ mod tests {
 
     #[test]
     fn test_manifest_dedup_capabilities() {
-        let manifest = AdapterManifest::new(
-            "test",
-            AdapterType::Native,
-            AdapterDirection::Egress,
-        )
-        .with_capability(AdapterCapability::UpdateStatus)
-        .with_capability(AdapterCapability::UpdateStatus);
+        let manifest = AdapterManifest::new("test", AdapterType::Native, AdapterDirection::Egress)
+            .with_capability(AdapterCapability::UpdateStatus)
+            .with_capability(AdapterCapability::UpdateStatus);
 
         assert_eq!(manifest.capabilities.len(), 1);
     }
@@ -796,14 +787,11 @@ mod tests {
 
     #[test]
     fn test_manifest_config() {
-        let manifest = AdapterManifest::new(
-            "jira",
-            AdapterType::Native,
-            AdapterDirection::Bidirectional,
-        )
-        .with_capability(AdapterCapability::PollItems)
-        .with_config("base_url", serde_json::json!("https://jira.example.com"))
-        .with_config("project_key", serde_json::json!("PROJ"));
+        let manifest =
+            AdapterManifest::new("jira", AdapterType::Native, AdapterDirection::Bidirectional)
+                .with_capability(AdapterCapability::PollItems)
+                .with_config("base_url", serde_json::json!("https://jira.example.com"))
+                .with_config("project_key", serde_json::json!("PROJ"));
 
         assert_eq!(
             manifest.config.get("base_url"),
@@ -818,7 +806,10 @@ mod tests {
     #[test]
     fn test_egress_action_custom() {
         let mut params = HashMap::new();
-        params.insert("webhook_url".to_string(), serde_json::json!("https://hooks.example.com/notify"));
+        params.insert(
+            "webhook_url".to_string(),
+            serde_json::json!("https://hooks.example.com/notify"),
+        );
         let action = EgressAction::Custom {
             action_name: "notify_slack".to_string(),
             params,

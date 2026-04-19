@@ -24,20 +24,24 @@ impl SqliteMergeRequestRepository {
     fn row_to_merge_request(&self, row: &MergeRequestRow) -> DomainResult<MergeRequest> {
         let id = parse_uuid(&row.id)?;
         let task_id = parse_uuid(&row.task_id)?;
-        let stage = MergeStage::from_str(&row.stage)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid merge stage: {}", row.stage)))?;
-        let status = MergeStatus::from_str(&row.status)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid merge status: {}", row.status)))?;
+        let stage = MergeStage::from_str(&row.stage).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid merge stage: {}", row.stage))
+        })?;
+        let status = MergeStatus::from_str(&row.status).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid merge status: {}", row.status))
+        })?;
         let created_at = parse_datetime(&row.created_at)?;
         let updated_at = parse_datetime(&row.updated_at)?;
 
-        let verification = row.verification_json.as_deref()
+        let verification = row
+            .verification_json
+            .as_deref()
             .map(serde_json::from_str)
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
 
-        let conflict_files: Vec<String> = serde_json::from_str(&row.conflict_files_json)
-            .unwrap_or_default();
+        let conflict_files: Vec<String> =
+            serde_json::from_str(&row.conflict_files_json).unwrap_or_default();
 
         Ok(MergeRequest {
             id,
@@ -83,7 +87,9 @@ impl MergeRequestRepository for SqliteMergeRequestRepository {
         let stage = request.stage.as_str();
         let task_id = request.task_id.to_string();
         let status = request.status.as_str();
-        let verification_json = request.verification.as_ref()
+        let verification_json = request
+            .verification
+            .as_ref()
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
@@ -120,21 +126,24 @@ impl MergeRequestRepository for SqliteMergeRequestRepository {
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<MergeRequest>> {
-        let row: Option<MergeRequestRow> = sqlx::query_as(
-            "SELECT * FROM merge_requests WHERE id = ?"
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| DomainError::DatabaseError(e.to_string()))?;
+        let row: Option<MergeRequestRow> =
+            sqlx::query_as("SELECT * FROM merge_requests WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| DomainError::DatabaseError(e.to_string()))?;
 
-        row.as_ref().map(|r| self.row_to_merge_request(r)).transpose()
+        row.as_ref()
+            .map(|r| self.row_to_merge_request(r))
+            .transpose()
     }
 
     async fn update(&self, request: &MergeRequest) -> DomainResult<()> {
         let id = request.id.to_string();
         let status = request.status.as_str();
-        let verification_json = request.verification.as_ref()
+        let verification_json = request
+            .verification
+            .as_ref()
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
@@ -145,7 +154,7 @@ impl MergeRequestRepository for SqliteMergeRequestRepository {
         sqlx::query(
             "UPDATE merge_requests SET status = ?, error = ?, commit_sha = ?, \
              verification_json = ?, conflict_files_json = ?, attempts = ?, updated_at = ? \
-             WHERE id = ?"
+             WHERE id = ?",
         )
         .bind(status)
         .bind(&request.error)
@@ -163,20 +172,19 @@ impl MergeRequestRepository for SqliteMergeRequestRepository {
     }
 
     async fn list_by_status(&self, status: MergeStatus) -> DomainResult<Vec<MergeRequest>> {
-        let rows: Vec<MergeRequestRow> = sqlx::query_as(
-            "SELECT * FROM merge_requests WHERE status = ? ORDER BY created_at ASC"
-        )
-        .bind(status.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DomainError::DatabaseError(e.to_string()))?;
+        let rows: Vec<MergeRequestRow> =
+            sqlx::query_as("SELECT * FROM merge_requests WHERE status = ? ORDER BY created_at ASC")
+                .bind(status.as_str())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DomainError::DatabaseError(e.to_string()))?;
 
         rows.iter().map(|r| self.row_to_merge_request(r)).collect()
     }
 
     async fn list_by_task(&self, task_id: Uuid) -> DomainResult<Vec<MergeRequest>> {
         let rows: Vec<MergeRequestRow> = sqlx::query_as(
-            "SELECT * FROM merge_requests WHERE task_id = ? ORDER BY created_at ASC"
+            "SELECT * FROM merge_requests WHERE task_id = ? ORDER BY created_at ASC",
         )
         .bind(task_id.to_string())
         .fetch_all(&self.pool)
@@ -186,10 +194,13 @@ impl MergeRequestRepository for SqliteMergeRequestRepository {
         rows.iter().map(|r| self.row_to_merge_request(r)).collect()
     }
 
-    async fn list_unresolved_conflicts(&self, max_attempts: u32) -> DomainResult<Vec<MergeRequest>> {
+    async fn list_unresolved_conflicts(
+        &self,
+        max_attempts: u32,
+    ) -> DomainResult<Vec<MergeRequest>> {
         let rows: Vec<MergeRequestRow> = sqlx::query_as(
             "SELECT * FROM merge_requests WHERE status = 'Conflict' AND attempts < ? \
-             ORDER BY created_at ASC"
+             ORDER BY created_at ASC",
         )
         .bind(max_attempts as i64)
         .fetch_all(&self.pool)

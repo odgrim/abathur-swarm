@@ -11,22 +11,20 @@ use crate::domain::models::a2a::{
     CerebrateStatus, ConnectionState, FederationCard, FederationResult, FederationTaskEnvelope,
     FederationTaskStatus, MessagePriority,
 };
-use crate::domain::models::a2a_protocol::{
-    A2APart, A2AProtocolMessage, A2ARole, TaskSendParams,
-};
+use crate::domain::models::a2a_protocol::{A2APart, A2AProtocolMessage, A2ARole, TaskSendParams};
 use crate::domain::models::goal::{Goal, GoalPriority};
 use crate::domain::models::goal_federation::{
     ConvergenceContract, FederatedGoal, FederatedGoalState,
 };
 use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory;
+use crate::services::supervise;
 
 use super::config::FederationConfig;
 use super::traits::{
-    DefaultDelegationStrategy, DefaultResultProcessor, DefaultTaskTransformer,
-    DelegationDecision, FederationDelegationStrategy, FederationReaction,
-    FederationResultProcessor, FederationTaskTransformer, ParentContext, ResultSchema,
-    StandardV1Schema,
+    DefaultDelegationStrategy, DefaultResultProcessor, DefaultTaskTransformer, DelegationDecision,
+    FederationDelegationStrategy, FederationReaction, FederationResultProcessor,
+    FederationTaskTransformer, ParentContext, ResultSchema, StandardV1Schema,
 };
 
 /// HTTP client for outbound federation communication.
@@ -78,9 +76,9 @@ impl FederationHttpClient {
             return Err(format!("Discovery returned error: {}", message));
         }
 
-        let result = body.get("result").ok_or_else(|| {
-            "Discovery response missing 'result' field".to_string()
-        })?;
+        let result = body
+            .get("result")
+            .ok_or_else(|| "Discovery response missing 'result' field".to_string())?;
 
         serde_json::from_value(result.clone())
             .map_err(|e| format!("Failed to parse federation card: {}", e))
@@ -185,11 +183,7 @@ impl FederationHttpClient {
     }
 
     /// Send a task result to the parent overmind.
-    pub async fn send_result(
-        &self,
-        url: &str,
-        result: &FederationResult,
-    ) -> Result<(), String> {
+    pub async fn send_result(&self, url: &str, result: &FederationResult) -> Result<(), String> {
         let result_url = format!("{}/federation/result", url.trim_end_matches('/'));
         let resp = self
             .client
@@ -396,10 +390,7 @@ impl FederationService {
     }
 
     /// Replace the result processor.
-    pub fn with_result_processor(
-        mut self,
-        processor: Arc<dyn FederationResultProcessor>,
-    ) -> Self {
+    pub fn with_result_processor(mut self, processor: Arc<dyn FederationResultProcessor>) -> Self {
         self.result_processor = processor;
         self
     }
@@ -679,7 +670,10 @@ impl FederationService {
                 continue;
             }
 
-            if status.last_heartbeat_at.is_some_and(|last| now - last > interval) {
+            if status
+                .last_heartbeat_at
+                .is_some_and(|last| now - last > interval)
+            {
                 status.missed_heartbeats += 1;
 
                 if status.missed_heartbeats >= threshold {
@@ -720,10 +714,7 @@ impl FederationService {
     // ========================================================================
 
     /// Delegate a task to the best available cerebrate.
-    pub async fn delegate(
-        &self,
-        envelope: FederationTaskEnvelope,
-    ) -> Result<String, String> {
+    pub async fn delegate(&self, envelope: FederationTaskEnvelope) -> Result<String, String> {
         let cerebrates = self.list_cerebrates().await;
         let cerebrate_id = self
             .delegation_strategy
@@ -796,26 +787,25 @@ impl FederationService {
                 }
             }
 
-            if !sent_via_a2a
-                && let Err(e) = self.http_client.delegate(url, envelope).await {
-                    if self.a2a_client.is_some() {
-                        // Both A2A and legacy HTTP failed — return error to the
-                        // caller rather than silently continuing (Issue #8).
-                        return Err(format!(
-                            "Failed to delegate task {} to cerebrate {}: {}",
-                            envelope.task_id, cerebrate_id, e
-                        ));
-                    }
-                    // Legacy-only path: HTTP failure is non-fatal. The task is
-                    // tracked in-flight and the cerebrate may still process it
-                    // (e.g. local/test setups without a real HTTP endpoint).
-                    tracing::warn!(
-                        cerebrate_id = %cerebrate_id,
-                        task_id = %envelope.task_id,
-                        error = %e,
-                        "HTTP delegate call failed, task tracked in-flight for monitoring"
-                    );
+            if !sent_via_a2a && let Err(e) = self.http_client.delegate(url, envelope).await {
+                if self.a2a_client.is_some() {
+                    // Both A2A and legacy HTTP failed — return error to the
+                    // caller rather than silently continuing (Issue #8).
+                    return Err(format!(
+                        "Failed to delegate task {} to cerebrate {}: {}",
+                        envelope.task_id, cerebrate_id, e
+                    ));
                 }
+                // Legacy-only path: HTTP failure is non-fatal. The task is
+                // tracked in-flight and the cerebrate may still process it
+                // (e.g. local/test setups without a real HTTP endpoint).
+                tracing::warn!(
+                    cerebrate_id = %cerebrate_id,
+                    task_id = %envelope.task_id,
+                    error = %e,
+                    "HTTP delegate call failed, task tracked in-flight for monitoring"
+                );
+            }
         }
 
         // Track in-flight, activity timestamp, and increment active delegations
@@ -914,10 +904,7 @@ impl FederationService {
             "priority".to_string(),
             serde_json::Value::String(goal.priority.as_str().to_string()),
         );
-        federation_data.insert(
-            "convergence_contract".to_string(),
-            contract_json,
-        );
+        federation_data.insert("convergence_contract".to_string(), contract_json);
 
         let mut metadata = std::collections::HashMap::new();
         metadata.insert(
@@ -970,10 +957,7 @@ impl FederationService {
                     }
                 }
             } else {
-                return Err(format!(
-                    "Cerebrate {} has no URL configured",
-                    cerebrate_id
-                ));
+                return Err(format!("Cerebrate {} has no URL configured", cerebrate_id));
             }
         } else {
             // Fall back: create a FederationTaskEnvelope and use existing delegate path
@@ -1089,8 +1073,9 @@ impl FederationService {
 
         // Build a temporary envelope for the strategy
         let envelope = FederationTaskEnvelope::new(task_id, "", "");
-        let decision = self.delegation_strategy
-            .on_rejection(&envelope, cerebrate_id, reason, &remaining);
+        let decision =
+            self.delegation_strategy
+                .on_rejection(&envelope, cerebrate_id, reason, &remaining);
 
         // If the strategy decides to redelegate, update in_flight to point at
         // the new cerebrate so subsequent result/progress messages are routed
@@ -1203,14 +1188,12 @@ impl FederationService {
 
         // Process through result processor
         match result.status {
-            FederationTaskStatus::Completed | FederationTaskStatus::Partial => {
-                self.result_processor
-                    .process_result(&result, &parent_context)
-            }
-            FederationTaskStatus::Failed => {
-                self.result_processor
-                    .process_failure(&result, &parent_context)
-            }
+            FederationTaskStatus::Completed | FederationTaskStatus::Partial => self
+                .result_processor
+                .process_result(&result, &parent_context),
+            FederationTaskStatus::Failed => self
+                .result_processor
+                .process_failure(&result, &parent_context),
         }
     }
 
@@ -1359,7 +1342,8 @@ impl FederationService {
 
         // Auto-connect cerebrates from config
         for cc in &self.config.cerebrates {
-            self.register_cerebrate(&cc.id, &cc.display_name, &cc.url).await;
+            self.register_cerebrate(&cc.id, &cc.display_name, &cc.url)
+                .await;
             if let Some(status) = self.get_cerebrate(&cc.id).await {
                 // Apply config to the status
                 let mut cerebrates = self.cerebrates.write().await;
@@ -1383,7 +1367,7 @@ impl FederationService {
             let service = Arc::clone(self);
             let mut shutdown_rx = tx.subscribe();
             let interval_secs = self.config.heartbeat_interval_secs;
-            tokio::spawn(async move {
+            supervise("federation_heartbeat_monitor", async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
                 interval.tick().await; // skip immediate tick
                 loop {
@@ -1406,7 +1390,7 @@ impl FederationService {
             let mut shutdown_rx = tx.subscribe();
             let orphan_timeout = self.config.task_orphan_timeout_secs;
             if orphan_timeout > 0 {
-                tokio::spawn(async move {
+                supervise("federation_orphan_detector", async move {
                     // Check every 60s or orphan_timeout/10, whichever is larger
                     let check_interval = (orphan_timeout / 10).max(60);
                     let mut interval = tokio::time::interval(Duration::from_secs(check_interval));
@@ -1432,7 +1416,7 @@ impl FederationService {
             let mut shutdown_rx = tx.subscribe();
             let stall_timeout = self.config.stall_timeout_secs;
             if stall_timeout > 0 {
-                tokio::spawn(async move {
+                supervise("federation_stall_detector", async move {
                     let check_interval = (stall_timeout / 6).max(30);
                     let mut interval = tokio::time::interval(Duration::from_secs(check_interval));
                     interval.tick().await;
@@ -1488,7 +1472,9 @@ impl FederationService {
                 && status.connection_state == ConnectionState::Unreachable
             {
                 // Check how long since last activity on this task
-                let activity_time = last_activity.get(task_id).copied()
+                let activity_time = last_activity
+                    .get(task_id)
+                    .copied()
                     .or(status.last_heartbeat_at)
                     .unwrap_or(now);
                 let elapsed = (now - activity_time).num_seconds().unsigned_abs();
@@ -1557,7 +1543,7 @@ impl FederationService {
             slot.as_ref().map(|tx| tx.subscribe())
         };
 
-        tokio::spawn(async move {
+        supervise("federation_reconnect_loop", async move {
             let initial_delay = Duration::from_secs(5);
             let max_delay = Duration::from_secs(300);
             let factor = 2u32;
@@ -1843,7 +1829,10 @@ mod tests {
 
         let reactions = svc.handle_result(result, ctx).await;
         assert_eq!(reactions.len(), 1);
-        assert!(matches!(reactions[0], FederationReaction::UpdateGoalProgress { .. }));
+        assert!(matches!(
+            reactions[0],
+            FederationReaction::UpdateGoalProgress { .. }
+        ));
 
         // Task should be removed from in-flight
         assert_eq!(svc.in_flight_count().await, 0);
@@ -2036,10 +2025,7 @@ mod tests {
         // Set last activity to 2 seconds ago
         {
             let mut activity = svc.last_activity.write().await;
-            activity.insert(
-                task_id,
-                chrono::Utc::now() - chrono::Duration::seconds(2),
-            );
+            activity.insert(task_id, chrono::Utc::now() - chrono::Duration::seconds(2));
         }
 
         let mut rx = event_bus.subscribe();
@@ -2072,14 +2058,18 @@ mod tests {
         // Small delay to ensure timestamp differs
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        svc.handle_progress(task_id, "c1", "building", 50.0, "Half done").await;
+        svc.handle_progress(task_id, "c1", "building", 50.0, "Half done")
+            .await;
 
         let after = {
             let activity = svc.last_activity.read().await;
             activity.get(&task_id).copied().unwrap()
         };
 
-        assert!(after > before, "Progress should update last_activity timestamp");
+        assert!(
+            after > before,
+            "Progress should update last_activity timestamp"
+        );
     }
 
     #[tokio::test]

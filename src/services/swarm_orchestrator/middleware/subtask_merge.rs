@@ -12,11 +12,9 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
-use crate::services::{
-    IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
-};
+use crate::services::{IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig};
 
-use super::super::helpers::{merge_subtask_into_feature_branch, MergeBackOutcome};
+use super::super::helpers::{MergeBackOutcome, merge_subtask_into_feature_branch};
 use super::{PostCompletionContext, PostCompletionMiddleware};
 
 pub struct SubtaskMergeBackMiddleware;
@@ -72,8 +70,7 @@ impl PostCompletionMiddleware for SubtaskMergeBackMiddleware {
                 .get("original_subtask_id")
                 .and_then(|v| v.as_str())
                 && let Ok(original_id) = Uuid::parse_str(original_subtask_id_str)
-                && let Ok(Some(mut original_wt)) =
-                    ctx.worktree_repo.get_by_task(original_id).await
+                && let Ok(Some(mut original_wt)) = ctx.worktree_repo.get_by_task(original_id).await
             {
                 original_wt.merged("conflict-resolved-by-specialist".to_string());
                 let _ = ctx.worktree_repo.update(&original_wt).await;
@@ -94,11 +91,7 @@ impl PostCompletionMiddleware for SubtaskMergeBackMiddleware {
                     VerifierConfig::default(),
                 );
                 let merge_config = MergeQueueConfig {
-                    repo_path: ctx
-                        .repo_path
-                        .to_str()
-                        .unwrap_or(".")
-                        .to_string(),
+                    repo_path: ctx.repo_path.to_str().unwrap_or(".").to_string(),
                     main_branch: ctx.default_base_ref.clone(),
                     ..Default::default()
                 };
@@ -109,9 +102,7 @@ impl PostCompletionMiddleware for SubtaskMergeBackMiddleware {
                     merge_config,
                     mr_repo.clone(),
                 );
-                if let Ok(true) =
-                    merge_queue.retry_after_conflict_resolution(mr_id).await
-                {
+                if let Ok(true) = merge_queue.retry_after_conflict_resolution(mr_id).await {
                     match merge_queue.process_next().await {
                         Ok(Some(result)) if result.success => {
                             tracing::info!(task_id = %task_id, "merge succeeded after conflict resolution");

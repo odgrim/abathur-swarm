@@ -304,7 +304,9 @@ impl AgentTemplate {
 
     /// Check if agent can hand off to another agent.
     pub fn can_handoff_to(&self, target: &str) -> bool {
-        self.agent_card.handoff_targets.contains(&target.to_string())
+        self.agent_card
+            .handoff_targets
+            .contains(&target.to_string())
     }
 
     /// Check if agent has a specific capability.
@@ -460,8 +462,7 @@ mod tests {
         let template = AgentTemplate::new("", AgentTier::Worker);
         assert!(template.validate().is_err());
 
-        let template = AgentTemplate::new("valid", AgentTier::Worker)
-            .with_prompt(""); // Empty prompt
+        let template = AgentTemplate::new("valid", AgentTier::Worker).with_prompt(""); // Empty prompt
         assert!(template.validate().is_err());
     }
 

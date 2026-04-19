@@ -1,7 +1,7 @@
 //! SQLite database connection pool management.
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -36,7 +36,10 @@ impl Default for PoolConfig {
     }
 }
 
-pub async fn create_pool(database_url: &str, config: Option<PoolConfig>) -> Result<SqlitePool, ConnectionError> {
+pub async fn create_pool(
+    database_url: &str,
+    config: Option<PoolConfig>,
+) -> Result<SqlitePool, ConnectionError> {
     let config = config.unwrap_or_default();
     ensure_database_directory(database_url)?;
 
@@ -89,9 +92,11 @@ fn ensure_database_directory(database_url: &str) -> Result<(), ConnectionError> 
 
     let path = Path::new(path);
     if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(ConnectionError::DirectoryCreationFailed)?;
-        }
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(ConnectionError::DirectoryCreationFailed)?;
+    }
     Ok(())
 }
 
@@ -131,6 +136,9 @@ fn enforce_database_permissions(database_url: &str) {
 }
 
 pub async fn verify_connection(pool: &SqlitePool) -> Result<(), ConnectionError> {
-    sqlx::query("SELECT 1").fetch_one(pool).await.map_err(ConnectionError::ConnectionFailed)?;
+    sqlx::query("SELECT 1")
+        .fetch_one(pool)
+        .await
+        .map_err(ConnectionError::ConnectionFailed)?;
     Ok(())
 }

@@ -357,10 +357,11 @@ mod tests {
 
         assert_eq!(evo.amendments.len(), 1);
         assert!(evo.effective.content.contains("handle timeout errors"));
-        assert!(evo
-            .effective
-            .key_requirements
-            .contains(&"handle timeout errors".to_string()));
+        assert!(
+            evo.effective
+                .key_requirements
+                .contains(&"handle timeout errors".to_string())
+        );
     }
 
     #[test]
@@ -386,10 +387,7 @@ mod tests {
 
         assert_eq!(evo.amendments.len(), 3);
         assert_eq!(evo.effective.key_requirements, vec!["support pagination"]);
-        assert_eq!(
-            evo.effective.constraints,
-            vec!["rate limit to 100 req/s"]
-        );
+        assert_eq!(evo.effective.constraints, vec!["rate limit to 100 req/s"]);
         assert_eq!(
             evo.effective.success_criteria,
             vec!["404 for missing resources"]

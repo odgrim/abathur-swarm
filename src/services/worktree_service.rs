@@ -53,7 +53,13 @@ pub struct WorktreeStats {
 
 impl WorktreeStats {
     pub fn total(&self) -> u64 {
-        self.creating + self.active + self.completed + self.merging + self.merged + self.failed + self.removed
+        self.creating
+            + self.active
+            + self.completed
+            + self.merging
+            + self.merged
+            + self.failed
+            + self.removed
     }
 
     pub fn active_count(&self) -> u64 {
@@ -115,16 +121,21 @@ impl<W: WorktreeRepository> WorktreeService<W> {
     ) -> DomainResult<Worktree> {
         // Check if worktree already exists for this task
         if let Some(existing) = self.repo.get_by_task(task_id).await?
-            && !existing.status.is_terminal() {
-                return Err(DomainError::ValidationFailed(
-                    format!("Worktree already exists for task {}", task_id)
-                ));
-            }
+            && !existing.status.is_terminal()
+        {
+            return Err(DomainError::ValidationFailed(format!(
+                "Worktree already exists for task {}",
+                task_id
+            )));
+        }
 
         let base = base_ref.unwrap_or(&self.config.default_base_ref);
         let branch = Worktree::branch_name_for_task(task_id);
         let path = Worktree::path_for_task(
-            self.config.base_path.to_str().unwrap_or(".abathur/worktrees"),
+            self.config
+                .base_path
+                .to_str()
+                .unwrap_or(".abathur/worktrees"),
             task_id,
         );
 
@@ -140,7 +151,10 @@ impl<W: WorktreeRepository> WorktreeService<W> {
                 let mut last = self.last_fetch.lock().await;
                 match *last {
                     Some(t) if t.elapsed().as_secs() < 10 => false,
-                    _ => { *last = Some(std::time::Instant::now()); true }
+                    _ => {
+                        *last = Some(std::time::Instant::now());
+                        true
+                    }
                 }
             };
             if should_fetch {
@@ -153,7 +167,10 @@ impl<W: WorktreeRepository> WorktreeService<W> {
                     .await
                 {
                     Ok(o) if o.status.success() => {
-                        tracing::debug!(base_ref = base, "fetched latest remote state before worktree creation");
+                        tracing::debug!(
+                            base_ref = base,
+                            "fetched latest remote state before worktree creation"
+                        );
                         true
                     }
                     Ok(o) => {
@@ -190,7 +207,10 @@ impl<W: WorktreeRepository> WorktreeService<W> {
         self.repo.create(&worktree).await?;
 
         // Actually create the git worktree
-        match self.git_create_worktree(&path, &branch, &effective_base).await {
+        match self
+            .git_create_worktree(&path, &branch, &effective_base)
+            .await
+        {
             Ok(()) => {
                 worktree.activate();
                 self.repo.update(&worktree).await?;
@@ -221,10 +241,9 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 
     /// Mark worktree as completed (work finished, ready for merge).
     pub async fn complete_worktree(&self, task_id: Uuid) -> DomainResult<Worktree> {
-        let mut worktree = self.repo.get_by_task(task_id).await?
-            .ok_or_else(|| DomainError::ValidationFailed(
-                format!("No worktree found for task {}", task_id)
-            ))?;
+        let mut worktree = self.repo.get_by_task(task_id).await?.ok_or_else(|| {
+            DomainError::ValidationFailed(format!("No worktree found for task {}", task_id))
+        })?;
 
         if worktree.status != WorktreeStatus::Active {
             return Err(DomainError::InvalidStateTransition {
@@ -241,10 +260,9 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 
     /// Merge a completed worktree back to the base branch.
     pub async fn merge_worktree(&self, task_id: Uuid) -> DomainResult<Worktree> {
-        let mut worktree = self.repo.get_by_task(task_id).await?
-            .ok_or_else(|| DomainError::ValidationFailed(
-                format!("No worktree found for task {}", task_id)
-            ))?;
+        let mut worktree = self.repo.get_by_task(task_id).await?.ok_or_else(|| {
+            DomainError::ValidationFailed(format!("No worktree found for task {}", task_id))
+        })?;
 
         if worktree.status != WorktreeStatus::Completed {
             return Err(DomainError::InvalidStateTransition {
@@ -257,7 +275,10 @@ impl<W: WorktreeRepository> WorktreeService<W> {
         worktree.start_merge();
         self.repo.update(&worktree).await?;
 
-        match self.git_merge_branch(&worktree.branch, &worktree.base_ref).await {
+        match self
+            .git_merge_branch(&worktree.branch, &worktree.base_ref)
+            .await
+        {
             Ok(commit_sha) => {
                 worktree.merged(commit_sha);
                 self.repo.update(&worktree).await?;
@@ -279,15 +300,17 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 
     /// Cleanup a worktree (remove from filesystem and delete branch).
     pub async fn cleanup_worktree(&self, id: Uuid) -> DomainResult<()> {
-        let mut worktree = self.repo.get(id).await?
-            .ok_or_else(|| DomainError::ValidationFailed(
-                format!("Worktree {} not found", id)
-            ))?;
+        let mut worktree =
+            self.repo.get(id).await?.ok_or_else(|| {
+                DomainError::ValidationFailed(format!("Worktree {} not found", id))
+            })?;
 
         if !worktree.can_cleanup() {
-            return Err(DomainError::ValidationFailed(
-                format!("Worktree {} cannot be cleaned up in state {}", id, worktree.status.as_str())
-            ));
+            return Err(DomainError::ValidationFailed(format!(
+                "Worktree {} cannot be cleaned up in state {}",
+                id,
+                worktree.status.as_str()
+            )));
         }
 
         // Remove git worktree
@@ -297,9 +320,10 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 
         // Delete branch if merged
         if worktree.status == WorktreeStatus::Merged
-            && let Err(e) = self.git_delete_branch(&worktree.branch).await {
-                tracing::warn!("Failed to delete branch: {}", e);
-            }
+            && let Err(e) = self.git_delete_branch(&worktree.branch).await
+        {
+            tracing::warn!("Failed to delete branch: {}", e);
+        }
 
         worktree.remove();
         self.repo.update(&worktree).await?;
@@ -338,10 +362,9 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 
     /// Mark a worktree as failed.
     pub async fn fail_worktree(&self, task_id: Uuid, error: &str) -> DomainResult<Worktree> {
-        let mut worktree = self.repo.get_by_task(task_id).await?
-            .ok_or_else(|| DomainError::ValidationFailed(
-                format!("No worktree found for task {}", task_id)
-            ))?;
+        let mut worktree = self.repo.get_by_task(task_id).await?.ok_or_else(|| {
+            DomainError::ValidationFailed(format!("No worktree found for task {}", task_id))
+        })?;
 
         worktree.fail(error);
         self.repo.update(&worktree).await?;
@@ -425,12 +448,21 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 
     // Git operations
 
-    async fn git_create_worktree(&self, path: &str, branch: &str, base_ref: &str) -> DomainResult<()> {
+    async fn git_create_worktree(
+        &self,
+        path: &str,
+        branch: &str,
+        base_ref: &str,
+    ) -> DomainResult<()> {
         // Ensure base directory exists
         let full_path = self.config.repo_path.join(path);
         if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent).await
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to create directory: {}", e)))?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                DomainError::ExternalServiceError {
+                    service: "filesystem".to_string(),
+                    reason: format!("Failed to create directory: {}", e),
+                }
+            })?;
         }
 
         // Create worktree with new branch
@@ -441,11 +473,17 @@ impl<W: WorktreeRepository> WorktreeService<W> {
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("Failed to run git: {}", e),
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git worktree add failed: {}", stderr)));
+            return Err(DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("Git worktree add failed: {}", stderr),
+            });
         }
 
         Ok(())
@@ -459,11 +497,17 @@ impl<W: WorktreeRepository> WorktreeService<W> {
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("Failed to run git: {}", e),
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git worktree remove failed: {}", stderr)));
+            return Err(DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("Git worktree remove failed: {}", stderr),
+            });
         }
 
         Ok(())
@@ -482,18 +526,30 @@ impl<W: WorktreeRepository> WorktreeService<W> {
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("git merge-tree failed to run: {}", e)))?;
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("git merge-tree failed to run: {}", e),
+            })?;
 
         if !merge_tree.status.success() {
             let stdout = String::from_utf8_lossy(&merge_tree.stdout);
             let stderr = String::from_utf8_lossy(&merge_tree.stderr);
-            return Err(DomainError::ValidationFailed(
-                format!("Git merge failed (conflicts or error): {}{}", stdout.trim(), stderr.trim())
-            ));
+            return Err(DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!(
+                    "Git merge failed (conflicts or error): {}{}",
+                    stdout.trim(),
+                    stderr.trim()
+                ),
+            });
         }
 
         let tree_sha = String::from_utf8_lossy(&merge_tree.stdout)
-            .lines().next().unwrap_or("").trim().to_string();
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
 
         // Resolve parent commit SHAs
         let target_sha = {
@@ -504,7 +560,10 @@ impl<W: WorktreeRepository> WorktreeService<W> {
                 .stderr(Stdio::piped())
                 .output()
                 .await
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to rev-parse {}: {}", target, e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("Failed to rev-parse {}: {}", target, e),
+                })?;
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
 
@@ -516,41 +575,70 @@ impl<W: WorktreeRepository> WorktreeService<W> {
                 .stderr(Stdio::piped())
                 .output()
                 .await
-                .map_err(|e| DomainError::ValidationFailed(format!("Failed to rev-parse {}: {}", branch, e)))?;
+                .map_err(|e| DomainError::ExternalServiceError {
+                    service: "git".to_string(),
+                    reason: format!("Failed to rev-parse {}: {}", branch, e),
+                })?;
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
 
         // Create merge commit from the tree
         let merge_msg = format!("Merge {} into {}", branch, target);
         let commit = Command::new("git")
-            .args(["commit-tree", &tree_sha, "-p", &target_sha, "-p", &source_sha, "-m", &merge_msg])
+            .args([
+                "commit-tree",
+                &tree_sha,
+                "-p",
+                &target_sha,
+                "-p",
+                &source_sha,
+                "-m",
+                &merge_msg,
+            ])
             .current_dir(&self.config.repo_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("git commit-tree failed: {}", e)))?;
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("git commit-tree failed: {}", e),
+            })?;
 
         if !commit.status.success() {
             let stderr = String::from_utf8_lossy(&commit.stderr);
-            return Err(DomainError::ValidationFailed(format!("git commit-tree: {}", stderr)));
+            return Err(DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("git commit-tree: {}", stderr),
+            });
         }
 
         let commit_sha = String::from_utf8_lossy(&commit.stdout).trim().to_string();
 
         // Atomically update the branch ref (CAS prevents races)
         let update = Command::new("git")
-            .args(["update-ref", &format!("refs/heads/{}", target), &commit_sha, &target_sha])
+            .args([
+                "update-ref",
+                &format!("refs/heads/{}", target),
+                &commit_sha,
+                &target_sha,
+            ])
             .current_dir(&self.config.repo_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("git update-ref failed: {}", e)))?;
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("git update-ref failed: {}", e),
+            })?;
 
         if !update.status.success() {
             let stderr = String::from_utf8_lossy(&update.stderr);
-            return Err(DomainError::ValidationFailed(format!("git update-ref: {}", stderr)));
+            return Err(DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("git update-ref: {}", stderr),
+            });
         }
 
         // Sync main worktree to match the updated branch tip
@@ -573,11 +661,17 @@ impl<W: WorktreeRepository> WorktreeService<W> {
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("Failed to run git: {}", e),
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git branch delete failed: {}", stderr)));
+            return Err(DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("Git branch delete failed: {}", stderr),
+            });
         }
 
         Ok(())
@@ -598,11 +692,17 @@ impl<W: WorktreeRepository> WorktreeService<W> {
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("Failed to run git: {}", e),
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git worktree list failed: {}", stderr)));
+            return Err(DomainError::ExternalServiceError {
+                service: "git".to_string(),
+                reason: format!("Git worktree list failed: {}", stderr),
+            });
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -621,7 +721,12 @@ impl<W: WorktreeRepository> WorktreeService<W> {
         let marked_active = 0u64;
 
         for mut wt in active {
-            let full_path = self.config.repo_path.join(&wt.path).to_string_lossy().to_string();
+            let full_path = self
+                .config
+                .repo_path
+                .join(&wt.path)
+                .to_string_lossy()
+                .to_string();
             if !fs_paths.contains(&full_path) && !fs_paths.contains(&wt.path) {
                 // Worktree in DB but not on filesystem
                 wt.remove();
@@ -637,7 +742,7 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_migrated_test_pool, SqliteWorktreeRepository};
+    use crate::adapters::sqlite::{SqliteWorktreeRepository, create_migrated_test_pool};
 
     async fn setup_service() -> WorktreeService<SqliteWorktreeRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
@@ -660,28 +765,39 @@ mod tests {
             repo_path: std::env::current_dir().unwrap(),
             ..Default::default()
         };
-        let repo = Arc::new(
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(async {
-                    let pool = crate::adapters::sqlite::create_migrated_test_pool().await.unwrap();
-                    crate::adapters::sqlite::SqliteWorktreeRepository::new(pool)
-                }),
-        );
+        let repo = Arc::new(tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let pool = crate::adapters::sqlite::create_migrated_test_pool()
+                .await
+                .unwrap();
+            crate::adapters::sqlite::SqliteWorktreeRepository::new(pool)
+        }));
         let service = WorktreeService::new(repo, config);
 
         // Path with ".." should be rejected
         let result = service.validate_worktree_path("../../etc/passwd");
-        assert!(result.is_err(), "Path traversal with '..' should be rejected");
+        assert!(
+            result.is_err(),
+            "Path traversal with '..' should be rejected"
+        );
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Path traversal"), "Error should mention path traversal: {err_msg}");
+        assert!(
+            err_msg.contains("Path traversal"),
+            "Error should mention path traversal: {err_msg}"
+        );
 
         // Absolute path outside base should be rejected
         let result = service.validate_worktree_path("/tmp/evil");
-        assert!(result.is_err(), "Absolute path outside base should be rejected");
+        assert!(
+            result.is_err(),
+            "Absolute path outside base should be rejected"
+        );
 
         // Valid relative path under base should be accepted
         let result = service.validate_worktree_path(".abathur/worktrees/task-abc123");
-        assert!(result.is_ok(), "Valid path under base should be accepted: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Valid path under base should be accepted: {:?}",
+            result.err()
+        );
     }
 }

@@ -4,12 +4,12 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
-use crate::adapters::sqlite::{initialize_default_database, SqliteEventRepository};
-use crate::cli::id_resolver::resolve_dlq_id;
+use crate::adapters::sqlite::{SqliteEventRepository, initialize_default_database};
 use crate::cli::display::{
-    action_success, list_table, output, render_list, short_id, truncate_ellipsis, CommandOutput,
-    DetailView,
+    CommandOutput, DetailView, action_success, list_table, output, render_list, short_id,
+    truncate_ellipsis,
 };
+use crate::cli::id_resolver::resolve_dlq_id;
 use crate::services::event_store::{EventQuery, EventStore};
 
 #[derive(Args, Debug)]
@@ -86,9 +86,13 @@ impl CommandOutput for EventStatsOutput {
     fn to_human(&self) -> String {
         let mut view = DetailView::new("Event Store Statistics")
             .field("Total Events", &self.total_events.to_string())
-            .field("Latest Seq", &self.latest_sequence
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "-".to_string()));
+            .field(
+                "Latest Seq",
+                &self
+                    .latest_sequence
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            );
 
         if let Some(ref oldest) = self.oldest_event {
             view = view.field("Oldest", oldest);
@@ -254,7 +258,10 @@ pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
-    let store = Arc::new(SqliteEventRepository::new(pool.clone(), crate::services::crypto::load_encryptor_from_env()));
+    let store = Arc::new(SqliteEventRepository::new(
+        pool.clone(),
+        crate::services::crypto::load_encryptor_from_env(),
+    ));
 
     match args.command {
         EventCommands::Stats => {

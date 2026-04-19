@@ -29,7 +29,11 @@ pub trait AgentRepository: Send + Sync {
     async fn get_template_by_name(&self, name: &str) -> DomainResult<Option<AgentTemplate>>;
 
     /// Get a specific version of an agent template.
-    async fn get_template_version(&self, name: &str, version: u32) -> DomainResult<Option<AgentTemplate>>;
+    async fn get_template_version(
+        &self,
+        name: &str,
+        version: u32,
+    ) -> DomainResult<Option<AgentTemplate>>;
 
     /// Update an agent template.
     async fn update_template(&self, template: &AgentTemplate) -> DomainResult<()>;
@@ -61,11 +65,16 @@ pub trait AgentRepository: Send + Sync {
     async fn delete_instance(&self, id: Uuid) -> DomainResult<()>;
 
     /// List instances by status.
-    async fn list_instances_by_status(&self, status: InstanceStatus) -> DomainResult<Vec<AgentInstance>>;
+    async fn list_instances_by_status(
+        &self,
+        status: InstanceStatus,
+    ) -> DomainResult<Vec<AgentInstance>>;
 
     /// Get running instances for a template.
     async fn get_running_instances(&self, template_name: &str) -> DomainResult<Vec<AgentInstance>>;
 
     /// Count running instances by template.
-    async fn count_running_by_template(&self) -> DomainResult<std::collections::HashMap<String, u32>>;
+    async fn count_running_by_template(
+        &self,
+    ) -> DomainResult<std::collections::HashMap<String, u32>>;
 }

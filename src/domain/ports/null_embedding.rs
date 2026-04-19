@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 
-use crate::domain::errors::DomainResult;
 use super::embedding::{EmbeddingInput, EmbeddingOutput, EmbeddingProvider};
+use crate::domain::errors::DomainResult;
 
 /// A no-op embedding provider that returns empty vectors.
 #[derive(Debug, Clone, Default)]

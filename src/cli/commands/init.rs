@@ -5,11 +5,11 @@ use clap::Args;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use crate::ABATHUR_ALLOWED_TOOLS;
 use crate::adapters::sqlite::initialize_database;
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::output::{CommandOutput, output};
 use crate::domain::models::workflow_template::DEFAULT_WORKFLOW_YAMLS;
 use crate::services::config::Config;
-use crate::ABATHUR_ALLOWED_TOOLS;
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
@@ -73,7 +73,9 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     let target_path = if args.path.is_absolute() {
         args.path.clone()
     } else {
-        std::env::current_dir().context("Failed to get current directory")?.join(&args.path)
+        std::env::current_dir()
+            .context("Failed to get current directory")?
+            .join(&args.path)
     };
 
     let abathur_dir = target_path.join(".abathur");
@@ -97,7 +99,9 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
 
     // If forcing, remove existing
     if args.force && abathur_dir.exists() {
-        fs::remove_dir_all(&abathur_dir).await.context("Failed to remove existing .abathur directory")?;
+        fs::remove_dir_all(&abathur_dir)
+            .await
+            .context("Failed to remove existing .abathur directory")?;
     }
 
     let mut directories_created = vec![];
@@ -112,8 +116,14 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
 
     for dir in &dirs {
         if !dir.exists() {
-            fs::create_dir_all(dir).await.with_context(|| format!("Failed to create {:?}", dir))?;
-            let relative = dir.strip_prefix(&target_path).unwrap_or(dir).to_string_lossy().to_string();
+            fs::create_dir_all(dir)
+                .await
+                .with_context(|| format!("Failed to create {:?}", dir))?;
+            let relative = dir
+                .strip_prefix(&target_path)
+                .unwrap_or(dir)
+                .to_string_lossy()
+                .to_string();
             directories_created.push(relative);
         }
     }
@@ -121,16 +131,21 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     // Initialize database
     let db_path = abathur_dir.join("abathur.db");
     let db_url = format!("sqlite:{}", db_path.display());
-    initialize_database(&db_url).await.context("Failed to initialize database")?;
+    initialize_database(&db_url)
+        .await
+        .context("Failed to initialize database")?;
 
     // Merge abathur MCP config into .claude/settings.json
-    merge_claude_settings(&target_path).await.context("Failed to merge .claude/settings.json")?;
+    merge_claude_settings(&target_path)
+        .await
+        .context("Failed to merge .claude/settings.json")?;
 
     // Scaffold default workflow YAMLs (skip any that already exist).
     let workflows_subdir = Config::default().workflows_dir;
     let workflows_dir = target_path.join(&workflows_subdir);
     let (workflows_written, workflows_skipped) =
-        scaffold_default_workflows(&workflows_dir).await
+        scaffold_default_workflows(&workflows_dir)
+            .await
             .with_context(|| format!("Failed to scaffold workflows in {:?}", workflows_dir))?;
     for wf in &workflows_skipped {
         tracing::info!(workflow = %wf, "skipped existing workflow file");
@@ -158,7 +173,8 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
 /// Write each embedded default workflow YAML into `dir` unless a file with the
 /// same name is already there. Returns `(written, skipped)` filenames.
 async fn scaffold_default_workflows(dir: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    fs::create_dir_all(dir).await
+    fs::create_dir_all(dir)
+        .await
         .with_context(|| format!("Failed to create workflows directory {:?}", dir))?;
 
     let mut written = Vec::new();
@@ -170,13 +186,13 @@ async fn scaffold_default_workflows(dir: &Path) -> Result<(Vec<String>, Vec<Stri
             skipped.push(filename);
             continue;
         }
-        fs::write(&path, contents).await
+        fs::write(&path, contents)
+            .await
             .with_context(|| format!("Failed to write {:?}", path))?;
         written.push(filename);
     }
     Ok((written, skipped))
 }
-
 
 async fn merge_claude_settings(target_path: &Path) -> Result<()> {
     let settings_path = target_path.join(".claude").join("settings.json");
@@ -189,7 +205,9 @@ async fn merge_claude_settings(target_path: &Path) -> Result<()> {
         serde_json::json!({})
     };
 
-    let map = settings.as_object_mut().expect("settings must be an object");
+    let map = settings
+        .as_object_mut()
+        .expect("settings must be an object");
 
     // Merge mcpServers
     let servers = map
@@ -230,4 +248,3 @@ async fn merge_claude_settings(target_path: &Path) -> Result<()> {
     fs::write(&settings_path, format!("{content}\n")).await?;
     Ok(())
 }
-

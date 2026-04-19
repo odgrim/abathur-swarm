@@ -5,10 +5,11 @@
 //! state, and emits lifecycle events.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+#[cfg(test)]
 use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -19,9 +20,11 @@ use crate::domain::models::goal_federation::{
     ConvergenceSignalSnapshot, FederatedGoal, FederatedGoalState, TaskStatusSummary,
 };
 use crate::domain::ports::FederatedGoalRepository;
+use crate::services::clock::{DynClock, system_clock};
 use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory;
 use crate::services::federation::service::FederationService;
+use crate::services::supervise;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -80,6 +83,7 @@ pub struct ConvergencePollingDaemon {
     stop_flag: Arc<AtomicBool>,
     /// Per-goal consecutive miss counters.
     miss_counters: Arc<RwLock<HashMap<Uuid, u32>>>,
+    clock: DynClock,
 }
 
 impl ConvergencePollingDaemon {
@@ -99,7 +103,14 @@ impl ConvergencePollingDaemon {
             config,
             stop_flag: Arc::new(AtomicBool::new(false)),
             miss_counters: Arc::new(RwLock::new(HashMap::new())),
+            clock: system_clock(),
         }
+    }
+
+    /// Inject a custom clock (for deterministic testing).
+    pub fn with_clock(mut self, clock: DynClock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Get a handle to control the daemon externally.
@@ -112,7 +123,7 @@ impl ConvergencePollingDaemon {
     /// Start the daemon. Spawns a background task and returns immediately.
     pub fn start(self) -> ConvergencePollerHandle {
         let handle = self.handle();
-        tokio::spawn(async move {
+        supervise("convergence_poller", async move {
             self.run_loop().await;
         });
         handle
@@ -212,7 +223,8 @@ impl ConvergencePollingDaemon {
                     error = %e,
                     "A2A poll failed"
                 );
-                self.record_miss(goal, &format!("A2A poll failed: {e}")).await;
+                self.record_miss(goal, &format!("A2A poll failed: {e}"))
+                    .await;
                 return;
             }
         };
@@ -317,7 +329,7 @@ impl ConvergencePollingDaemon {
                 let task_summary = self.extract_task_summary(&data);
 
                 ConvergenceSignalSnapshot {
-                    timestamp: Utc::now(),
+                    timestamp: self.clock.now(),
                     signals,
                     convergence_level,
                     task_summary,
@@ -326,7 +338,7 @@ impl ConvergencePollingDaemon {
             None => {
                 // No convergence data found — return empty snapshot.
                 ConvergenceSignalSnapshot {
-                    timestamp: Utc::now(),
+                    timestamp: self.clock.now(),
                     signals: HashMap::new(),
                     convergence_level: 0.0,
                     task_summary: TaskStatusSummary::default(),
@@ -339,26 +351,14 @@ impl ConvergencePollingDaemon {
     fn extract_task_summary(&self, data: &serde_json::Value) -> TaskStatusSummary {
         if let Some(summary) = data.get("task_summary") {
             TaskStatusSummary {
-                total: summary
-                    .get("total")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
+                total: summary.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 completed: summary
                     .get("completed")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32,
-                failed: summary
-                    .get("failed")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                running: summary
-                    .get("running")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                pending: summary
-                    .get("pending")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
+                failed: summary.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                running: summary.get("running").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                pending: summary.get("pending").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             }
         } else {
             TaskStatusSummary::default()
@@ -366,7 +366,11 @@ impl ConvergencePollingDaemon {
     }
 
     /// Evaluate and apply state transitions based on the convergence snapshot.
-    async fn evaluate_transition(&self, goal: &FederatedGoal, snapshot: &ConvergenceSignalSnapshot) {
+    async fn evaluate_transition(
+        &self,
+        goal: &FederatedGoal,
+        snapshot: &ConvergenceSignalSnapshot,
+    ) {
         let current = goal.state;
 
         // Determine the target state.
@@ -460,11 +464,7 @@ impl ConvergencePollingDaemon {
                 return;
             }
 
-            if let Err(e) = self
-                .federated_goal_repo
-                .update_state(goal.id, next)
-                .await
-            {
+            if let Err(e) = self.federated_goal_repo.update_state(goal.id, next).await {
                 tracing::warn!(goal_id = %goal.id, "Failed to update state: {}", e);
                 return;
             }
@@ -541,11 +541,7 @@ impl ConvergencePollingDaemon {
 
     /// Apply a single valid state transition.
     async fn apply_transition(&self, goal: &FederatedGoal, target: FederatedGoalState) {
-        if let Err(e) = self
-            .federated_goal_repo
-            .update_state(goal.id, target)
-            .await
-        {
+        if let Err(e) = self.federated_goal_repo.update_state(goal.id, target).await {
             tracing::warn!(
                 goal_id = %goal.id,
                 from = goal.state.as_str(),
@@ -587,14 +583,8 @@ impl ConvergencePollingDaemon {
         );
 
         if count >= self.config.max_consecutive_misses {
-            self.transition_to_failed(
-                goal,
-                &format!(
-                    "{} ({} consecutive misses)",
-                    reason, count
-                ),
-            )
-            .await;
+            self.transition_to_failed(goal, &format!("{} ({} consecutive misses)", reason, count))
+                .await;
         }
     }
 
@@ -628,8 +618,8 @@ mod tests {
     use crate::adapters::a2a::client::A2AWireError;
     use crate::domain::errors::{DomainError, DomainResult};
     use crate::domain::models::a2a_protocol::{
-        A2APart, A2AProtocolArtifact, A2AStandardAgentCard, A2AStreamEvent, A2ATask,
-        A2ATaskState, A2ATaskStatus, TaskSendParams,
+        A2APart, A2AProtocolArtifact, A2AStandardAgentCard, A2AStreamEvent, A2ATask, A2ATaskState,
+        A2ATaskStatus, TaskSendParams,
     };
     use crate::domain::models::goal_federation::*;
     use crate::services::event_bus::{EventBus, EventBusConfig, EventPayload};
@@ -666,7 +656,9 @@ mod tests {
     #[async_trait]
     impl A2AClient for MockA2AClient {
         async fn discover(&self, _url: &str) -> Result<A2AStandardAgentCard, A2AWireError> {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::discover called — tests in federation/convergence_poller.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
 
         async fn send_message(
@@ -674,7 +666,9 @@ mod tests {
             _url: &str,
             _params: TaskSendParams,
         ) -> Result<A2ATask, A2AWireError> {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::send_message called — tests in federation/convergence_poller.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
 
         async fn send_streaming(
@@ -685,7 +679,9 @@ mod tests {
             Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
             A2AWireError,
         > {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::send_streaming called — tests in federation/convergence_poller.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
 
         async fn get_task(
@@ -698,7 +694,10 @@ mod tests {
             let response = if responses.len() > 1 {
                 responses.remove(0)
             } else {
-                responses.first().cloned().unwrap_or(Err("no responses".to_string()))
+                responses
+                    .first()
+                    .cloned()
+                    .unwrap_or(Err("no responses".to_string()))
             };
             match response {
                 Ok(task) => Ok(task),
@@ -706,12 +705,10 @@ mod tests {
             }
         }
 
-        async fn cancel_task(
-            &self,
-            _url: &str,
-            _task_id: &str,
-        ) -> Result<A2ATask, A2AWireError> {
-            unimplemented!()
+        async fn cancel_task(&self, _url: &str, _task_id: &str) -> Result<A2ATask, A2AWireError> {
+            unreachable!(
+                "MockA2AClient::cancel_task called — tests in federation/convergence_poller.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
 
         async fn subscribe_to_task(
@@ -722,7 +719,9 @@ mod tests {
             Pin<Box<dyn Stream<Item = Result<A2AStreamEvent, A2AWireError>> + Send>>,
             A2AWireError,
         > {
-            unimplemented!()
+            unreachable!(
+                "MockA2AClient::subscribe_to_task called — tests in federation/convergence_poller.rs only invoke get_task, so reaching this method indicates the code under test changed to call unexpected A2A methods"
+            )
         }
     }
 
@@ -824,7 +823,11 @@ mod tests {
 
     // -- Helpers --------------------------------------------------------------
 
-    fn make_convergence_task(convergence_level: f64, build_passing: bool, test_pass_rate: f64) -> A2ATask {
+    fn make_convergence_task(
+        convergence_level: f64,
+        build_passing: bool,
+        test_pass_rate: f64,
+    ) -> A2ATask {
         A2ATask {
             id: "task-1".to_string(),
             context_id: None,
@@ -880,7 +883,11 @@ mod tests {
     async fn make_daemon_with_goal(
         goal: FederatedGoal,
         client: Arc<dyn A2AClient>,
-    ) -> (ConvergencePollingDaemon, Arc<MockFederatedGoalRepo>, Arc<EventBus>) {
+    ) -> (
+        ConvergencePollingDaemon,
+        Arc<MockFederatedGoalRepo>,
+        Arc<EventBus>,
+    ) {
         let repo = Arc::new(MockFederatedGoalRepo::new(vec![goal]));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let fed_service = make_federation_service();
@@ -942,7 +949,10 @@ mod tests {
                 saw_converged = true;
             }
         }
-        assert!(saw_converged, "Should have emitted FederatedGoalConverged event");
+        assert!(
+            saw_converged,
+            "Should have emitted FederatedGoalConverged event"
+        );
     }
 
     #[tokio::test]
@@ -1219,7 +1229,10 @@ mod tests {
                 saw_progress = true;
             }
         }
-        assert!(saw_progress, "Should have emitted FederatedGoalProgress event");
+        assert!(
+            saw_progress,
+            "Should have emitted FederatedGoalProgress event"
+        );
     }
 
     #[tokio::test]

@@ -8,6 +8,41 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
+use crate::domain::models::workflow_state::WorkflowState;
+
+// ===========================================================================
+// Typed-accessor keys for `Task::context::custom`.
+//
+// These are the sanctioned string keys for frequently-accessed context
+// fields. The `HashMap<String, serde_json::Value>` storage shape is
+// preserved for on-disk compatibility; these constants exist so the
+// string is named exactly once and the accessor methods below enforce
+// the expected value shape.
+//
+// When adding a new frequent key, add the constant here and a matching
+// accessor pair (`fn key()` / `fn set_key()` / `fn clear_key()`) below.
+// Rare one-off keys can stay as direct `context.custom.get(...)` access.
+// ===========================================================================
+
+pub(crate) const KEY_WORKFLOW_STATE: &str = "workflow_state";
+pub(crate) const KEY_WORKFLOW_PHASE: &str = "workflow_phase";
+pub(crate) const KEY_GOAL_ID: &str = "goal_id";
+pub(crate) const KEY_VERIFICATION_IDEMPOTENCY_KEY: &str = "verification_idempotency_key";
+pub(crate) const KEY_VERIFICATION_RETRY_COUNT: &str = "verification_retry_count";
+pub(crate) const KEY_VERIFICATION_FEEDBACK: &str = "verification_feedback";
+pub(crate) const KEY_VERIFICATION_PHASE_CONTEXT: &str = "verification_phase_context";
+pub(crate) const KEY_VERIFICATION_AGGREGATION_SUMMARY: &str = "verification_aggregation_summary";
+pub(crate) const KEY_REVIEW_LOOP_ACTIVE: &str = "review_loop_active";
+pub(crate) const KEY_REVIEW_ITERATION: &str = "review_iteration";
+pub(crate) const KEY_LAST_FAILURE_REASON: &str = "last_failure_reason";
+pub(crate) const KEY_ITERATION: &str = "iteration";
+pub(crate) const KEY_INTENT_GAP_CONTEXT: &str = "intent_gap_context";
+pub(crate) const KEY_GAPS_COUNT: &str = "gaps_count";
+pub(crate) const KEY_GAPS: &str = "gaps";
+pub(crate) const KEY_CONFIDENCE: &str = "confidence";
+pub(crate) const KEY_ACCOMPLISHMENT_SUMMARY: &str = "accomplishment_summary";
+pub(crate) const KEY_SATISFACTION: &str = "satisfaction";
+
 /// Interior-mutable version tag used for optimistic locking.
 ///
 /// Wraps an `AtomicU64` so that the repository `update()` method can sync
@@ -126,7 +161,12 @@ impl TaskStatus {
             Self::Pending => vec![Self::Ready, Self::Blocked, Self::Canceled],
             Self::Ready => vec![Self::Running, Self::Blocked, Self::Canceled],
             Self::Blocked => vec![Self::Ready, Self::Canceled],
-            Self::Running => vec![Self::Validating, Self::Complete, Self::Failed, Self::Canceled],
+            Self::Running => vec![
+                Self::Validating,
+                Self::Complete,
+                Self::Failed,
+                Self::Canceled,
+            ],
             Self::Validating => vec![Self::Running, Self::Complete, Self::Failed, Self::Canceled],
             Self::Complete => vec![],
             Self::Failed => vec![Self::Ready], // Can retry
@@ -715,6 +755,368 @@ impl Task {
         }
         Ok(())
     }
+
+    // =======================================================================
+    // Typed accessors for `context.custom` well-known keys.
+    //
+    // The underlying storage is an untyped `HashMap<String, Value>`; these
+    // wrappers encode the expected shape for each key so callers don't have
+    // to duplicate the `.get(key).and_then(...)` dance. They do NOT change
+    // the on-disk representation.
+    // =======================================================================
+
+    // --- workflow_state: serialized WorkflowState ---------------------------
+
+    /// Read the workflow state from `context.custom`.
+    ///
+    /// Returns `None` if the key is missing or the stored value cannot be
+    /// deserialized into a `WorkflowState` (should not happen for well-formed
+    /// rows).
+    pub fn workflow_state(&self) -> Option<WorkflowState> {
+        self.context
+            .custom
+            .get(KEY_WORKFLOW_STATE)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Whether this task has a `workflow_state` set (without deserializing).
+    pub fn has_workflow_state(&self) -> bool {
+        self.context.custom.contains_key(KEY_WORKFLOW_STATE)
+    }
+
+    /// Write workflow state into `context.custom`. Returns an error only if
+    /// serialization of the given `WorkflowState` fails (which should be
+    /// impossible for well-formed types).
+    pub fn set_workflow_state(&mut self, state: &WorkflowState) -> Result<(), String> {
+        let v = serde_json::to_value(state)
+            .map_err(|e| format!("failed to serialize workflow_state: {}", e))?;
+        self.context
+            .custom
+            .insert(KEY_WORKFLOW_STATE.to_string(), v);
+        Ok(())
+    }
+
+    /// Store a pre-serialized workflow state value. Useful when the caller
+    /// already has a `serde_json::Value` (e.g. from
+    /// `serde_json::to_value(&ws).unwrap_or_default()`).
+    pub fn set_workflow_state_value(&mut self, value: serde_json::Value) {
+        self.context
+            .custom
+            .insert(KEY_WORKFLOW_STATE.to_string(), value);
+    }
+
+    /// Remove the workflow state (e.g. on retry reset).
+    pub fn clear_workflow_state(&mut self) {
+        self.context.custom.remove(KEY_WORKFLOW_STATE);
+    }
+
+    // --- workflow_phase: JSON object with phase metadata --------------------
+
+    /// Whether this task is a workflow phase subtask (has a `workflow_phase`
+    /// metadata blob in `context.custom`).
+    pub fn is_workflow_phase_subtask(&self) -> bool {
+        self.context.custom.contains_key(KEY_WORKFLOW_PHASE)
+    }
+
+    /// Read the raw `workflow_phase` metadata JSON value. The shape is an
+    /// object with `workflow_name`, `phase_index`, `phase_name`, and
+    /// (optionally) slice indexing / aggregation flags.
+    pub fn workflow_phase_value(&self) -> Option<&serde_json::Value> {
+        self.context.custom.get(KEY_WORKFLOW_PHASE)
+    }
+
+    /// Store raw workflow phase metadata.
+    pub fn set_workflow_phase_value(&mut self, value: serde_json::Value) {
+        self.context
+            .custom
+            .insert(KEY_WORKFLOW_PHASE.to_string(), value);
+    }
+
+    // --- goal_id: UUID as JSON string ---------------------------------------
+
+    /// Read the goal ID stored in `context.custom` as a JSON string.
+    /// Returns `None` if the key is missing or the value does not parse as a
+    /// UUID.
+    pub fn goal_id(&self) -> Option<Uuid> {
+        self.context
+            .custom
+            .get(KEY_GOAL_ID)
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    }
+
+    /// Write the goal ID as a JSON string.
+    pub fn set_goal_id(&mut self, id: Uuid) {
+        self.context.custom.insert(
+            KEY_GOAL_ID.to_string(),
+            serde_json::Value::String(id.to_string()),
+        );
+    }
+
+    /// Remove the goal ID from `context.custom`.
+    pub fn clear_goal_id(&mut self) {
+        self.context.custom.remove(KEY_GOAL_ID);
+    }
+
+    // --- verification_idempotency_key: String -------------------------------
+
+    pub fn verification_idempotency_key(&self) -> Option<&str> {
+        self.context
+            .custom
+            .get(KEY_VERIFICATION_IDEMPOTENCY_KEY)
+            .and_then(|v| v.as_str())
+    }
+
+    pub fn set_verification_idempotency_key(&mut self, key: impl Into<String>) {
+        self.context.custom.insert(
+            KEY_VERIFICATION_IDEMPOTENCY_KEY.to_string(),
+            serde_json::Value::String(key.into()),
+        );
+    }
+
+    pub fn clear_verification_idempotency_key(&mut self) {
+        self.context.custom.remove(KEY_VERIFICATION_IDEMPOTENCY_KEY);
+    }
+
+    // --- verification_retry_count: u32 / u64 --------------------------------
+
+    /// Read the verification retry count. Returns `None` if missing.
+    pub fn verification_retry_count(&self) -> Option<u64> {
+        self.context
+            .custom
+            .get(KEY_VERIFICATION_RETRY_COUNT)
+            .and_then(|v| v.as_u64())
+    }
+
+    pub fn set_verification_retry_count(&mut self, count: u64) {
+        self.context.custom.insert(
+            KEY_VERIFICATION_RETRY_COUNT.to_string(),
+            serde_json::json!(count),
+        );
+    }
+
+    pub fn clear_verification_retry_count(&mut self) {
+        self.context.custom.remove(KEY_VERIFICATION_RETRY_COUNT);
+    }
+
+    // --- verification_feedback: JSON passthrough ----------------------------
+
+    /// Store verification feedback as a raw JSON value (shape varies:
+    /// array of strings, object with notes, etc.).
+    pub fn set_verification_feedback(&mut self, value: serde_json::Value) {
+        self.context
+            .custom
+            .insert(KEY_VERIFICATION_FEEDBACK.to_string(), value);
+    }
+
+    pub fn clear_verification_feedback(&mut self) {
+        self.context.custom.remove(KEY_VERIFICATION_FEEDBACK);
+    }
+
+    // --- verification_phase_context: String ---------------------------------
+
+    pub fn set_verification_phase_context(&mut self, context: impl Into<String>) {
+        self.context.custom.insert(
+            KEY_VERIFICATION_PHASE_CONTEXT.to_string(),
+            serde_json::Value::String(context.into()),
+        );
+    }
+
+    pub fn clear_verification_phase_context(&mut self) {
+        self.context.custom.remove(KEY_VERIFICATION_PHASE_CONTEXT);
+    }
+
+    // --- verification_aggregation_summary: JSON passthrough -----------------
+
+    pub fn set_verification_aggregation_summary(&mut self, value: serde_json::Value) {
+        self.context
+            .custom
+            .insert(KEY_VERIFICATION_AGGREGATION_SUMMARY.to_string(), value);
+    }
+
+    pub fn clear_verification_aggregation_summary(&mut self) {
+        self.context
+            .custom
+            .remove(KEY_VERIFICATION_AGGREGATION_SUMMARY);
+    }
+
+    // --- review_loop_active: bool -------------------------------------------
+
+    /// Whether this task's review loop is active (defaults to `false` if
+    /// the key is missing).
+    pub fn review_loop_active(&self) -> bool {
+        self.context
+            .custom
+            .get(KEY_REVIEW_LOOP_ACTIVE)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Whether this task has an explicit `review_loop_active` key (regardless
+    /// of value). Used by handlers that want idempotency.
+    pub fn has_review_loop_active_flag(&self) -> bool {
+        self.context.custom.contains_key(KEY_REVIEW_LOOP_ACTIVE)
+    }
+
+    pub fn set_review_loop_active(&mut self, active: bool) {
+        self.context.custom.insert(
+            KEY_REVIEW_LOOP_ACTIVE.to_string(),
+            serde_json::Value::Bool(active),
+        );
+    }
+
+    // --- review_iteration: u32 / u64 ----------------------------------------
+
+    pub fn review_iteration(&self) -> Option<u64> {
+        self.context
+            .custom
+            .get(KEY_REVIEW_ITERATION)
+            .and_then(|v| v.as_u64())
+    }
+
+    pub fn has_review_iteration(&self) -> bool {
+        self.context.custom.contains_key(KEY_REVIEW_ITERATION)
+    }
+
+    pub fn set_review_iteration(&mut self, iteration: u64) {
+        self.context.custom.insert(
+            KEY_REVIEW_ITERATION.to_string(),
+            serde_json::json!(iteration),
+        );
+    }
+
+    // --- last_failure_reason: String ----------------------------------------
+
+    pub fn last_failure_reason(&self) -> Option<&str> {
+        self.context
+            .custom
+            .get(KEY_LAST_FAILURE_REASON)
+            .and_then(|v| v.as_str())
+    }
+
+    pub fn set_last_failure_reason(&mut self, reason: impl Into<String>) {
+        self.context.custom.insert(
+            KEY_LAST_FAILURE_REASON.to_string(),
+            serde_json::Value::String(reason.into()),
+        );
+    }
+
+    // --- iteration: u64 -----------------------------------------------------
+
+    pub fn iteration(&self) -> Option<u64> {
+        self.context
+            .custom
+            .get(KEY_ITERATION)
+            .and_then(|v| v.as_u64())
+    }
+
+    pub fn set_iteration(&mut self, iteration: u64) {
+        self.context
+            .custom
+            .insert(KEY_ITERATION.to_string(), serde_json::json!(iteration));
+    }
+
+    // --- intent_gap_context: String -----------------------------------------
+
+    pub fn intent_gap_context(&self) -> Option<&str> {
+        self.context
+            .custom
+            .get(KEY_INTENT_GAP_CONTEXT)
+            .and_then(|v| v.as_str())
+    }
+
+    pub fn set_intent_gap_context(&mut self, context: impl Into<String>) {
+        self.context.custom.insert(
+            KEY_INTENT_GAP_CONTEXT.to_string(),
+            serde_json::Value::String(context.into()),
+        );
+    }
+
+    // --- gaps_count: u64 ----------------------------------------------------
+
+    pub fn gaps_count(&self) -> Option<u64> {
+        self.context
+            .custom
+            .get(KEY_GAPS_COUNT)
+            .and_then(|v| v.as_u64())
+    }
+
+    pub fn gaps_count_value(&self) -> Option<&serde_json::Value> {
+        self.context.custom.get(KEY_GAPS_COUNT)
+    }
+
+    pub fn set_gaps_count(&mut self, count: u64) {
+        self.context
+            .custom
+            .insert(KEY_GAPS_COUNT.to_string(), serde_json::json!(count));
+    }
+
+    // --- gaps: JSON array ---------------------------------------------------
+
+    pub fn gaps_value(&self) -> Option<&serde_json::Value> {
+        self.context.custom.get(KEY_GAPS)
+    }
+
+    pub fn set_gaps(&mut self, gaps: serde_json::Value) {
+        self.context.custom.insert(KEY_GAPS.to_string(), gaps);
+    }
+
+    // --- confidence: f64 ----------------------------------------------------
+
+    pub fn confidence_value(&self) -> Option<&serde_json::Value> {
+        self.context.custom.get(KEY_CONFIDENCE)
+    }
+
+    pub fn set_confidence(&mut self, confidence: f64) {
+        self.context
+            .custom
+            .insert(KEY_CONFIDENCE.to_string(), serde_json::json!(confidence));
+    }
+
+    // --- accomplishment_summary: String -------------------------------------
+
+    pub fn accomplishment_summary(&self) -> Option<&str> {
+        self.context
+            .custom
+            .get(KEY_ACCOMPLISHMENT_SUMMARY)
+            .and_then(|v| v.as_str())
+    }
+
+    pub fn accomplishment_summary_value(&self) -> Option<&serde_json::Value> {
+        self.context.custom.get(KEY_ACCOMPLISHMENT_SUMMARY)
+    }
+
+    pub fn set_accomplishment_summary(&mut self, summary: impl Into<String>) {
+        self.context.custom.insert(
+            KEY_ACCOMPLISHMENT_SUMMARY.to_string(),
+            serde_json::Value::String(summary.into()),
+        );
+    }
+
+    // --- satisfaction: String -----------------------------------------------
+
+    pub fn satisfaction(&self) -> Option<&str> {
+        self.context
+            .custom
+            .get(KEY_SATISFACTION)
+            .and_then(|v| v.as_str())
+    }
+
+    pub fn satisfaction_value(&self) -> Option<&serde_json::Value> {
+        self.context.custom.get(KEY_SATISFACTION)
+    }
+
+    pub fn set_satisfaction(&mut self, satisfaction: impl Into<String>) {
+        self.context.custom.insert(
+            KEY_SATISFACTION.to_string(),
+            serde_json::Value::String(satisfaction.into()),
+        );
+    }
+
+    /// Raw `iteration` value (for JSON passthrough).
+    pub fn iteration_value(&self) -> Option<&serde_json::Value> {
+        self.context.custom.get(KEY_ITERATION)
+    }
 }
 
 /// Generate a short title from a prompt string.
@@ -802,8 +1204,7 @@ mod tests {
     #[test]
     fn test_task_dependencies() {
         let dep_id = Uuid::new_v4();
-        let task = Task::new("Test task description")
-            .with_dependency(dep_id);
+        let task = Task::new("Test task description").with_dependency(dep_id);
 
         assert!(task.depends_on.contains(&dep_id));
     }
@@ -928,13 +1329,23 @@ mod tests {
     #[test]
     fn test_valid_transitions_pending() {
         let valid = TaskStatus::Pending.valid_transitions();
-        assert_eq!(valid, vec![TaskStatus::Ready, TaskStatus::Blocked, TaskStatus::Canceled]);
+        assert_eq!(
+            valid,
+            vec![TaskStatus::Ready, TaskStatus::Blocked, TaskStatus::Canceled]
+        );
     }
 
     #[test]
     fn test_valid_transitions_ready() {
         let valid = TaskStatus::Ready.valid_transitions();
-        assert_eq!(valid, vec![TaskStatus::Running, TaskStatus::Blocked, TaskStatus::Canceled]);
+        assert_eq!(
+            valid,
+            vec![
+                TaskStatus::Running,
+                TaskStatus::Blocked,
+                TaskStatus::Canceled
+            ]
+        );
     }
 
     #[test]
@@ -946,19 +1357,38 @@ mod tests {
     #[test]
     fn test_valid_transitions_running() {
         let valid = TaskStatus::Running.valid_transitions();
-        assert_eq!(valid, vec![TaskStatus::Validating, TaskStatus::Complete, TaskStatus::Failed, TaskStatus::Canceled]);
+        assert_eq!(
+            valid,
+            vec![
+                TaskStatus::Validating,
+                TaskStatus::Complete,
+                TaskStatus::Failed,
+                TaskStatus::Canceled
+            ]
+        );
     }
 
     #[test]
     fn test_valid_transitions_validating() {
         let valid = TaskStatus::Validating.valid_transitions();
-        assert_eq!(valid, vec![TaskStatus::Running, TaskStatus::Complete, TaskStatus::Failed, TaskStatus::Canceled]);
+        assert_eq!(
+            valid,
+            vec![
+                TaskStatus::Running,
+                TaskStatus::Complete,
+                TaskStatus::Failed,
+                TaskStatus::Canceled
+            ]
+        );
     }
 
     #[test]
     fn test_valid_transitions_complete() {
         let valid = TaskStatus::Complete.valid_transitions();
-        assert!(valid.is_empty(), "Terminal state Complete should have no valid transitions");
+        assert!(
+            valid.is_empty(),
+            "Terminal state Complete should have no valid transitions"
+        );
     }
 
     #[test]
@@ -970,7 +1400,10 @@ mod tests {
     #[test]
     fn test_valid_transitions_canceled() {
         let valid = TaskStatus::Canceled.valid_transitions();
-        assert!(valid.is_empty(), "Terminal state Canceled should have no valid transitions");
+        assert!(
+            valid.is_empty(),
+            "Terminal state Canceled should have no valid transitions"
+        );
     }
 
     #[test]
@@ -1016,7 +1449,11 @@ mod tests {
             }
         }
         // 64 total pairs - 16 valid = 48 invalid (including self-transitions)
-        assert!(tested_invalid > 40, "Expected at least 40 invalid transitions tested, got {}", tested_invalid);
+        assert!(
+            tested_invalid > 40,
+            "Expected at least 40 invalid transitions tested, got {}",
+            tested_invalid
+        );
     }
 
     #[test]
@@ -1053,8 +1490,17 @@ mod tests {
                 to.as_str(),
                 result.err()
             );
-            assert_eq!(task.status, *to, "Status should be {} after transition", to.as_str());
-            assert_eq!(task.version, initial_version + 1, "Version should increment on transition");
+            assert_eq!(
+                task.status,
+                *to,
+                "Status should be {} after transition",
+                to.as_str()
+            );
+            assert_eq!(
+                task.version,
+                initial_version + 1,
+                "Version should increment on transition"
+            );
         }
     }
 
@@ -1085,7 +1531,11 @@ mod tests {
             if *target == TaskStatus::Ready {
                 assert!(result.is_ok(), "Failed -> Ready should be allowed (retry)");
             } else {
-                assert!(result.is_err(), "Failed -> {} should be rejected", target.as_str());
+                assert!(
+                    result.is_err(),
+                    "Failed -> {} should be rejected",
+                    target.as_str()
+                );
             }
         }
     }
@@ -1111,9 +1561,21 @@ mod tests {
         // Pending cannot go directly to Complete
         let result = task.transition_to(TaskStatus::Complete);
         let err = result.unwrap_err();
-        assert!(err.contains("pending"), "Error should contain from-state 'pending': {}", err);
-        assert!(err.contains("complete"), "Error should contain to-state 'complete': {}", err);
-        assert!(err.contains("ready"), "Error should list valid target 'ready': {}", err);
+        assert!(
+            err.contains("pending"),
+            "Error should contain from-state 'pending': {}",
+            err
+        );
+        assert!(
+            err.contains("complete"),
+            "Error should contain to-state 'complete': {}",
+            err
+        );
+        assert!(
+            err.contains("ready"),
+            "Error should list valid target 'ready': {}",
+            err
+        );
     }
 
     #[test]
@@ -1122,7 +1584,11 @@ mod tests {
         task.status = TaskStatus::Complete;
         let result = task.transition_to(TaskStatus::Running);
         let err = result.unwrap_err();
-        assert!(err.contains("none (terminal state)"), "Error for terminal state should indicate no valid transitions: {}", err);
+        assert!(
+            err.contains("none (terminal state)"),
+            "Error for terminal state should indicate no valid transitions: {}",
+            err
+        );
     }
 
     #[test]
@@ -1198,5 +1664,4 @@ mod tests {
         assert_eq!(format!("{}", TaskStatus::Failed), "failed");
         assert_eq!(format!("{}", TaskStatus::Canceled), "canceled");
     }
-
 }

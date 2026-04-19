@@ -8,14 +8,16 @@ use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{AgentStatus, GoalStatus, SubstrateRequest};
-use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{
+    AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
+};
 use crate::services::{
-    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    EvolutionAction, RefinementRequest,
+    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, EvolutionAction,
+    RefinementRequest,
 };
 
-use super::types::SwarmEvent;
 use super::SwarmOrchestrator;
+use super::types::SwarmEvent;
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
 where
@@ -41,21 +43,25 @@ where
         }
 
         // Log the registration
-        self.audit_log.info(
-            AuditCategory::Agent,
-            AuditAction::AgentSpawned,
-            format!(
-                "Agent '{}' registered with {} capabilities",
-                agent_name, card.capabilities.len()
-            ),
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::Agent,
+                AuditAction::AgentSpawned,
+                format!(
+                    "Agent '{}' registered with {} capabilities",
+                    agent_name,
+                    card.capabilities.len()
+                ),
+            )
+            .await;
 
         // If A2A gateway is configured, register the agent card
         if let Some(ref gateway_url) = self.config.mcp_servers.a2a_gateway {
             let register_url = format!("{}/agents", gateway_url.trim_end_matches('/'));
 
             let client = reqwest::Client::new();
-            match client.post(&register_url)
+            match client
+                .post(&register_url)
                 .json(&card)
                 .timeout(std::time::Duration::from_secs(10))
                 .send()
@@ -63,21 +69,20 @@ where
             {
                 Ok(response) => {
                     if response.status().is_success() {
-                        tracing::debug!(
-                            "Agent '{}' card registered with A2A gateway",
-                            agent_name
-                        );
+                        tracing::debug!("Agent '{}' card registered with A2A gateway", agent_name);
                     } else {
                         tracing::warn!(
                             "A2A gateway returned error status {} when registering agent '{}'",
-                            response.status(), agent_name
+                            response.status(),
+                            agent_name
                         );
                     }
                 }
                 Err(e) => {
                     tracing::warn!(
                         "Failed to register agent '{}' with A2A gateway: {}",
-                        agent_name, e
+                        agent_name,
+                        e
                     );
                     // Don't fail the operation - registration is best-effort
                 }
@@ -93,24 +98,26 @@ where
     pub(super) async fn register_all_agent_templates(&self) -> DomainResult<()> {
         // Get all agent templates from the repository
         use crate::domain::ports::AgentFilter;
-        let templates = self.agent_repo.list_templates(AgentFilter::default()).await?;
+        let templates = self
+            .agent_repo
+            .list_templates(AgentFilter::default())
+            .await?;
 
         if templates.is_empty() {
-            self.audit_log.info(
-                AuditCategory::Agent,
-                AuditAction::AgentSpawned,
-                "No agent templates to register with A2A gateway".to_string(),
-            ).await;
+            self.audit_log
+                .info(
+                    AuditCategory::Agent,
+                    AuditAction::AgentSpawned,
+                    "No agent templates to register with A2A gateway".to_string(),
+                )
+                .await;
             return Ok(());
         }
 
         let mut registered_count = 0;
         for template in templates {
             // Extract capabilities from template tools
-            let capabilities: Vec<String> = template.tools
-                .iter()
-                .map(|t| t.name.clone())
-                .collect();
+            let capabilities: Vec<String> = template.tools.iter().map(|t| t.name.clone()).collect();
 
             // Add default capability if no tools defined
             let capabilities = if capabilities.is_empty() {
@@ -119,19 +126,25 @@ where
                 capabilities
             };
 
-            if self.register_agent_capabilities(&template.name, capabilities).await.is_ok() {
+            if self
+                .register_agent_capabilities(&template.name, capabilities)
+                .await
+                .is_ok()
+            {
                 registered_count += 1;
             }
         }
 
-        self.audit_log.info(
-            AuditCategory::Agent,
-            AuditAction::AgentSpawned,
-            format!(
-                "Registered {} agent templates with A2A gateway at startup",
-                registered_count
-            ),
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::Agent,
+                AuditAction::AgentSpawned,
+                format!(
+                    "Registered {} agent templates with A2A gateway at startup",
+                    registered_count
+                ),
+            )
+            .await;
 
         Ok(())
     }
@@ -140,44 +153,57 @@ where
     ///
     /// Checks for agent templates that need refinement and uses MetaPlanner
     /// to create improved versions based on failure patterns.
-    pub(super) async fn process_evolution_refinements(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+    pub(super) async fn process_evolution_refinements(
+        &self,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
         // First, evaluate all templates to detect any that need refinement
         // This checks success rates, goal violations, and regression patterns
         let evolution_events = self.evolution_loop.evaluate().await;
 
         // Emit events for any evolution triggers detected
         for event in &evolution_events {
-            let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
-                template_name: event.template_name.clone(),
-                trigger: format!("{:?}", event.trigger),
-            }).await;
+            let _ = event_tx
+                .send(SwarmEvent::EvolutionTriggered {
+                    template_name: event.template_name.clone(),
+                    trigger: format!("{:?}", event.trigger),
+                })
+                .await;
 
-            self.audit_log.info(
-                AuditCategory::Agent,
-                AuditAction::AgentSpawned,
-                format!(
-                    "Evolution triggered for '{}': {:?} (success rate: {:.0}%)",
-                    event.template_name,
-                    event.trigger,
-                    event.stats_at_trigger.success_rate * 100.0
-                ),
-            ).await;
+            self.audit_log
+                .info(
+                    AuditCategory::Agent,
+                    AuditAction::AgentSpawned,
+                    format!(
+                        "Evolution triggered for '{}': {:?} (success rate: {:.0}%)",
+                        event.template_name,
+                        event.trigger,
+                        event.stats_at_trigger.success_rate * 100.0
+                    ),
+                )
+                .await;
         }
 
         // Handle revert events — rollback template version by restoring the exact
         // previous version content, disabling the broken version, and re-activating
         // the previous version.
         for event in &evolution_events {
-            if let EvolutionAction::Reverted { from_version, to_version } = &event.action_taken {
+            if let EvolutionAction::Reverted {
+                from_version,
+                to_version,
+            } = &event.action_taken
+            {
                 // Fetch the exact previous version's template content
-                let previous_template = self.agent_repo
+                let previous_template = self
+                    .agent_repo
                     .get_template_version(&event.template_name, *to_version)
                     .await;
 
                 match previous_template {
                     Ok(Some(mut restored)) => {
                         // Disable the broken (current) version
-                        if let Ok(Some(mut broken)) = self.agent_repo
+                        if let Ok(Some(mut broken)) = self
+                            .agent_repo
                             .get_template_version(&event.template_name, *from_version)
                             .await
                         {
@@ -191,15 +217,19 @@ where
                         restored.updated_at = chrono::Utc::now();
 
                         if self.agent_repo.update_template(&restored).await.is_ok() {
-                            self.evolution_loop.record_version_change(
-                                &event.template_name,
-                                *to_version,
-                            ).await;
+                            self.evolution_loop
+                                .record_version_change(&event.template_name, *to_version)
+                                .await;
 
-                            let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
-                                template_name: event.template_name.clone(),
-                                trigger: format!("Reverted from v{} to v{}", from_version, to_version),
-                            }).await;
+                            let _ = event_tx
+                                .send(SwarmEvent::EvolutionTriggered {
+                                    template_name: event.template_name.clone(),
+                                    trigger: format!(
+                                        "Reverted from v{} to v{}",
+                                        from_version, to_version
+                                    ),
+                                })
+                                .await;
 
                             self.audit_log.info(
                                 AuditCategory::Agent,
@@ -213,8 +243,8 @@ where
                     }
                     _ => {
                         // Previous version not found in DB — log and skip
-                        self.audit_log.log(
-                            AuditEntry::new(
+                        self.audit_log
+                            .log(AuditEntry::new(
                                 AuditLevel::Warning,
                                 AuditCategory::Agent,
                                 AuditAction::AgentSpawned,
@@ -223,8 +253,8 @@ where
                                     "Cannot revert agent '{}': version {} not found in repository",
                                     event.template_name, to_version
                                 ),
-                            ),
-                        ).await;
+                            ))
+                            .await;
                     }
                 }
             }
@@ -240,20 +270,28 @@ where
             }
 
             // Log the refinement attempt
-            self.audit_log.info(
-                AuditCategory::Agent,
-                AuditAction::AgentSpawned,
-                format!(
-                    "Processing evolution refinement for '{}': {:?}",
-                    request.template_name, request.severity
-                ),
-            ).await;
+            self.audit_log
+                .info(
+                    AuditCategory::Agent,
+                    AuditAction::AgentSpawned,
+                    format!(
+                        "Processing evolution refinement for '{}': {:?}",
+                        request.template_name, request.severity
+                    ),
+                )
+                .await;
 
             // Get the current agent template
-            let template = match self.agent_repo.get_template_by_name(&request.template_name).await {
+            let template = match self
+                .agent_repo
+                .get_template_by_name(&request.template_name)
+                .await
+            {
                 Ok(Some(t)) => t,
                 _ => {
-                    self.evolution_loop.complete_refinement(request.id, false).await;
+                    self.evolution_loop
+                        .complete_refinement(request.id, false)
+                        .await;
                     continue;
                 }
             };
@@ -289,15 +327,20 @@ where
                 );
 
                 match self.substrate.execute(refinement_request).await {
-                    Ok(session) if session.result.is_some() => {
-                        session.result.unwrap()
-                    }
+                    Ok(session) if session.result.is_some() => session.result.unwrap(),
                     Ok(_) => {
-                        tracing::warn!("LLM refinement returned no result for '{}', falling back to heuristic", request.template_name);
+                        tracing::warn!(
+                            "LLM refinement returned no result for '{}', falling back to heuristic",
+                            request.template_name
+                        );
                         Self::heuristic_refinement_prompt(&template.system_prompt, &request)
                     }
                     Err(e) => {
-                        tracing::warn!("LLM refinement failed for '{}': {}, falling back to heuristic", request.template_name, e);
+                        tracing::warn!(
+                            "LLM refinement failed for '{}': {}, falling back to heuristic",
+                            request.template_name,
+                            e
+                        );
                         Self::heuristic_refinement_prompt(&template.system_prompt, &request)
                     }
                 }
@@ -325,42 +368,46 @@ where
             match self.agent_repo.create_template(&new_template).await {
                 Ok(_) => {
                     // Record version change for regression detection
-                    self.evolution_loop.record_version_change(
-                        &request.template_name,
-                        new_template.version,
-                    ).await;
+                    self.evolution_loop
+                        .record_version_change(&request.template_name, new_template.version)
+                        .await;
 
                     // Complete the refinement
-                    self.evolution_loop.complete_refinement(request.id, true).await;
+                    self.evolution_loop
+                        .complete_refinement(request.id, true)
+                        .await;
 
-                    let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
-                        template_name: request.template_name.clone(),
-                        trigger: format!("Refined to v{}", new_template.version),
-                    }).await;
+                    let _ = event_tx
+                        .send(SwarmEvent::EvolutionTriggered {
+                            template_name: request.template_name.clone(),
+                            trigger: format!("Refined to v{}", new_template.version),
+                        })
+                        .await;
 
-                    self.audit_log.info(
-                        AuditCategory::Agent,
-                        AuditAction::AgentSpawned,
-                        format!(
-                            "Agent '{}' refined to version {}",
-                            request.template_name, new_template.version
-                        ),
-                    ).await;
+                    self.audit_log
+                        .info(
+                            AuditCategory::Agent,
+                            AuditAction::AgentSpawned,
+                            format!(
+                                "Agent '{}' refined to version {}",
+                                request.template_name, new_template.version
+                            ),
+                        )
+                        .await;
                 }
                 Err(e) => {
-                    self.evolution_loop.complete_refinement(request.id, false).await;
-                    self.audit_log.log(
-                        AuditEntry::new(
+                    self.evolution_loop
+                        .complete_refinement(request.id, false)
+                        .await;
+                    self.audit_log
+                        .log(AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::Agent,
                             AuditAction::AgentSpawned,
                             AuditActor::System,
-                            format!(
-                                "Failed to refine agent '{}': {}",
-                                request.template_name, e
-                            ),
-                        ),
-                    ).await;
+                            format!("Failed to refine agent '{}': {}", request.template_name, e),
+                        ))
+                        .await;
                 }
             }
         }
@@ -372,7 +419,10 @@ where
     /// refinement notes section with an updated one. Previous versions of this
     /// function appended without stripping, causing unbounded prompt growth
     /// (e.g. convergence-gap-researcher accumulated 16 duplicate blocks).
-    pub(super) fn heuristic_refinement_prompt(current_prompt: &str, request: &RefinementRequest) -> String {
+    pub(super) fn heuristic_refinement_prompt(
+        current_prompt: &str,
+        request: &RefinementRequest,
+    ) -> String {
         // Strip any existing "## Refinement Notes" sections before appending.
         // This prevents unbounded prompt growth from repeated refinement cycles.
         let base_prompt = if let Some(idx) = current_prompt.find("\n\n## Refinement Notes") {
@@ -426,18 +476,22 @@ where
 
     /// Get the system prompt for an agent type, including goal context and API docs.
     pub(super) async fn get_agent_system_prompt(&self, agent_type: &str) -> String {
-        let (raw_prompt, is_read_only) = match self.agent_repo.get_template_by_name(agent_type).await {
-            Ok(Some(template)) => (template.system_prompt.clone(), template.read_only),
-            _ => {
-                // Default system prompt if agent template not found
-                (format!(
-                    "You are a specialized agent for executing tasks.\n\
+        let (raw_prompt, is_read_only) =
+            match self.agent_repo.get_template_by_name(agent_type).await {
+                Ok(Some(template)) => (template.system_prompt.clone(), template.read_only),
+                _ => {
+                    // Default system prompt if agent template not found
+                    (
+                        format!(
+                            "You are a specialized agent for executing tasks.\n\
                     Follow the task description carefully and complete the work.\n\
                     Agent type: {}",
-                    agent_type
-                ), false)
-            }
-        };
+                            agent_type
+                        ),
+                        false,
+                    )
+                }
+            };
 
         // Sanitize any duplicate "## Refinement Notes" blocks that accumulated
         // in the DB before the heuristic_refinement_prompt dedup fix.
@@ -594,10 +648,13 @@ where
     /// Refresh the cache of active goals for context injection.
     pub(super) async fn refresh_active_goals_cache(&self) -> DomainResult<()> {
         use crate::domain::ports::GoalFilter;
-        let goals = self.goal_repo.list(GoalFilter {
-            status: Some(GoalStatus::Active),
-            ..Default::default()
-        }).await?;
+        let goals = self
+            .goal_repo
+            .list(GoalFilter {
+                status: Some(GoalStatus::Active),
+                ..Default::default()
+            })
+            .await?;
         let mut cache = self.active_goals_cache.write().await;
         *cache = goals;
         Ok(())
@@ -614,13 +671,19 @@ where
         context.push_str("Your work must align with these active goals:\n\n");
 
         for goal in goals.iter() {
-            context.push_str(&format!("### {} (Priority: {:?})\n", goal.name, goal.priority));
+            context.push_str(&format!(
+                "### {} (Priority: {:?})\n",
+                goal.name, goal.priority
+            ));
             context.push_str(&format!("{}\n", goal.description));
 
             if !goal.constraints.is_empty() {
                 context.push_str("\n**Constraints:**\n");
                 for constraint in &goal.constraints {
-                    context.push_str(&format!("- {}: {}\n", constraint.name, constraint.description));
+                    context.push_str(&format!(
+                        "- {}: {}\n",
+                        constraint.name, constraint.description
+                    ));
                 }
             }
             context.push('\n');
@@ -635,8 +698,7 @@ where
 mod tests {
     use super::*;
     use crate::services::evolution_loop::{
-        EvolutionTrigger, RefinementRequest, RefinementSeverity, RefinementStatus,
-        TemplateStats,
+        EvolutionTrigger, RefinementRequest, RefinementSeverity, RefinementStatus, TemplateStats,
     };
 
     type TestOrchestrator = SwarmOrchestrator<
@@ -647,7 +709,11 @@ mod tests {
         crate::adapters::sqlite::SqliteMemoryRepository,
     >;
 
-    fn make_refinement_request(version: u32, total_tasks: usize, success_rate: f64) -> RefinementRequest {
+    fn make_refinement_request(
+        version: u32,
+        total_tasks: usize,
+        success_rate: f64,
+    ) -> RefinementRequest {
         let mut stats = TemplateStats::new("test-agent".to_string(), version);
         stats.total_tasks = total_tasks;
         stats.success_rate = success_rate;
@@ -681,7 +747,11 @@ mod tests {
 
         // Should have exactly ONE refinement notes section (v3), not two
         let count = after_second.matches("## Refinement Notes").count();
-        assert_eq!(count, 1, "Expected exactly 1 refinement notes section, got {}", count);
+        assert_eq!(
+            count, 1,
+            "Expected exactly 1 refinement notes section, got {}",
+            count
+        );
         assert!(after_second.contains("## Refinement Notes (v3)"));
         assert!(!after_second.contains("## Refinement Notes (v2)"));
         // Base prompt should be preserved

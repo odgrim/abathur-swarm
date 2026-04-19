@@ -413,12 +413,12 @@ impl EvolutionLoop {
             let mut state = self.state.write().await;
 
             // Check if we need to handle version change first
-            let needs_version_reset =
-                if let Some(stats) = state.stats.get(&execution.template_name) {
-                    stats.template_version != execution.template_version
-                } else {
-                    false
-                };
+            let needs_version_reset = if let Some(stats) = state.stats.get(&execution.template_name)
+            {
+                stats.template_version != execution.template_version
+            } else {
+                false
+            };
 
             if needs_version_reset {
                 // Clone previous stats for regression detection
@@ -448,10 +448,7 @@ impl EvolutionLoop {
                 .stats
                 .entry(execution.template_name.clone())
                 .or_insert_with(|| {
-                    TemplateStats::new(
-                        execution.template_name.clone(),
-                        execution.template_version,
-                    )
+                    TemplateStats::new(execution.template_name.clone(), execution.template_version)
                 });
 
             stats.update(&execution);
@@ -483,18 +480,13 @@ impl EvolutionLoop {
                     e
                 );
             }
-            if let Some((ref name, from_v, to_v, ref prev_stats, changed_at)) =
-                version_change_info
+            if let Some((ref name, from_v, to_v, ref prev_stats, changed_at)) = version_change_info
                 && let Err(e) = repo
                     .save_version_change(name, from_v, to_v, prev_stats, changed_at)
                     .await
-                {
-                    tracing::warn!(
-                        "Failed to persist version change for {}: {}",
-                        name,
-                        e
-                    );
-                }
+            {
+                tracing::warn!("Failed to persist version change for {}: {}", name, e);
+            }
         }
     }
 
@@ -503,15 +495,17 @@ impl EvolutionLoop {
         let stale_expired = self.expire_stale_refinements().await;
         let mut stale_events: Vec<EvolutionEvent> = stale_expired
             .into_iter()
-            .map(|(template_name, template_version, request_id)| EvolutionEvent {
-                id: Uuid::new_v4(),
-                template_name: template_name.clone(),
-                template_version,
-                trigger: EvolutionTrigger::StaleTimeout,
-                stats_at_trigger: TemplateStats::new(template_name, template_version),
-                action_taken: EvolutionAction::StaleExpired { request_id },
-                occurred_at: Utc::now(),
-            })
+            .map(
+                |(template_name, template_version, request_id)| EvolutionEvent {
+                    id: Uuid::new_v4(),
+                    template_name: template_name.clone(),
+                    template_version,
+                    trigger: EvolutionTrigger::StaleTimeout,
+                    stats_at_trigger: TemplateStats::new(template_name, template_version),
+                    action_taken: EvolutionAction::StaleExpired { request_id },
+                    occurred_at: Utc::now(),
+                },
+            )
             .collect();
         let mut new_requests: Vec<RefinementRequest> = Vec::new();
         // Collect revert instructions: (template_name, to_version) to execute
@@ -560,22 +554,22 @@ impl EvolutionLoop {
                 if trigger.is_none()
                     && let Some((new_version, change_time)) =
                         state.version_change_times.get(&template_name)
-                        && stats.template_version == *new_version {
-                            let window =
-                                Duration::hours(self.config.regression_detection_window_hours);
-                            let in_window = Utc::now() - *change_time < window;
+                    && stats.template_version == *new_version
+                {
+                    let window = Duration::hours(self.config.regression_detection_window_hours);
+                    let in_window = Utc::now() - *change_time < window;
 
-                            if in_window && stats.total_tasks >= self.config.regression_min_tasks
-                                && let Some(prev_stats) =
-                                    state.previous_version_stats.get(&template_name)
-                                {
-                                    let rate_drop = prev_stats.success_rate - stats.success_rate;
-                                    if rate_drop >= self.config.regression_threshold {
-                                        trigger = Some(EvolutionTrigger::Regression);
-                                        severity = RefinementSeverity::Immediate;
-                                    }
-                                }
+                    if in_window
+                        && stats.total_tasks >= self.config.regression_min_tasks
+                        && let Some(prev_stats) = state.previous_version_stats.get(&template_name)
+                    {
+                        let rate_drop = prev_stats.success_rate - stats.success_rate;
+                        if rate_drop >= self.config.regression_threshold {
+                            trigger = Some(EvolutionTrigger::Regression);
+                            severity = RefinementSeverity::Immediate;
                         }
+                    }
+                }
 
                 if let Some(trig) = trigger {
                     let action = if trig == EvolutionTrigger::Regression
@@ -597,7 +591,10 @@ impl EvolutionLoop {
                         // already exists for this template
                         let has_active = state.refinement_queue.iter().any(|r| {
                             r.template_name == template_name
-                                && matches!(r.status, RefinementStatus::Pending | RefinementStatus::InProgress)
+                                && matches!(
+                                    r.status,
+                                    RefinementStatus::Pending | RefinementStatus::InProgress
+                                )
                         });
 
                         if has_active {
@@ -753,7 +750,10 @@ impl EvolutionLoop {
         let state = self.state.read().await;
         state.refinement_queue.iter().any(|r| {
             r.template_name == template_name
-                && matches!(r.status, RefinementStatus::Pending | RefinementStatus::InProgress)
+                && matches!(
+                    r.status,
+                    RefinementStatus::Pending | RefinementStatus::InProgress
+                )
         })
     }
 
@@ -774,13 +774,16 @@ impl EvolutionLoop {
 
         if found
             && let Some(ref repo) = self.refinement_repo
-                && let Err(e) = repo.update_status(request_id, RefinementStatus::InProgress).await {
-                    tracing::warn!(
-                        "Failed to persist InProgress status for refinement {}: {}",
-                        request_id,
-                        e
-                    );
-                }
+            && let Err(e) = repo
+                .update_status(request_id, RefinementStatus::InProgress)
+                .await
+        {
+            tracing::warn!(
+                "Failed to persist InProgress status for refinement {}: {}",
+                request_id,
+                e
+            );
+        }
 
         found
     }
@@ -795,8 +798,7 @@ impl EvolutionLoop {
             return Vec::new();
         }
 
-        let cutoff =
-            Utc::now() - Duration::hours(self.config.stale_refinement_timeout_hours);
+        let cutoff = Utc::now() - Duration::hours(self.config.stale_refinement_timeout_hours);
         let mut expired: Vec<(String, u32, Uuid)> = Vec::new();
 
         {
@@ -819,10 +821,7 @@ impl EvolutionLoop {
 
         if let Some(ref repo) = self.refinement_repo {
             for (_, _, id) in &expired {
-                if let Err(e) = repo
-                    .update_status(*id, RefinementStatus::Failed)
-                    .await
-                {
+                if let Err(e) = repo.update_status(*id, RefinementStatus::Failed).await {
                     tracing::warn!(
                         "Failed to persist Failed status for stale refinement {}: {}",
                         id,
@@ -862,14 +861,15 @@ impl EvolutionLoop {
         } // write lock dropped here
 
         if let Some(ref repo) = self.refinement_repo
-            && let Err(e) = repo.update_status(request_id, new_status).await {
-                tracing::warn!(
-                    "Failed to persist {} status for refinement {}: {}",
-                    if success { "Completed" } else { "Failed" },
-                    request_id,
-                    e
-                );
-            }
+            && let Err(e) = repo.update_status(request_id, new_status).await
+        {
+            tracing::warn!(
+                "Failed to persist {} status for refinement {}: {}",
+                if success { "Completed" } else { "Failed" },
+                request_id,
+                e
+            );
+        }
     }
 
     /// Record a version change for a template.
@@ -879,17 +879,15 @@ impl EvolutionLoop {
         // Store current stats as previous version
         let prev_stats = state.stats.get(template_name).cloned();
         if let Some(stats) = prev_stats {
-            state.previous_version_stats.insert(
-                template_name.to_string(),
-                stats,
-            );
+            state
+                .previous_version_stats
+                .insert(template_name.to_string(), stats);
         }
 
         // Record version change time
-        state.version_change_times.insert(
-            template_name.to_string(),
-            (new_version, Utc::now()),
-        );
+        state
+            .version_change_times
+            .insert(template_name.to_string(), (new_version, Utc::now()));
     }
 
     /// Load persisted template stats and version changes from the repository.
@@ -984,10 +982,7 @@ impl EvolutionLoop {
             }
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!(
-                    "Failed to recover InProgress refinements on startup: {}",
-                    e
-                );
+                tracing::warn!("Failed to recover InProgress refinements on startup: {}", e);
             }
         }
 
@@ -1042,11 +1037,7 @@ impl EvolutionLoop {
 mod tests {
     use super::*;
 
-    fn make_execution(
-        template_name: &str,
-        version: u32,
-        outcome: TaskOutcome,
-    ) -> TaskExecution {
+    fn make_execution(template_name: &str, version: u32, outcome: TaskOutcome) -> TaskExecution {
         TaskExecution {
             task_id: Uuid::new_v4(),
             template_name: template_name.to_string(),
@@ -1228,7 +1219,10 @@ mod tests {
 
         // Should no longer be pending (Failed is a terminal state)
         let pending = evolution.get_pending_refinements().await;
-        assert!(pending.is_empty(), "Failed refinement should not appear in pending list");
+        assert!(
+            pending.is_empty(),
+            "Failed refinement should not appear in pending list"
+        );
 
         // A new evaluation should be able to create a new refinement request
         // since the previous one reached a terminal state (Failed)
@@ -1239,7 +1233,8 @@ mod tests {
 
         let pending = evolution.get_pending_refinements().await;
         assert_eq!(
-            pending.len(), 1,
+            pending.len(),
+            1,
             "New refinement should be created after previous one failed"
         );
     }
@@ -1430,19 +1425,34 @@ mod tests {
             template_version: 1,
             outcome: TaskOutcome::Success,
             executed_at: Utc::now(),
-            turns_used: 12,   // real turn count from substrate
+            turns_used: 12,    // real turn count from substrate
             tokens_used: 5000, // real token count from substrate
             downstream_tasks: vec![],
         };
         evolution.record_execution(exec).await;
 
         let stats = evolution.get_stats("direct-agent").await.unwrap();
-        assert_eq!(stats.total_tasks, 1, "direct-mode success must increment total_tasks");
-        assert_eq!(stats.successful_tasks, 1, "direct-mode success must increment successful_tasks");
+        assert_eq!(
+            stats.total_tasks, 1,
+            "direct-mode success must increment total_tasks"
+        );
+        assert_eq!(
+            stats.successful_tasks, 1,
+            "direct-mode success must increment successful_tasks"
+        );
         assert_eq!(stats.failed_tasks, 0);
-        assert!((stats.success_rate - 1.0).abs() < 0.001, "single success = 100% rate");
-        assert!((stats.avg_turns - 12.0).abs() < 0.001, "avg_turns must reflect real direct-mode turn count");
-        assert!((stats.avg_tokens - 5000.0).abs() < 1.0, "avg_tokens must reflect real direct-mode token count");
+        assert!(
+            (stats.success_rate - 1.0).abs() < 0.001,
+            "single success = 100% rate"
+        );
+        assert!(
+            (stats.avg_turns - 12.0).abs() < 0.001,
+            "avg_turns must reflect real direct-mode turn count"
+        );
+        assert!(
+            (stats.avg_tokens - 5000.0).abs() < 1.0,
+            "avg_tokens must reflect real direct-mode token count"
+        );
     }
 
     /// Verify that direct-mode failures populate EvolutionLoop stats.
@@ -1467,10 +1477,19 @@ mod tests {
         evolution.record_execution(exec).await;
 
         let stats = evolution.get_stats("direct-agent").await.unwrap();
-        assert_eq!(stats.total_tasks, 1, "direct-mode failure must increment total_tasks");
-        assert_eq!(stats.failed_tasks, 1, "direct-mode failure must increment failed_tasks");
+        assert_eq!(
+            stats.total_tasks, 1,
+            "direct-mode failure must increment total_tasks"
+        );
+        assert_eq!(
+            stats.failed_tasks, 1,
+            "direct-mode failure must increment failed_tasks"
+        );
         assert_eq!(stats.successful_tasks, 0);
-        assert!((stats.success_rate - 0.0).abs() < 0.001, "single failure = 0% rate");
+        assert!(
+            (stats.success_rate - 0.0).abs() < 0.001,
+            "single failure = 0% rate"
+        );
     }
 
     /// Verify that EvolutionLoop.stats accumulates across both direct-mode and
@@ -1490,8 +1509,8 @@ mod tests {
             template_version: 1,
             outcome: TaskOutcome::Success,
             executed_at: Utc::now(),
-            turns_used: 0,    // convergent path: tracks iterations, not turns
-            tokens_used: 0,   // convergent path: tokens aggregated inside convergence loop
+            turns_used: 0,  // convergent path: tracks iterations, not turns
+            tokens_used: 0, // convergent path: tokens aggregated inside convergence loop
             downstream_tasks: vec![],
         };
         evolution.record_execution(convergent_exec).await;
@@ -1510,10 +1529,16 @@ mod tests {
         evolution.record_execution(direct_exec).await;
 
         let stats = evolution.get_stats("shared-agent").await.unwrap();
-        assert_eq!(stats.total_tasks, 2, "both direct and convergent executions must count toward total");
+        assert_eq!(
+            stats.total_tasks, 2,
+            "both direct and convergent executions must count toward total"
+        );
         assert_eq!(stats.successful_tasks, 2, "both successes must be counted");
         assert_eq!(stats.failed_tasks, 0);
-        assert!((stats.success_rate - 1.0).abs() < 0.001, "two successes = 100% rate");
+        assert!(
+            (stats.success_rate - 1.0).abs() < 0.001,
+            "two successes = 100% rate"
+        );
     }
 
     /// Verify that the statistical significance threshold (min_tasks_for_evaluation=5)
@@ -1622,7 +1647,12 @@ mod tests {
         // With auto_revert_enabled=false, action should be FlaggedForRefinement with Immediate severity
         if let Some(ev) = regression_event {
             assert!(
-                matches!(ev.action_taken, EvolutionAction::FlaggedForRefinement { severity: RefinementSeverity::Immediate }),
+                matches!(
+                    ev.action_taken,
+                    EvolutionAction::FlaggedForRefinement {
+                        severity: RefinementSeverity::Immediate
+                    }
+                ),
                 "Regression without auto-revert should flag for immediate refinement; got {:?}",
                 ev.action_taken,
             );
@@ -1669,7 +1699,10 @@ mod tests {
         assert!(
             revert_event.is_some(),
             "Should auto-revert when regression detected and auto_revert_enabled=true; events: {:?}",
-            events.iter().map(|e| (&e.trigger, &e.action_taken)).collect::<Vec<_>>()
+            events
+                .iter()
+                .map(|e| (&e.trigger, &e.action_taken))
+                .collect::<Vec<_>>()
         );
         if let Some(ev) = revert_event {
             match &ev.action_taken {
@@ -1836,7 +1869,11 @@ mod tests {
         }
 
         let expired = evolution.expire_stale_refinements().await;
-        assert_eq!(expired.len(), 1, "only the 3h-old request should be expired");
+        assert_eq!(
+            expired.len(),
+            1,
+            "only the 3h-old request should be expired"
+        );
         assert_eq!(expired[0].0, "stale-agent");
         assert_eq!(expired[0].1, 1);
         assert_eq!(expired[0].2, old_request.id);
@@ -1962,7 +1999,6 @@ mod tests {
                 updated: tokio::sync::Mutex::new(Vec::new()),
             }
         }
-
     }
 
     #[async_trait]
@@ -1976,20 +2012,23 @@ mod tests {
         async fn get_template(
             &self,
             _id: Uuid,
-        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>> {
+        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>>
+        {
             Ok(None)
         }
         async fn get_template_by_name(
             &self,
             _name: &str,
-        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>> {
+        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>>
+        {
             Ok(None)
         }
         async fn get_template_version(
             &self,
             name: &str,
             version: u32,
-        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>> {
+        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>>
+        {
             let templates = self.templates.lock().await;
             Ok(templates.get(&(name.to_string(), version)).cloned())
         }
@@ -2001,27 +2040,27 @@ mod tests {
             updated.push(template.clone());
             Ok(())
         }
-        async fn delete_template(
-            &self,
-            _id: Uuid,
-        ) -> crate::domain::errors::DomainResult<()> {
+        async fn delete_template(&self, _id: Uuid) -> crate::domain::errors::DomainResult<()> {
             Ok(())
         }
         async fn list_templates(
             &self,
             _filter: crate::domain::ports::AgentFilter,
-        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>> {
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>>
+        {
             Ok(vec![])
         }
         async fn list_by_tier(
             &self,
             _tier: crate::domain::models::AgentTier,
-        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>> {
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>>
+        {
             Ok(vec![])
         }
         async fn get_active_templates(
             &self,
-        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>> {
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>>
+        {
             Ok(vec![])
         }
         async fn create_instance(
@@ -2033,7 +2072,8 @@ mod tests {
         async fn get_instance(
             &self,
             _id: Uuid,
-        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentInstance>> {
+        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentInstance>>
+        {
             Ok(None)
         }
         async fn update_instance(
@@ -2042,22 +2082,21 @@ mod tests {
         ) -> crate::domain::errors::DomainResult<()> {
             Ok(())
         }
-        async fn delete_instance(
-            &self,
-            _id: Uuid,
-        ) -> crate::domain::errors::DomainResult<()> {
+        async fn delete_instance(&self, _id: Uuid) -> crate::domain::errors::DomainResult<()> {
             Ok(())
         }
         async fn list_instances_by_status(
             &self,
             _status: crate::domain::models::InstanceStatus,
-        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentInstance>> {
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentInstance>>
+        {
             Ok(vec![])
         }
         async fn get_running_instances(
             &self,
             _template_name: &str,
-        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentInstance>> {
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentInstance>>
+        {
             Ok(vec![])
         }
         async fn count_running_by_template(
@@ -2095,7 +2134,10 @@ mod tests {
         let mock_repo = Arc::new(MockAgentRepo::new());
         {
             let mut templates = mock_repo.templates.lock().await;
-            templates.insert((v1_template.name.clone(), v1_template.version), v1_template.clone());
+            templates.insert(
+                (v1_template.name.clone(), v1_template.version),
+                v1_template.clone(),
+            );
         }
 
         let config = EvolutionConfig {
@@ -2139,7 +2181,11 @@ mod tests {
 
         // Verify the agent repo was actually called to restore v1
         let updated = mock_repo.updated.lock().await;
-        assert_eq!(updated.len(), 1, "Should have called update_template exactly once");
+        assert_eq!(
+            updated.len(),
+            1,
+            "Should have called update_template exactly once"
+        );
         assert_eq!(updated[0].name, "revert-real");
         assert_eq!(updated[0].version, 1, "Should restore version 1");
         assert_eq!(
@@ -2246,7 +2292,11 @@ mod tests {
 
         // Now record a second agent and evaluate again
         evolution
-            .record_execution(make_execution("agent-second", 1, TaskOutcome::GoalViolation))
+            .record_execution(make_execution(
+                "agent-second",
+                1,
+                TaskOutcome::GoalViolation,
+            ))
             .await;
         evolution.evaluate().await;
 
@@ -2291,7 +2341,11 @@ mod tests {
 
         // Agent with goal violation (immediate severity)
         evolution
-            .record_execution(make_execution("immediate-agent", 1, TaskOutcome::GoalViolation))
+            .record_execution(make_execution(
+                "immediate-agent",
+                1,
+                TaskOutcome::GoalViolation,
+            ))
             .await;
 
         evolution.evaluate().await;
@@ -2303,9 +2357,7 @@ mod tests {
         let immediate_pos = attention
             .iter()
             .position(|(name, _)| name == "immediate-agent");
-        let minor_pos = attention
-            .iter()
-            .position(|(name, _)| name == "minor-agent");
+        let minor_pos = attention.iter().position(|(name, _)| name == "minor-agent");
 
         if let (Some(imm), Some(min)) = (immediate_pos, minor_pos) {
             assert!(imm < min, "Immediate severity should sort before Minor");
@@ -2467,8 +2519,8 @@ mod tests {
             stats.push(s);
         }
 
-        let evolution =
-            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo as Arc<dyn RefinementRepository>);
+        let evolution = EvolutionLoop::new(EvolutionConfig::default())
+            .with_repo(repo as Arc<dyn RefinementRepository>);
         evolution.load_persisted_state().await;
 
         let all = evolution.get_all_stats().await;
@@ -2491,8 +2543,8 @@ mod tests {
             stats.push(s);
         }
 
-        let evolution =
-            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo as Arc<dyn RefinementRepository>);
+        let evolution = EvolutionLoop::new(EvolutionConfig::default())
+            .with_repo(repo as Arc<dyn RefinementRepository>);
 
         // Record an execution first (populates in-memory stats for "agent-x")
         evolution
@@ -2524,8 +2576,8 @@ mod tests {
             });
         }
 
-        let evolution =
-            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo as Arc<dyn RefinementRepository>);
+        let evolution = EvolutionLoop::new(EvolutionConfig::default())
+            .with_repo(repo as Arc<dyn RefinementRepository>);
         evolution.load_persisted_state().await;
 
         // Verify that previous_version_stats were restored
@@ -2567,8 +2619,8 @@ mod tests {
             });
         }
 
-        let evolution =
-            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo.clone() as Arc<dyn RefinementRepository>);
+        let evolution = EvolutionLoop::new(EvolutionConfig::default())
+            .with_repo(repo.clone() as Arc<dyn RefinementRepository>);
         evolution.recover_in_progress_refinements().await;
 
         // The request should have been reset to Pending in the repo
@@ -2603,8 +2655,8 @@ mod tests {
             repo.requests.lock().unwrap().push(request.clone());
         }
 
-        let evolution =
-            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo as Arc<dyn RefinementRepository>);
+        let evolution = EvolutionLoop::new(EvolutionConfig::default())
+            .with_repo(repo as Arc<dyn RefinementRepository>);
 
         // Manually insert the same request into in-memory queue first
         {

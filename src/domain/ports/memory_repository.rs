@@ -28,7 +28,12 @@ pub trait MemoryRepository: Send + Sync {
     async fn query(&self, query: MemoryQuery) -> DomainResult<Vec<Memory>>;
 
     /// Full-text search in memory content.
-    async fn search(&self, query: &str, namespace: Option<&str>, limit: usize) -> DomainResult<Vec<Memory>>;
+    async fn search(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: usize,
+    ) -> DomainResult<Vec<Memory>>;
 
     /// Get memories by tier.
     async fn list_by_tier(&self, tier: MemoryTier) -> DomainResult<Vec<Memory>>;

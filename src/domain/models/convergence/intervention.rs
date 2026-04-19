@@ -270,9 +270,7 @@ impl ConvergenceInfrastructure {
                 ReferenceType::Example => {
                     self.examples.push(reference.path.clone());
                 }
-                ReferenceType::CodeFile
-                | ReferenceType::Documentation
-                | ReferenceType::Config => {
+                ReferenceType::CodeFile | ReferenceType::Documentation | ReferenceType::Config => {
                     self.context_files.push(reference.path.clone());
                 }
             }
@@ -437,17 +435,13 @@ pub fn select_convergence_mode(
     match (&basin.classification, &policy.priority_hint) {
         (BasinClassification::Wide, _) => ConvergenceMode::Sequential,
         (BasinClassification::Narrow, Some(PriorityHint::Thorough)) => {
-            ConvergenceMode::Parallel {
-                initial_samples: 3,
-            }
+            ConvergenceMode::Parallel { initial_samples: 3 }
         }
-        (BasinClassification::Narrow, Some(PriorityHint::Fast)) => ConvergenceMode::Parallel {
-            initial_samples: 2,
-        },
+        (BasinClassification::Narrow, Some(PriorityHint::Fast)) => {
+            ConvergenceMode::Parallel { initial_samples: 2 }
+        }
         (BasinClassification::Narrow, Some(PriorityHint::Cheap)) => ConvergenceMode::Sequential,
-        (BasinClassification::Narrow, None) => ConvergenceMode::Parallel {
-            initial_samples: 2,
-        },
+        (BasinClassification::Narrow, None) => ConvergenceMode::Parallel { initial_samples: 2 },
         (BasinClassification::Moderate, _) => ConvergenceMode::Sequential,
     }
 }
@@ -709,9 +703,7 @@ mod tests {
 
     #[test]
     fn test_convergence_mode_parallel_serde() {
-        let mode = ConvergenceMode::Parallel {
-            initial_samples: 3,
-        };
+        let mode = ConvergenceMode::Parallel { initial_samples: 3 };
         let json = serde_json::to_string(&mode).unwrap();
         let deserialized: ConvergenceMode = serde_json::from_str(&json).unwrap();
         match deserialized {

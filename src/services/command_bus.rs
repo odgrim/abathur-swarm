@@ -438,7 +438,8 @@ impl CommandBus {
                         DomainCommand::Goal(cmd) => self.goal_handler.handle(cmd).await,
                         DomainCommand::Memory(cmd) => self.memory_handler.handle(cmd).await,
                     }
-                }).await
+                })
+                .await
             };
 
             let outcome = match handler_result {
@@ -459,7 +460,8 @@ impl CommandBus {
                         outbox.insert(event).await?;
                     }
                     Ok::<(), crate::domain::errors::DomainError>(())
-                }).await;
+                })
+                .await;
 
                 if let Err(e) = insert_result {
                     tracing::error!(

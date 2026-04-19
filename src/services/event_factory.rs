@@ -44,15 +44,17 @@ pub fn task_event(
     task_id: Uuid,
     payload: EventPayload,
 ) -> UnifiedEvent {
-    make_event(severity, EventCategory::Task, goal_id, Some(task_id), payload)
+    make_event(
+        severity,
+        EventCategory::Task,
+        goal_id,
+        Some(task_id),
+        payload,
+    )
 }
 
 /// Build a goal-category event.
-pub fn goal_event(
-    severity: EventSeverity,
-    goal_id: Uuid,
-    payload: EventPayload,
-) -> UnifiedEvent {
+pub fn goal_event(severity: EventSeverity, goal_id: Uuid, payload: EventPayload) -> UnifiedEvent {
     make_event(severity, EventCategory::Goal, Some(goal_id), None, payload)
 }
 
@@ -81,7 +83,13 @@ pub fn workflow_event(
     task_id: Uuid,
     payload: EventPayload,
 ) -> UnifiedEvent {
-    make_event(severity, EventCategory::Workflow, None, Some(task_id), payload)
+    make_event(
+        severity,
+        EventCategory::Workflow,
+        None,
+        Some(task_id),
+        payload,
+    )
 }
 
 /// Build a federation-category event.
@@ -92,4 +100,3 @@ pub fn federation_event(
 ) -> UnifiedEvent {
     make_event(severity, EventCategory::Federation, None, task_id, payload)
 }
-

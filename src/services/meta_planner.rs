@@ -9,12 +9,10 @@
 use std::sync::Arc;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{
-    AgentTemplate, AgentTier, TaskPriority, ToolCapability,
-};
+use crate::domain::models::{AgentTemplate, AgentTier, TaskPriority, ToolCapability};
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository};
-use crate::services::llm_planner::LlmPlannerConfig;
 use crate::services::EvolutionLoop;
+use crate::services::llm_planner::LlmPlannerConfig;
 
 /// Configuration for the meta-planner.
 #[derive(Debug, Clone)]
@@ -204,7 +202,10 @@ where
     /// - Previous successful decomposition patterns
     /// - Agent performance data for similar tasks
     /// - Common task patterns for the goal type
-    pub async fn query_decomposition_patterns(&self, goal_description: &str) -> DomainResult<Vec<String>> {
+    pub async fn query_decomposition_patterns(
+        &self,
+        goal_description: &str,
+    ) -> DomainResult<Vec<String>> {
         let Some(ref memory_repo) = self.memory_repo else {
             return Ok(Vec::new());
         };
@@ -214,10 +215,7 @@ where
             .search(goal_description, Some("decomposition_patterns"), 10)
             .await?;
 
-        let pattern_hints: Vec<String> = patterns
-            .into_iter()
-            .map(|m| m.content)
-            .collect();
+        let pattern_hints: Vec<String> = patterns.into_iter().map(|m| m.content).collect();
 
         Ok(pattern_hints)
     }
@@ -237,12 +235,7 @@ where
     }
 
     /// Generate a new agent template specification.
-    pub fn generate_agent_spec(
-        &self,
-        name: &str,
-        purpose: &str,
-        tier: AgentTier,
-    ) -> AgentSpec {
+    pub fn generate_agent_spec(&self, name: &str, purpose: &str, tier: AgentTier) -> AgentSpec {
         let system_prompt = format!(
             "You are a specialized agent for: {}.\n\n\
             Your purpose is to execute tasks related to this domain efficiently.\n\
@@ -315,21 +308,27 @@ where
     /// Queries the EvolutionLoop for real execution statistics if available,
     /// falling back to default metrics when no evolution loop is configured.
     pub async fn analyze_agent_performance(&self, agent_name: &str) -> DomainResult<AgentMetrics> {
-        let _agent = self.agent_repo.get_template_by_name(agent_name).await?
-            .ok_or_else(|| DomainError::ValidationFailed(format!("Agent not found: {}", agent_name)))?;
+        let _agent = self
+            .agent_repo
+            .get_template_by_name(agent_name)
+            .await?
+            .ok_or_else(|| {
+                DomainError::ValidationFailed(format!("Agent not found: {}", agent_name))
+            })?;
 
         // Query real metrics from EvolutionLoop if available
         if let Some(ref evo) = self.evolution_loop
-            && let Some(stats) = evo.get_stats(agent_name).await {
-                return Ok(AgentMetrics {
-                    total_tasks: stats.total_tasks as u64,
-                    successful_tasks: stats.successful_tasks as u64,
-                    failed_tasks: stats.failed_tasks as u64,
-                    avg_turns_per_task: stats.avg_turns,
-                    avg_tokens_per_task: stats.avg_tokens,
-                    success_rate: stats.success_rate,
-                });
-            }
+            && let Some(stats) = evo.get_stats(agent_name).await
+        {
+            return Ok(AgentMetrics {
+                total_tasks: stats.total_tasks as u64,
+                successful_tasks: stats.successful_tasks as u64,
+                failed_tasks: stats.failed_tasks as u64,
+                avg_turns_per_task: stats.avg_turns,
+                avg_tokens_per_task: stats.avg_tokens,
+                success_rate: stats.success_rate,
+            });
+        }
 
         Ok(AgentMetrics::default())
     }
@@ -341,13 +340,18 @@ where
     }
 
     /// Get or create an agent template for a task type.
-    pub async fn ensure_agent(&self, agent_type: &str, purpose: &str) -> DomainResult<AgentTemplate> {
+    pub async fn ensure_agent(
+        &self,
+        agent_type: &str,
+        purpose: &str,
+    ) -> DomainResult<AgentTemplate> {
         if let Some(existing) = self.agent_repo.get_template_by_name(agent_type).await? {
             return Ok(existing);
         }
 
         if self.config.auto_generate_agents {
-            let spec = self.generate_agent_spec(agent_type, purpose, self.config.default_agent_tier);
+            let spec =
+                self.generate_agent_spec(agent_type, purpose, self.config.default_agent_tier);
             self.create_agent_from_spec(&spec).await
         } else {
             Err(DomainError::ValidationFailed(format!(
@@ -356,17 +360,18 @@ where
             )))
         }
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_migrated_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
+        SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
+        create_migrated_test_pool,
     };
 
-    async fn setup_meta_planner() -> MetaPlanner<SqliteGoalRepository, SqliteTaskRepository, SqliteAgentRepository> {
+    async fn setup_meta_planner()
+    -> MetaPlanner<SqliteGoalRepository, SqliteTaskRepository, SqliteAgentRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
 
         let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));

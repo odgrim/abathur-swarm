@@ -4,11 +4,11 @@
 //! the memory system. Supports querying, storing, and updating memories.
 
 use axum::{
+    Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{delete, get, post, put},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -20,11 +20,11 @@ use uuid::Uuid;
 
 use crate::domain::models::{AccessorId, Memory, MemoryQuery, MemoryTier, MemoryType};
 use crate::domain::ports::MemoryRepository;
+use crate::services::MemoryService;
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
 };
 use crate::services::event_bus::EventBus;
-use crate::services::MemoryService;
 
 /// Configuration for the memory HTTP server.
 #[derive(Debug, Clone)]
@@ -170,8 +170,17 @@ pub struct MemoryHttpServer<M: MemoryRepository + 'static> {
 }
 
 impl<M: MemoryRepository + Clone + Send + Sync + 'static> MemoryHttpServer<M> {
-    pub fn new(service: MemoryService<M>, command_bus: Arc<CommandBus>, config: MemoryHttpConfig) -> Self {
-        Self { config, service, command_bus, event_bus: None }
+    pub fn new(
+        service: MemoryService<M>,
+        command_bus: Arc<CommandBus>,
+        config: MemoryHttpConfig,
+    ) -> Self {
+        Self {
+            config,
+            service,
+            command_bus,
+            event_bus: None,
+        }
     }
 
     /// Set the event bus for publishing memory recall events.
@@ -200,7 +209,10 @@ impl<M: MemoryRepository + Clone + Send + Sync + 'static> MemoryHttpServer<M> {
             // Search
             .route("/api/v1/memory/search", get(search_memories::<M>))
             // Search with conflict detection
-            .route("/api/v1/memory/search/with-conflicts", get(search_with_conflicts::<M>))
+            .route(
+                "/api/v1/memory/search/with-conflicts",
+                get(search_with_conflicts::<M>),
+            )
             // Statistics
             .route("/api/v1/memory/stats", get(get_stats::<M>))
             // Health check
@@ -208,8 +220,13 @@ impl<M: MemoryRepository + Clone + Send + Sync + 'static> MemoryHttpServer<M> {
             .with_state(state);
 
         if self.config.enable_cors {
-            app.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-                .layer(TraceLayer::new_for_http())
+            app.layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            )
+            .layer(TraceLayer::new_for_http())
         } else {
             app.layer(TraceLayer::new_for_http())
         }
@@ -264,9 +281,10 @@ async fn list_memories<M: MemoryRepository + Clone + Send + Sync + 'static>(
         query = query.namespace(ns);
     }
     if let Some(t) = &params.tier
-        && let Some(tier) = MemoryTier::from_str(t) {
-            query = query.tier(tier);
-        }
+        && let Some(tier) = MemoryTier::from_str(t)
+    {
+        query = query.tier(tier);
+    }
     if let Some(pattern) = &params.key_pattern {
         query = query.key_like(pattern);
     }
@@ -347,7 +365,11 @@ async fn get_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<M>>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.recall(id, AccessorId::system("mcp-http")).await {
+    match state
+        .service
+        .recall(id, AccessorId::system("mcp-http"))
+        .await
+    {
         Ok((Some(memory), events)) => {
             // Publish recall events via EventBus
             if let Some(ref bus) = state.event_bus {
@@ -378,7 +400,11 @@ async fn get_by_key<M: MemoryRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<M>>>,
     Path((namespace, key)): Path<(String, String)>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.recall_by_key(&key, &namespace, AccessorId::system("mcp-http")).await {
+    match state
+        .service
+        .recall_by_key(&key, &namespace, AccessorId::system("mcp-http"))
+        .await
+    {
         Ok((Some(memory), events)) => {
             // Publish recall events via EventBus
             if let Some(ref bus) = state.event_bus {
@@ -391,7 +417,10 @@ async fn get_by_key<M: MemoryRepository + Clone + Send + Sync + 'static>(
         Ok((None, _)) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: format!("Memory with key '{}' in namespace '{}' not found", key, namespace),
+                error: format!(
+                    "Memory with key '{}' in namespace '{}' not found",
+                    key, namespace
+                ),
                 code: "NOT_FOUND".to_string(),
             }),
         )),
@@ -423,7 +452,9 @@ async fn search_memories<M: MemoryRepository + Clone + Send + Sync + 'static>(
         .search(&params.q, params.namespace.as_deref(), params.limit)
         .await
     {
-        Ok(memories) => Ok(Json(memories.into_iter().map(MemoryResponse::from).collect())),
+        Ok(memories) => Ok(Json(
+            memories.into_iter().map(MemoryResponse::from).collect(),
+        )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -445,18 +476,27 @@ async fn search_with_conflicts<M: MemoryRepository + Clone + Send + Sync + 'stat
         .await
     {
         Ok(result) => {
-            let memories = result.memories.into_iter().map(MemoryResponse::from).collect();
-            let conflicts = result.conflicts.into_iter().map(|c| {
-                MemoryConflictResponse {
+            let memories = result
+                .memories
+                .into_iter()
+                .map(MemoryResponse::from)
+                .collect();
+            let conflicts = result
+                .conflicts
+                .into_iter()
+                .map(|c| MemoryConflictResponse {
                     memory_a: c.memory_a,
                     memory_b: c.memory_b,
                     key: c.key,
                     similarity: c.similarity,
                     resolved: c.resolved,
                     resolution: c.resolution.map(|r| format!("{:?}", r)),
-                }
-            }).collect();
-            Ok(Json(SearchWithConflictsResponse { memories, conflicts }))
+                })
+                .collect();
+            Ok(Json(SearchWithConflictsResponse {
+                memories,
+                conflicts,
+            }))
         }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -474,7 +514,11 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     Json(req): Json<UpdateMemoryRequest>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Get existing memory
-    let memory = match state.service.recall(id, AccessorId::system("mcp-http")).await {
+    let memory = match state
+        .service
+        .recall(id, AccessorId::system("mcp-http"))
+        .await
+    {
         Ok((Some(m), events)) => {
             // Publish recall events via EventBus
             if let Some(ref bus) = state.event_bus {
@@ -491,7 +535,7 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
                     error: format!("Memory {} not found", id),
                     code: "NOT_FOUND".to_string(),
                 }),
-            ))
+            ));
         }
         Err(e) => {
             return Err((
@@ -500,7 +544,7 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
                     error: e.to_string(),
                     code: "GET_ERROR".to_string(),
                 }),
-            ))
+            ));
         }
     };
 
@@ -525,7 +569,7 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
                         error: "Unexpected command result type".to_string(),
                         code: "INTERNAL_ERROR".to_string(),
                     }),
-                ))
+                ));
             }
             Err(e) => {
                 return Err((
@@ -534,7 +578,7 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
                         error: e.to_string(),
                         code: "UPDATE_ERROR".to_string(),
                     }),
-                ))
+                ));
             }
         }
     }
@@ -580,7 +624,6 @@ async fn get_stats<M: MemoryRepository + Clone + Send + Sync + 'static>(
         )),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

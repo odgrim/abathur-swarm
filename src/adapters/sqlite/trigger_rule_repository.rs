@@ -190,10 +190,9 @@ impl TriggerRuleRepository for SqliteTriggerRuleRepository {
     }
 
     async fn list(&self) -> DomainResult<Vec<TriggerRule>> {
-        let rows: Vec<TriggerRuleRow> =
-            sqlx::query_as("SELECT * FROM trigger_rules ORDER BY name")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<TriggerRuleRow> = sqlx::query_as("SELECT * FROM trigger_rules ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
 
         rows.into_iter().map(row_to_rule).collect()
     }

@@ -69,7 +69,7 @@ impl GoalRepository for SqliteGoalRepository {
             r#"UPDATE goals SET name = ?, description = ?, status = ?, priority = ?,
                parent_id = ?, constraints = ?, metadata = ?, applicability_domains = ?,
                updated_at = ?
-               WHERE id = ?"#
+               WHERE id = ?"#,
         )
         .bind(&goal.name)
         .bind(&goal.description)
@@ -91,8 +91,7 @@ impl GoalRepository for SqliteGoalRepository {
     }
 
     async fn delete(&self, id: Uuid) -> DomainResult<()> {
-        let delete_q = sqlx::query("DELETE FROM goals WHERE id = ?")
-            .bind(id.to_string());
+        let delete_q = sqlx::query("DELETE FROM goals WHERE id = ?").bind(id.to_string());
         let result = exec_tx!(&self.pool, delete_q, execute)?;
 
         if result.rows_affected() == 0 {
@@ -104,7 +103,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn list(&self, filter: GoalFilter) -> DomainResult<Vec<Goal>> {
         let mut query = String::from(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, created_at, updated_at, last_convergence_check_at FROM goals WHERE 1=1"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, created_at, updated_at, last_convergence_check_at FROM goals WHERE 1=1",
         );
         let mut bindings: Vec<String> = Vec::new();
 
@@ -163,7 +162,10 @@ impl GoalRepository for SqliteGoalRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let all_active: Vec<Goal> = rows.into_iter().map(|r| r.try_into()).collect::<Result<Vec<_>, _>>()?;
+        let all_active: Vec<Goal> = rows
+            .into_iter()
+            .map(|r| r.try_into())
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(all_active
             .into_iter()
@@ -175,11 +177,10 @@ impl GoalRepository for SqliteGoalRepository {
     }
 
     async fn count_by_status(&self) -> DomainResult<HashMap<GoalStatus, u64>> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT status, COUNT(*) as count FROM goals GROUP BY status"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT status, COUNT(*) as count FROM goals GROUP BY status")
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut counts = HashMap::new();
         for (status_str, count) in rows {
@@ -191,13 +192,11 @@ impl GoalRepository for SqliteGoalRepository {
     }
 
     async fn update_last_check(&self, goal_id: Uuid, ts: DateTime<Utc>) -> DomainResult<()> {
-        let result = sqlx::query(
-            "UPDATE goals SET last_convergence_check_at = ? WHERE id = ?"
-        )
-        .bind(ts.to_rfc3339())
-        .bind(goal_id.to_string())
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("UPDATE goals SET last_convergence_check_at = ? WHERE id = ?")
+            .bind(ts.to_rfc3339())
+            .bind(goal_id.to_string())
+            .execute(&self.pool)
+            .await?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::GoalNotFound(goal_id));
@@ -230,19 +229,23 @@ impl TryFrom<GoalRow> for Goal {
         let id = super::parse_uuid(&row.id)?;
         let parent_id = super::parse_optional_uuid(row.parent_id)?;
 
-        let status = GoalStatus::from_str(&row.status)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid status: {}", row.status)))?;
+        let status = GoalStatus::from_str(&row.status).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid status: {}", row.status))
+        })?;
 
-        let priority = GoalPriority::from_str(&row.priority)
-            .ok_or_else(|| DomainError::SerializationError(format!("Invalid priority: {}", row.priority)))?;
+        let priority = GoalPriority::from_str(&row.priority).ok_or_else(|| {
+            DomainError::SerializationError(format!("Invalid priority: {}", row.priority))
+        })?;
 
         let constraints: Vec<GoalConstraint> = super::parse_json_or_default(row.constraints)?;
         let metadata: GoalMetadata = super::parse_json_or_default(row.metadata)?;
-        let applicability_domains: Vec<String> = super::parse_json_or_default(row.applicability_domains)?;
+        let applicability_domains: Vec<String> =
+            super::parse_json_or_default(row.applicability_domains)?;
 
         let created_at = super::parse_datetime(&row.created_at)?;
         let updated_at = super::parse_datetime(&row.updated_at)?;
-        let last_convergence_check_at = super::parse_optional_datetime(row.last_convergence_check_at)?;
+        let last_convergence_check_at =
+            super::parse_optional_datetime(row.last_convergence_check_at)?;
 
         Ok(Goal {
             id,
@@ -323,7 +326,13 @@ mod tests {
         repo.create(&goal1).await.unwrap();
         repo.create(&goal2).await.unwrap();
 
-        let active_goals = repo.list(GoalFilter { status: Some(GoalStatus::Active), ..Default::default() }).await.unwrap();
+        let active_goals = repo
+            .list(GoalFilter {
+                status: Some(GoalStatus::Active),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(active_goals.len(), 1);
         assert_eq!(active_goals[0].name, "Active Goal");
     }
@@ -354,7 +363,10 @@ mod tests {
         // Timestamps are stored as RFC3339 strings, so compare with second precision
         let retrieved_ts = retrieved.last_convergence_check_at.unwrap();
         let diff = (retrieved_ts - ts).num_seconds().abs();
-        assert!(diff < 2, "Timestamp should be within 2 seconds of the set value");
+        assert!(
+            diff < 2,
+            "Timestamp should be within 2 seconds of the set value"
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  check:
+    name: Build, Test, Lint, Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --all-targets --locked
+
+      - name: Test (lib only)
+        # Integration tests that may need external resources are skipped in CI.
+        run: cargo test --lib --locked
+
+      - name: Clippy
+        # Surfaces warnings but does not fail the build yet. Once the clippy
+        # backlog is cleared, tighten this to `-D warnings` for zero-drift
+        # enforcement.
+        run: cargo clippy --all-targets --locked -- -W clippy::all
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check

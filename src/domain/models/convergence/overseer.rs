@@ -203,11 +203,7 @@ impl OverseerSignals {
             .as_ref()
             .map(|t| t.all_passing())
             .unwrap_or(true)
-            && self
-                .type_check
-                .as_ref()
-                .map(|t| t.clean)
-                .unwrap_or(true)
+            && self.type_check.as_ref().map(|t| t.clean).unwrap_or(true)
             && self
                 .lint_results
                 .as_ref()
@@ -236,11 +232,7 @@ impl OverseerSignals {
             .as_ref()
             .map(|t| t.all_passing())
             .unwrap_or(true)
-            && self
-                .type_check
-                .as_ref()
-                .map(|t| t.clean)
-                .unwrap_or(true)
+            && self.type_check.as_ref().map(|t| t.clean).unwrap_or(true)
             && self
                 .lint_results
                 .as_ref()
@@ -269,11 +261,7 @@ impl OverseerSignals {
             .as_ref()
             .map(|b| b.error_count)
             .unwrap_or(0);
-        let type_c = self
-            .type_check
-            .as_ref()
-            .map(|t| t.error_count)
-            .unwrap_or(0);
+        let type_c = self.type_check.as_ref().map(|t| t.error_count).unwrap_or(0);
         let lint = self
             .lint_results
             .as_ref()
@@ -555,7 +543,11 @@ impl OverseerCluster {
 
         // Phase 3: Expensive overseers -- skippable by policy.
         if skip_expensive {
-            return OverseerSignals::merge(cheap_signals, moderate_signals, OverseerSignals::empty());
+            return OverseerSignals::merge(
+                cheap_signals,
+                moderate_signals,
+                OverseerSignals::empty(),
+            );
         }
 
         let expensive_signals = self
@@ -803,12 +795,28 @@ mod tests {
     fn all_passing_relative_true_when_lint_at_baseline() {
         let signals = OverseerSignals {
             test_results: Some(TestResults {
-                passed: 10, failed: 0, skipped: 0, total: 10,
-                regression_count: 0, failing_test_names: vec![],
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec![],
             }),
-            type_check: Some(TypeCheckResult { clean: true, error_count: 0, errors: vec![] }),
-            lint_results: Some(LintResults { error_count: 87, warning_count: 0, errors: vec![] }),
-            build_result: Some(BuildResult { success: true, error_count: 0, errors: vec![] }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: vec![],
+            }),
+            lint_results: Some(LintResults {
+                error_count: 87,
+                warning_count: 0,
+                errors: vec![],
+            }),
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: vec![],
+            }),
             security_scan: None,
             custom_checks: vec![],
         };
@@ -832,10 +840,18 @@ mod tests {
     fn all_passing_relative_false_on_test_failure() {
         let mut signals = OverseerSignals::empty();
         signals.test_results = Some(TestResults {
-            passed: 8, failed: 2, skipped: 0, total: 10,
-            regression_count: 0, failing_test_names: vec![],
+            passed: 8,
+            failed: 2,
+            skipped: 0,
+            total: 10,
+            regression_count: 0,
+            failing_test_names: vec![],
         });
-        signals.lint_results = Some(LintResults { error_count: 5, warning_count: 0, errors: vec![] });
+        signals.lint_results = Some(LintResults {
+            error_count: 5,
+            warning_count: 0,
+            errors: vec![],
+        });
         // Even though lint is at baseline, test failures should still fail
         assert!(!signals.all_passing_relative(5));
     }
@@ -1027,7 +1043,11 @@ mod tests {
 
     #[test]
     fn overseer_cost_serde_roundtrip() {
-        let costs = vec![OverseerCost::Cheap, OverseerCost::Moderate, OverseerCost::Expensive];
+        let costs = vec![
+            OverseerCost::Cheap,
+            OverseerCost::Moderate,
+            OverseerCost::Expensive,
+        ];
         for cost in costs {
             let json = serde_json::to_string(&cost).unwrap();
             let deserialized: OverseerCost = serde_json::from_str(&json).unwrap();
@@ -1127,12 +1147,28 @@ mod tests {
     fn test_all_passing_relative_false_when_lint_exceeds_baseline() {
         let signals = OverseerSignals {
             test_results: Some(TestResults {
-                passed: 10, failed: 0, skipped: 0, total: 10,
-                regression_count: 0, failing_test_names: vec![],
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec![],
             }),
-            type_check: Some(TypeCheckResult { clean: true, error_count: 0, errors: vec![] }),
-            lint_results: Some(LintResults { error_count: 20, warning_count: 0, errors: vec![] }),
-            build_result: Some(BuildResult { success: true, error_count: 0, errors: vec![] }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: vec![],
+            }),
+            lint_results: Some(LintResults {
+                error_count: 20,
+                warning_count: 0,
+                errors: vec![],
+            }),
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: vec![],
+            }),
             security_scan: None,
             custom_checks: vec![],
         };
@@ -1176,20 +1212,36 @@ mod tests {
 
         let moderate = OverseerSignals {
             test_results: Some(TestResults {
-                passed: 5, failed: 1, skipped: 0, total: 6,
-                regression_count: 0, failing_test_names: vec!["test_foo".into()],
+                passed: 5,
+                failed: 1,
+                skipped: 0,
+                total: 6,
+                regression_count: 0,
+                failing_test_names: vec!["test_foo".into()],
             }),
             type_check: None,
-            lint_results: Some(LintResults { error_count: 3, warning_count: 1, errors: vec![] }),
-            build_result: Some(BuildResult { success: true, error_count: 0, errors: vec![] }),
+            lint_results: Some(LintResults {
+                error_count: 3,
+                warning_count: 1,
+                errors: vec![],
+            }),
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: vec![],
+            }),
             security_scan: None,
             custom_checks: vec![],
         };
 
         let expensive = OverseerSignals {
             test_results: Some(TestResults {
-                passed: 50, failed: 0, skipped: 0, total: 50,
-                regression_count: 0, failing_test_names: vec![],
+                passed: 50,
+                failed: 0,
+                skipped: 0,
+                total: 50,
+                regression_count: 0,
+                failing_test_names: vec![],
             }),
             type_check: None,
             lint_results: None,

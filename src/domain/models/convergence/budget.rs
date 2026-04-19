@@ -102,13 +102,9 @@ impl ConvergenceBudget {
         let time_frac = 1.0
             - (self.wall_time_used.as_secs_f64()
                 / self.max_wall_time.as_secs_f64().max(f64::MIN_POSITIVE));
-        let iter_frac =
-            1.0 - (self.iterations_used as f64 / self.max_iterations.max(1) as f64);
+        let iter_frac = 1.0 - (self.iterations_used as f64 / self.max_iterations.max(1) as f64);
 
-        token_frac
-            .min(time_frac)
-            .min(iter_frac)
-            .clamp(0.0, 1.0)
+        token_frac.min(time_frac).min(iter_frac).clamp(0.0, 1.0)
     }
 
     /// Whether any budget remains across all dimensions.
@@ -165,9 +161,7 @@ impl ConvergenceBudget {
     pub fn scale(&self, factor: f64) -> Self {
         Self {
             max_tokens: (self.max_tokens as f64 * factor).round() as u64,
-            max_wall_time: Duration::from_secs_f64(
-                self.max_wall_time.as_secs_f64() * factor,
-            ),
+            max_wall_time: Duration::from_secs_f64(self.max_wall_time.as_secs_f64() * factor),
             max_iterations: (self.max_iterations as f64 * factor).round().max(1.0) as u32,
             tokens_used: 0,
             wall_time_used: Duration::ZERO,
@@ -596,16 +590,20 @@ mod tests {
 
     #[test]
     fn test_remaining_fraction_half_used() {
-        let mut b = ConvergenceBudget::default();
-        b.tokens_used = 50_000;
+        let b = ConvergenceBudget {
+            tokens_used: 50_000,
+            ..Default::default()
+        };
         // tokens = 50 %, time = 100 %, iters = 100 % => min = 50 %
         assert!((b.remaining_fraction() - 0.5).abs() < 1e-9);
     }
 
     #[test]
     fn test_remaining_fraction_exhausted() {
-        let mut b = ConvergenceBudget::default();
-        b.iterations_used = 5;
+        let b = ConvergenceBudget {
+            iterations_used: 5,
+            ..Default::default()
+        };
         assert!((b.remaining_fraction() - 0.0).abs() < f64::EPSILON);
     }
 
@@ -723,7 +721,11 @@ mod tests {
     fn test_basin_width_baseline() {
         let bw = estimate_basin_width(
             "A moderately detailed description of the task at hand with enough words to pass the minimum threshold for this particular test case",
-            false, false, false, false, false,
+            false,
+            false,
+            false,
+            false,
+            false,
         );
         assert!((bw.score - 0.5).abs() < f64::EPSILON);
         assert_eq!(bw.classification, BasinClassification::Moderate);
@@ -749,7 +751,7 @@ mod tests {
     #[test]
     fn test_basin_width_verbose_description_penalty() {
         // Build a description longer than 500 words.
-        let words: Vec<&str> = std::iter::repeat("word").take(510).collect();
+        let words: Vec<&str> = std::iter::repeat_n("word", 510).collect();
         let long_description = words.join(" ");
         let bw = estimate_basin_width(&long_description, true, false, false, false, false);
         // 0.5 + 0.15 (tests) - 0.10 (verbose) = 0.55
@@ -762,7 +764,11 @@ mod tests {
         // Even with all bonuses and penalties the score stays in [0, 1].
         let bw = estimate_basin_width(
             "A well-specified task with comprehensive detail about what needs to happen including tests examples invariants and more context",
-            true, true, true, true, true,
+            true,
+            true,
+            true,
+            true,
+            true,
         );
         assert!(bw.score >= 0.0);
         assert!(bw.score <= 1.0);
@@ -918,9 +924,11 @@ mod tests {
 
     #[test]
     fn test_extension_requested_when_low_and_converging() {
-        let mut b = ConvergenceBudget::default();
         // Use up ~90 % of tokens so remaining < 15 %.
-        b.tokens_used = 90_000;
+        let b = ConvergenceBudget {
+            tokens_used: 90_000,
+            ..Default::default()
+        };
         assert!(b.should_request_extension(true));
     }
 
@@ -932,8 +940,10 @@ mod tests {
 
     #[test]
     fn test_extension_not_requested_when_not_converging() {
-        let mut b = ConvergenceBudget::default();
-        b.tokens_used = 90_000;
+        let b = ConvergenceBudget {
+            tokens_used: 90_000,
+            ..Default::default()
+        };
         assert!(!b.should_request_extension(false));
     }
 
@@ -1030,7 +1040,10 @@ mod tests {
         }
         assert_eq!(tracker.sample_count(Complexity::Simple), 5);
         let p95 = tracker.p95_for_tier(Complexity::Simple);
-        assert!(p95.is_some(), "p95 must be Some with exactly MIN_SAMPLES_FOR_P95 samples");
+        assert!(
+            p95.is_some(),
+            "p95 must be Some with exactly MIN_SAMPLES_FOR_P95 samples"
+        );
 
         // With 4 samples it should be None.
         let mut tracker2 = BudgetCalibrationTracker::default();
@@ -1061,11 +1074,21 @@ mod tests {
 
         let alerts = tracker.calibration_alerts();
         // All three tiers must appear.
-        assert_eq!(alerts.len(), 3, "expected alerts for all three exceeding tiers");
+        assert_eq!(
+            alerts.len(),
+            3,
+            "expected alerts for all three exceeding tiers"
+        );
 
         let tiers: Vec<Complexity> = alerts.iter().map(|a| a.tier).collect();
         assert!(tiers.contains(&Complexity::Simple), "missing Simple alert");
-        assert!(tiers.contains(&Complexity::Moderate), "missing Moderate alert");
-        assert!(tiers.contains(&Complexity::Complex), "missing Complex alert");
+        assert!(
+            tiers.contains(&Complexity::Moderate),
+            "missing Moderate alert"
+        );
+        assert!(
+            tiers.contains(&Complexity::Complex),
+            "missing Complex alert"
+        );
     }
 }

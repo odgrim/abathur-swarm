@@ -165,7 +165,11 @@ impl EventHandler for FederationResultHandler {
         }
     }
 
-    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+    async fn handle(
+        &self,
+        event: &UnifiedEvent,
+        _ctx: &HandlerContext,
+    ) -> Result<Reaction, String> {
         match &event.payload {
             EventPayload::FederationResultReceived {
                 task_id,
@@ -282,9 +286,7 @@ impl EventHandler for FederationResultHandler {
                         task_id: *task_id,
                         correlation_id: event.correlation_id.unwrap_or(Uuid::nil()),
                         status: crate::domain::models::a2a::FederationTaskStatus::Failed,
-                        summary: format!(
-                            "Cerebrate {cerebrate_id} became unreachable"
-                        ),
+                        summary: format!("Cerebrate {cerebrate_id} became unreachable"),
                         artifacts: Vec::new(),
                         metrics: std::collections::HashMap::new(),
                         notes: None,
@@ -351,13 +353,17 @@ impl EventHandler for FederationResultHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::event_bus::{EventBus, EventBusConfig, EventId, EventSeverity, SequenceNumber};
+    use crate::services::event_bus::{
+        EventBus, EventBusConfig, EventId, EventSeverity, SequenceNumber,
+    };
     use crate::services::federation::config::FederationConfig;
 
     fn make_handler() -> FederationResultHandler {
         let config = FederationConfig::default();
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-        let svc = Arc::new(super::super::service::FederationService::new(config, event_bus));
+        let svc = Arc::new(super::super::service::FederationService::new(
+            config, event_bus,
+        ));
         FederationResultHandler::new(svc)
     }
 
@@ -522,8 +528,7 @@ mod tests {
     #[test]
     fn test_reactions_to_events_none() {
         let handler = make_handler();
-        let events =
-            handler.reactions_to_events(&[FederationReaction::None], Uuid::new_v4(), "c1");
+        let events = handler.reactions_to_events(&[FederationReaction::None], Uuid::new_v4(), "c1");
         assert!(events.is_empty());
     }
 
@@ -549,7 +554,10 @@ mod tests {
                 assert_eq!(reaction_type, "escalate");
                 assert_eq!(*goal_id, Some(goal));
             }
-            other => panic!("Expected FederationReactionEmitted, got {:?}", other.variant_name()),
+            other => panic!(
+                "Expected FederationReactionEmitted, got {:?}",
+                other.variant_name()
+            ),
         }
     }
 
@@ -576,7 +584,10 @@ mod tests {
                 assert!(description.contains("Fix the thing"));
                 assert_eq!(*goal_id, Some(goal));
             }
-            other => panic!("Expected FederationReactionEmitted, got {:?}", other.variant_name()),
+            other => panic!(
+                "Expected FederationReactionEmitted, got {:?}",
+                other.variant_name()
+            ),
         }
     }
 
@@ -600,7 +611,10 @@ mod tests {
                 assert_eq!(reaction_type, "update_goal_progress");
                 assert_eq!(*goal_id, Some(goal));
             }
-            other => panic!("Expected FederationReactionEmitted, got {:?}", other.variant_name()),
+            other => panic!(
+                "Expected FederationReactionEmitted, got {:?}",
+                other.variant_name()
+            ),
         }
     }
 
@@ -622,7 +636,10 @@ mod tests {
                 assert_eq!(reaction_type, "emit_event");
                 assert_eq!(description, "Something happened");
             }
-            other => panic!("Expected FederationReactionEmitted, got {:?}", other.variant_name()),
+            other => panic!(
+                "Expected FederationReactionEmitted, got {:?}",
+                other.variant_name()
+            ),
         }
     }
 }

@@ -14,7 +14,8 @@ use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::task::Complexity;
 use crate::domain::models::{
     AttractorState, AttractorType, ContextHealth, ConvergenceBudget, ConvergencePhase,
-    ConvergencePolicy, Observation, SpecificationEvolution, StrategyEntry, StrategyKind, Trajectory,
+    ConvergencePolicy, Observation, SpecificationEvolution, StrategyEntry, StrategyKind,
+    Trajectory,
 };
 use crate::domain::ports::{StrategyStats, TrajectoryRepository};
 
@@ -205,9 +206,10 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
             // Collect strategy entries with positive convergence delta
             for entry in &trajectory.strategy_log {
                 if let Some(delta) = entry.convergence_delta_achieved
-                    && delta > 0.0 {
-                        successful_entries.push(entry.clone());
-                    }
+                    && delta > 0.0
+                {
+                    successful_entries.push(entry.clone());
+                }
             }
 
             if successful_entries.len() >= limit {
@@ -275,10 +277,9 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
         let mut total_tokens: u64 = 0;
 
         for (log_json,) in &rows {
-            let entries: Vec<StrategyEntry> = serde_json::from_str(log_json)
-                .map_err(|e| {
-                    DomainError::SerializationError(format!("Invalid strategy_log: {}", e))
-                })?;
+            let entries: Vec<StrategyEntry> = serde_json::from_str(log_json).map_err(|e| {
+                DomainError::SerializationError(format!("Invalid strategy_log: {}", e))
+            })?;
 
             for entry in &entries {
                 if entry.strategy_kind.kind_name() == strategy_name {
@@ -320,11 +321,10 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
         // Extract the top-level attractor classification tag from the JSON.
         // AttractorState is serialized as { "classification": { "<type>": {...} }, ... }
         // We need to get the key name inside the classification object.
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT attractor_state_json FROM convergence_trajectories",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT attractor_state_json FROM convergence_trajectories")
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut distribution: HashMap<String, u32> = HashMap::new();
 
@@ -358,9 +358,7 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
         .await?;
 
         match row {
-            Some((converged, total)) if total > 0 => {
-                Ok(converged as f64 / total as f64)
-            }
+            Some((converged, total)) if total > 0 => Ok(converged as f64 / total as f64),
             _ => Ok(0.0),
         }
     }
@@ -456,43 +454,43 @@ impl TryFrom<TrajectoryRow> for Trajectory {
         let phase: ConvergencePhase = serde_json::from_str(&row.phase)
             .map_err(|e| DomainError::SerializationError(format!("Invalid phase: {}", e)))?;
 
-        let specification: SpecificationEvolution =
-            serde_json::from_str(&row.specification_json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid specification: {}", e)))?;
+        let specification: SpecificationEvolution = serde_json::from_str(&row.specification_json)
+            .map_err(|e| {
+            DomainError::SerializationError(format!("Invalid specification: {}", e))
+        })?;
 
-        let observations: Vec<Observation> =
-            serde_json::from_str(&row.observations_json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid observations: {}", e)))?;
+        let observations: Vec<Observation> = serde_json::from_str(&row.observations_json)
+            .map_err(|e| DomainError::SerializationError(format!("Invalid observations: {}", e)))?;
 
-        let attractor_state: AttractorState =
-            serde_json::from_str(&row.attractor_state_json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid attractor_state: {}", e)))?;
+        let attractor_state: AttractorState = serde_json::from_str(&row.attractor_state_json)
+            .map_err(|e| {
+                DomainError::SerializationError(format!("Invalid attractor_state: {}", e))
+            })?;
 
-        let budget: ConvergenceBudget =
-            serde_json::from_str(&row.budget_json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid budget: {}", e)))?;
+        let budget: ConvergenceBudget = serde_json::from_str(&row.budget_json)
+            .map_err(|e| DomainError::SerializationError(format!("Invalid budget: {}", e)))?;
 
-        let policy: ConvergencePolicy =
-            serde_json::from_str(&row.policy_json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid policy: {}", e)))?;
+        let policy: ConvergencePolicy = serde_json::from_str(&row.policy_json)
+            .map_err(|e| DomainError::SerializationError(format!("Invalid policy: {}", e)))?;
 
-        let strategy_log: Vec<StrategyEntry> =
-            serde_json::from_str(&row.strategy_log_json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid strategy_log: {}", e)))?;
+        let strategy_log: Vec<StrategyEntry> = serde_json::from_str(&row.strategy_log_json)
+            .map_err(|e| DomainError::SerializationError(format!("Invalid strategy_log: {}", e)))?;
 
-        let context_health: ContextHealth =
-            serde_json::from_str(&row.context_health_json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid context_health: {}", e)))?;
+        let context_health: ContextHealth = serde_json::from_str(&row.context_health_json)
+            .map_err(|e| {
+                DomainError::SerializationError(format!("Invalid context_health: {}", e))
+            })?;
 
-        let hints: Vec<String> =
-            serde_json::from_str(&row.hints_json)
-                .map_err(|e| DomainError::SerializationError(format!("Invalid hints: {}", e)))?;
+        let hints: Vec<String> = serde_json::from_str(&row.hints_json)
+            .map_err(|e| DomainError::SerializationError(format!("Invalid hints: {}", e)))?;
 
         let forced_strategy: Option<StrategyKind> = row
             .forced_strategy_json
             .map(|s| serde_json::from_str(&s))
             .transpose()
-            .map_err(|e| DomainError::SerializationError(format!("Invalid forced_strategy: {}", e)))?;
+            .map_err(|e| {
+                DomainError::SerializationError(format!("Invalid forced_strategy: {}", e))
+            })?;
 
         let created_at = super::parse_datetime(&row.created_at)?;
         let updated_at = super::parse_datetime(&row.updated_at)?;
@@ -752,12 +750,9 @@ mod tests {
 
         // Create a trajectory with strategy log entries.
         let entries = vec![
-            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false)
-                .with_delta(0.2),
-            StrategyEntry::new(StrategyKind::RetryWithFeedback, 1, 20_000, false)
-                .with_delta(-0.1),
-            StrategyEntry::new(StrategyKind::FocusedRepair, 2, 15_000, false)
-                .with_delta(0.3),
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false).with_delta(0.2),
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 1, 20_000, false).with_delta(-0.1),
+            StrategyEntry::new(StrategyKind::FocusedRepair, 2, 15_000, false).with_delta(0.3),
         ];
 
         let t = converged_trajectory_with_budget(Complexity::Simple, 3, entries);
@@ -823,7 +818,7 @@ mod tests {
         assert_eq!(dist.get("fixed_point"), Some(&2));
         assert_eq!(dist.get("plateau"), Some(&1));
         // No other types should be present.
-        assert!(dist.get("limit_cycle").is_none());
+        assert!(!dist.contains_key("limit_cycle"));
     }
 
     #[tokio::test]
@@ -832,31 +827,28 @@ mod tests {
 
         // Create trajectories with "rust" in specification.
         let mut t1 = test_trajectory();
-        t1.specification = SpecificationEvolution::new(
-            SpecificationSnapshot::new("implement a rust parser".into()),
-        );
+        t1.specification = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "implement a rust parser".into(),
+        ));
         t1.phase = ConvergencePhase::Converged;
         save_with_task(&repo, &pool, &t1).await;
 
         let mut t2 = test_trajectory();
-        t2.specification = SpecificationEvolution::new(
-            SpecificationSnapshot::new("implement a rust formatter".into()),
-        );
+        t2.specification = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "implement a rust formatter".into(),
+        ));
         t2.phase = ConvergencePhase::Exhausted;
         save_with_task(&repo, &pool, &t2).await;
 
         // One unrelated trajectory.
         let mut t3 = test_trajectory();
-        t3.specification = SpecificationEvolution::new(
-            SpecificationSnapshot::new("implement a python linter".into()),
-        );
+        t3.specification = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "implement a python linter".into(),
+        ));
         t3.phase = ConvergencePhase::Converged;
         save_with_task(&repo, &pool, &t3).await;
 
-        let rate = repo
-            .convergence_rate_by_task_type("rust")
-            .await
-            .unwrap();
+        let rate = repo.convergence_rate_by_task_type("rust").await.unwrap();
 
         // 1 converged out of 2 terminal "rust" trajectories = 0.5
         assert!(
@@ -888,21 +880,21 @@ mod tests {
 
         // Create trajectories with varying specifications.
         let mut t1 = test_trajectory();
-        t1.specification = SpecificationEvolution::new(
-            SpecificationSnapshot::new("implement authentication middleware".into()),
-        );
+        t1.specification = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "implement authentication middleware".into(),
+        ));
         save_with_task(&repo, &pool, &t1).await;
 
         let mut t2 = test_trajectory();
-        t2.specification = SpecificationEvolution::new(
-            SpecificationSnapshot::new("implement database connection pooling".into()),
-        );
+        t2.specification = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "implement database connection pooling".into(),
+        ));
         save_with_task(&repo, &pool, &t2).await;
 
         let mut t3 = test_trajectory();
-        t3.specification = SpecificationEvolution::new(
-            SpecificationSnapshot::new("fix authentication token expiry".into()),
-        );
+        t3.specification = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "fix authentication token expiry".into(),
+        ));
         save_with_task(&repo, &pool, &t3).await;
 
         // Search for "authentication" related trajectories.
@@ -920,15 +912,15 @@ mod tests {
         let (repo, pool) = setup_test_repo().await;
 
         let mut t1 = test_trajectory();
-        t1.specification = SpecificationEvolution::new(
-            SpecificationSnapshot::new("implement REST API endpoint".into()),
-        );
+        t1.specification = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "implement REST API endpoint".into(),
+        ));
         save_with_task(&repo, &pool, &t1).await;
 
         let mut t2 = test_trajectory();
-        t2.specification = SpecificationEvolution::new(
-            SpecificationSnapshot::new("implement GraphQL resolver".into()),
-        );
+        t2.specification = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "implement GraphQL resolver".into(),
+        ));
         save_with_task(&repo, &pool, &t2).await;
 
         // Search with tags that match t2.
@@ -938,7 +930,7 @@ mod tests {
             .unwrap();
 
         // Should find t2 (matches "graphql" tag).
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
         // Verify at least one result has GraphQL in spec.
         let has_graphql = results.iter().any(|t| {
             let spec_json = serde_json::to_string(&t.specification).unwrap_or_default();
@@ -987,12 +979,9 @@ mod tests {
             },
         };
         t.strategy_log = vec![
-            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false)
-                .with_delta(0.15),
-            StrategyEntry::new(StrategyKind::FocusedRepair, 1, 15_000, false)
-                .with_delta(-0.05), // negative, should not be included
-            StrategyEntry::new(StrategyKind::RetryAugmented, 2, 20_000, false)
-                .with_delta(0.25),
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false).with_delta(0.15),
+            StrategyEntry::new(StrategyKind::FocusedRepair, 1, 15_000, false).with_delta(-0.05), // negative, should not be included
+            StrategyEntry::new(StrategyKind::RetryAugmented, 2, 20_000, false).with_delta(0.25),
         ];
         save_with_task(&repo, &pool, &t).await;
 
@@ -1034,8 +1023,7 @@ mod tests {
             },
         };
         t.strategy_log = vec![
-            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false)
-                .with_delta(0.3),
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false).with_delta(0.3),
         ];
         save_with_task(&repo, &pool, &t).await;
 

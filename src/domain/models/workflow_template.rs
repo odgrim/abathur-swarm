@@ -145,12 +145,30 @@ fn default_max_verification_retries() -> u32 {
 /// (or the default `.abathur/workflows/`); these embedded strings are never
 /// read by the engine.
 pub const DEFAULT_WORKFLOW_YAMLS: &[(&str, &str)] = &[
-    ("code", include_str!("../../../.abathur/workflows/code.yaml")),
-    ("analysis", include_str!("../../../.abathur/workflows/analysis.yaml")),
-    ("docs", include_str!("../../../.abathur/workflows/docs.yaml")),
-    ("review", include_str!("../../../.abathur/workflows/review.yaml")),
-    ("pr-review", include_str!("../../../.abathur/workflows/pr-review.yaml")),
-    ("external", include_str!("../../../.abathur/workflows/external.yaml")),
+    (
+        "code",
+        include_str!("../../../.abathur/workflows/code.yaml"),
+    ),
+    (
+        "analysis",
+        include_str!("../../../.abathur/workflows/analysis.yaml"),
+    ),
+    (
+        "docs",
+        include_str!("../../../.abathur/workflows/docs.yaml"),
+    ),
+    (
+        "review",
+        include_str!("../../../.abathur/workflows/review.yaml"),
+    ),
+    (
+        "pr-review",
+        include_str!("../../../.abathur/workflows/pr-review.yaml"),
+    ),
+    (
+        "external",
+        include_str!("../../../.abathur/workflows/external.yaml"),
+    ),
 ];
 
 impl WorkflowTemplate {
@@ -205,7 +223,8 @@ impl WorkflowTemplate {
 
     /// Serialize this workflow template to YAML.
     pub fn to_yaml(&self) -> Result<String, String> {
-        serde_yaml::to_string(self).map_err(|e| format!("Failed to serialize workflow to YAML: {}", e))
+        serde_yaml::to_string(self)
+            .map_err(|e| format!("Failed to serialize workflow to YAML: {}", e))
     }
 
     /// Load workflow templates from YAML files in a directory.
@@ -213,14 +232,21 @@ impl WorkflowTemplate {
     /// Reads all `*.yaml` and `*.yml` files from the given directory path.
     /// Returns an empty map if the directory does not exist (graceful fallback).
     /// Returns an error only if the directory exists but a file cannot be parsed.
-    pub fn load_from_directory(dir: impl AsRef<std::path::Path>) -> Result<std::collections::HashMap<String, Self>, String> {
+    pub fn load_from_directory(
+        dir: impl AsRef<std::path::Path>,
+    ) -> Result<std::collections::HashMap<String, Self>, String> {
         let dir = dir.as_ref();
         if !dir.exists() {
             return Ok(std::collections::HashMap::new());
         }
 
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| format!("Failed to read workflow directory '{}': {}", dir.display(), e))?;
+        let entries = std::fs::read_dir(dir).map_err(|e| {
+            format!(
+                "Failed to read workflow directory '{}': {}",
+                dir.display(),
+                e
+            )
+        })?;
 
         let mut templates = std::collections::HashMap::new();
         for entry in entries {
@@ -241,7 +267,6 @@ impl WorkflowTemplate {
 
         Ok(templates)
     }
-
 }
 
 #[cfg(test)]
@@ -292,8 +317,8 @@ mod tests {
     #[test]
     fn test_read_only_flags() {
         let wf = embedded_workflow("code");
-        assert!(wf.phases[0].read_only);  // research
-        assert!(wf.phases[1].read_only);  // plan
+        assert!(wf.phases[0].read_only); // research
+        assert!(wf.phases[1].read_only); // plan
         assert!(!wf.phases[2].read_only); // implement
         assert!(!wf.phases[3].read_only); // review
     }
@@ -604,14 +629,14 @@ tools:
         assert!(!code.phases[0].gate); // research
         assert!(!code.phases[1].gate); // plan
         assert!(!code.phases[2].gate); // implement
-        assert!(code.phases[3].gate);  // review
+        assert!(code.phases[3].gate); // review
 
         let ext = embedded_workflow("external");
-        assert!(ext.phases[0].gate);   // triage
-        assert!(ext.phases[1].gate);   // validation
-        assert!(!ext.phases[2].gate);  // research
-        assert!(!ext.phases[3].gate);  // plan
-        assert!(!ext.phases[4].gate);  // implement
-        assert!(ext.phases[5].gate);   // review
+        assert!(ext.phases[0].gate); // triage
+        assert!(ext.phases[1].gate); // validation
+        assert!(!ext.phases[2].gate); // research
+        assert!(!ext.phases[3].gate); // plan
+        assert!(!ext.phases[4].gate); // implement
+        assert!(ext.phases[5].gate); // review
     }
 }

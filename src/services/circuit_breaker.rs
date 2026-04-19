@@ -248,7 +248,10 @@ impl CircuitBreaker {
     /// Get recent failure count within the window.
     pub fn recent_failure_count(&self, config: &CircuitBreakerConfig) -> usize {
         let cutoff = Utc::now() - config.failure_window;
-        self.failures.iter().filter(|f| f.timestamp > cutoff).count()
+        self.failures
+            .iter()
+            .filter(|f| f.timestamp > cutoff)
+            .count()
     }
 
     /// Manually reset the circuit.
@@ -290,24 +293,16 @@ pub enum RecoveryAction {
     /// Just halt and wait for timeout.
     Halt,
     /// Trigger DAG restructuring to find alternative approach.
-    TriggerRestructure {
-        task_id: Uuid,
-        reason: String,
-    },
+    TriggerRestructure { task_id: Uuid, reason: String },
     /// Spawn a diagnostic agent to investigate.
     SpawnDiagnostic {
         task_id: Uuid,
         error_context: String,
     },
     /// Escalate to overmind for task re-decomposition.
-    EscalateToOvermind {
-        goal_id: Uuid,
-        reason: String,
-    },
+    EscalateToOvermind { goal_id: Uuid, reason: String },
     /// Notify and continue (for non-critical circuits).
-    NotifyOnly {
-        message: String,
-    },
+    NotifyOnly { message: String },
 }
 
 impl RecoveryAction {
@@ -397,7 +392,10 @@ impl RecoveryPolicy {
             if self.prefer_restructure && open_count < self.escalation_threshold {
                 return RecoveryAction::restructure(
                     *task_id,
-                    format!("Circuit opened {} times, attempting restructure", open_count),
+                    format!(
+                        "Circuit opened {} times, attempting restructure",
+                        open_count
+                    ),
                 );
             }
 
@@ -415,7 +413,6 @@ impl RecoveryPolicy {
 
         self.default_action.clone()
     }
-
 
     /// Register a specific policy for a task chain.
     pub fn register_task_policy(&mut self, task_id: Uuid, action: RecoveryAction) {
@@ -469,7 +466,10 @@ impl CircuitBreakerService {
     }
 
     /// Set the event sender for circuit tripped events.
-    pub fn with_event_sender(mut self, sender: tokio::sync::mpsc::Sender<CircuitTrippedEvent>) -> Self {
+    pub fn with_event_sender(
+        mut self,
+        sender: tokio::sync::mpsc::Sender<CircuitTrippedEvent>,
+    ) -> Self {
         self.event_sender = Some(sender);
         self
     }
@@ -493,7 +493,9 @@ impl CircuitBreakerService {
         }
 
         let mut circuits = self.circuits.write().await;
-        let circuit = circuits.entry(scope.clone()).or_insert_with(|| CircuitBreaker::new(scope.clone()));
+        let circuit = circuits
+            .entry(scope.clone())
+            .or_insert_with(|| CircuitBreaker::new(scope.clone()));
 
         if circuit.allows(&self.config) {
             if circuit.state == CircuitState::HalfOpen {
@@ -518,7 +520,9 @@ impl CircuitBreakerService {
 
         let error_str = error.into();
         let mut circuits = self.circuits.write().await;
-        let circuit = circuits.entry(scope.clone()).or_insert_with(|| CircuitBreaker::new(scope.clone()));
+        let circuit = circuits
+            .entry(scope.clone())
+            .or_insert_with(|| CircuitBreaker::new(scope.clone()));
 
         let was_closed = circuit.state == CircuitState::Closed;
         circuit.record_failure(FailureRecord::new(error_str), &self.config);
@@ -555,8 +559,13 @@ impl CircuitBreakerService {
         }
 
         let mut circuits = self.circuits.write().await;
-        let circuit = circuits.entry(scope.clone()).or_insert_with(|| CircuitBreaker::new(scope));
-        circuit.record_failure(FailureRecord::new(error).with_entity(entity_id), &self.config);
+        let circuit = circuits
+            .entry(scope.clone())
+            .or_insert_with(|| CircuitBreaker::new(scope));
+        circuit.record_failure(
+            FailureRecord::new(error).with_entity(entity_id),
+            &self.config,
+        );
     }
 
     /// Record a success for the given scope.
@@ -653,18 +662,18 @@ where
             opened_at,
             retry_after,
         }),
-        CircuitCheckResult::Allowed | CircuitCheckResult::Testing { .. } => {
-            match f.await {
-                Ok(result) => {
-                    service.record_success(scope).await;
-                    Ok(result)
-                }
-                Err(e) => {
-                    service.record_failure(scope, format!("{:?}", &e as &dyn std::fmt::Debug)).await;
-                    Err(CircuitBreakerError::OperationFailed(e))
-                }
+        CircuitCheckResult::Allowed | CircuitCheckResult::Testing { .. } => match f.await {
+            Ok(result) => {
+                service.record_success(scope).await;
+                Ok(result)
             }
-        }
+            Err(e) => {
+                service
+                    .record_failure(scope, format!("{:?}", &e as &dyn std::fmt::Debug))
+                    .await;
+                Err(CircuitBreakerError::OperationFailed(e))
+            }
+        },
     }
 }
 
@@ -684,7 +693,9 @@ pub enum CircuitBreakerError<E> {
 impl<E: std::fmt::Display> std::fmt::Display for CircuitBreakerError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::CircuitOpen { scope, retry_after, .. } => {
+            Self::CircuitOpen {
+                scope, retry_after, ..
+            } => {
                 write!(
                     f,
                     "Circuit breaker open for {:?}, retry after {}",
@@ -870,8 +881,12 @@ mod tests {
     async fn test_circuit_breaker_stats() {
         let service = CircuitBreakerService::with_defaults();
 
-        service.record_failure(CircuitScope::agent("agent-1"), "error").await;
-        service.record_failure(CircuitScope::agent("agent-2"), "error").await;
+        service
+            .record_failure(CircuitScope::agent("agent-1"), "error")
+            .await;
+        service
+            .record_failure(CircuitScope::agent("agent-2"), "error")
+            .await;
 
         let stats = service.stats().await;
         assert_eq!(stats.len(), 2);
@@ -924,13 +939,19 @@ mod tests {
         let goal_id = Uuid::new_v4();
 
         let restructure = RecoveryAction::restructure(task_id, "test reason");
-        assert!(matches!(restructure, RecoveryAction::TriggerRestructure { .. }));
+        assert!(matches!(
+            restructure,
+            RecoveryAction::TriggerRestructure { .. }
+        ));
 
         let diagnose = RecoveryAction::diagnose(task_id, "error context");
         assert!(matches!(diagnose, RecoveryAction::SpawnDiagnostic { .. }));
 
         let escalate = RecoveryAction::escalate(goal_id, "escalation reason");
-        assert!(matches!(escalate, RecoveryAction::EscalateToOvermind { .. }));
+        assert!(matches!(
+            escalate,
+            RecoveryAction::EscalateToOvermind { .. }
+        ));
     }
 
     #[test]
@@ -964,9 +985,12 @@ mod tests {
         let task_id = Uuid::new_v4();
 
         // Register specific action for task
-        policy.register_task_policy(task_id, RecoveryAction::NotifyOnly {
-            message: "Test notification".to_string(),
-        });
+        policy.register_task_policy(
+            task_id,
+            RecoveryAction::NotifyOnly {
+                message: "Test notification".to_string(),
+            },
+        );
 
         // Should use the specific policy
         let action = policy.determine_action(&CircuitScope::TaskChain(task_id), 1);
@@ -980,7 +1004,8 @@ mod tests {
         let service = CircuitBreakerService::new(CircuitBreakerConfig {
             failure_threshold: 2,
             ..Default::default()
-        }).with_event_sender(tx);
+        })
+        .with_event_sender(tx);
 
         let scope = CircuitScope::task_chain(Uuid::new_v4());
 
@@ -992,7 +1017,10 @@ mod tests {
         service.record_failure(scope.clone(), "error 2").await;
 
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event.recovery_action, RecoveryAction::TriggerRestructure { .. }),);
+        assert!(matches!(
+            event.recovery_action,
+            RecoveryAction::TriggerRestructure { .. }
+        ),);
         assert_eq!(event.open_count, 1);
         assert_eq!(event.recent_failures.len(), 2);
     }
@@ -1002,10 +1030,12 @@ mod tests {
         let service = CircuitBreakerService::with_defaults();
         let task_id = Uuid::new_v4();
 
-        service.register_task_recovery(
-            task_id,
-            RecoveryAction::diagnose(task_id, "custom diagnostic"),
-        ).await;
+        service
+            .register_task_recovery(
+                task_id,
+                RecoveryAction::diagnose(task_id, "custom diagnostic"),
+            )
+            .await;
 
         // Verify policy was updated
         let policy = service.recovery_policy.read().await;

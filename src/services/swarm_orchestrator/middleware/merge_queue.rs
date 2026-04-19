@@ -6,11 +6,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::errors::DomainResult;
-use crate::services::{
-    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
-};
 use crate::services::swarm_orchestrator::types::SwarmEvent;
+use crate::services::{
+    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, IntegrationVerifierService,
+    MergeQueue, MergeQueueConfig, VerifierConfig,
+};
 
 use super::{PostCompletionContext, PostCompletionMiddleware};
 
@@ -60,11 +60,7 @@ impl PostCompletionMiddleware for MergeQueueMiddleware {
         );
 
         let merge_config = MergeQueueConfig {
-            repo_path: ctx
-                .repo_path
-                .to_str()
-                .unwrap_or(".")
-                .to_string(),
+            repo_path: ctx.repo_path.to_str().unwrap_or(".").to_string(),
             main_branch: ctx.default_base_ref.clone(),
             require_verification: ctx.verify_on_completion,
             ..Default::default()

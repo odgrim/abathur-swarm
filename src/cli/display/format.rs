@@ -5,11 +5,7 @@ use chrono_humanize::HumanTime;
 
 /// Return first 8 chars of a UUID string for list display.
 pub fn short_id(id: &str) -> &str {
-    if id.len() >= 8 {
-        &id[..8]
-    } else {
-        id
-    }
+    if id.len() >= 8 { &id[..8] } else { id }
 }
 
 /// Format a DateTime as relative time ("2 hours ago", "3 days ago").
@@ -41,7 +37,8 @@ pub fn truncate_ellipsis(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        let boundary = s.char_indices()
+        let boundary = s
+            .char_indices()
             .map(|(i, _)| i)
             .take_while(|&i| i < max_len.saturating_sub(1))
             .last()
@@ -68,9 +65,12 @@ pub fn parse_duration(s: &str) -> anyhow::Result<chrono::Duration> {
     }
 
     let (num_str, unit) = s.split_at(s.len() - 1);
-    let value: i64 = num_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid duration '{}': expected a number followed by a unit (d/h/w/m)", s))?;
+    let value: i64 = num_str.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid duration '{}': expected a number followed by a unit (d/h/w/m)",
+            s
+        )
+    })?;
 
     match unit {
         "m" => Ok(chrono::Duration::minutes(value)),

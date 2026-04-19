@@ -9,12 +9,14 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{TaskStatus, WorktreeStatus};
 use crate::domain::models::workflow_template::OutputDelivery;
-use crate::domain::ports::{GoalRepository, MergeRequestRepository, TaskRepository, WorktreeRepository};
+use crate::domain::models::{TaskStatus, WorktreeStatus};
+use crate::domain::ports::{
+    GoalRepository, MergeRequestRepository, TaskRepository, WorktreeRepository,
+};
 use crate::services::{
-    AuditAction, AuditCategory, AuditLogService,
-    IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
+    AuditAction, AuditCategory, AuditLogService, IntegrationVerifierService, MergeQueue,
+    MergeQueueConfig, VerifierConfig,
 };
 
 use crate::services::event_bus::EventBus;
@@ -195,9 +197,7 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
         .await;
 
     let is_dirty = match &status {
-        Ok(o) if o.status.success() => {
-            !String::from_utf8_lossy(&o.stdout).trim().is_empty()
-        }
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         _ => true, // assume dirty if we can't check
     };
 
@@ -205,11 +205,28 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
         tracing::warn!(path = %repo_path.display(), "ensure_clean_working_dir: working directory is dirty — resetting");
 
         // Reset staged and unstaged changes
-        let _ = Command::new("git")
+        let reset_result = Command::new("git")
             .args(["reset", "--hard", "HEAD"])
             .current_dir(repo_path)
             .output()
             .await;
+        match &reset_result {
+            Ok(o) if !o.status.success() => {
+                tracing::error!(
+                    path = %repo_path.display(),
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    "ensure_clean_working_dir: git reset --hard HEAD failed"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    path = %repo_path.display(),
+                    error = %e,
+                    "ensure_clean_working_dir: failed to run git reset --hard HEAD"
+                );
+            }
+            _ => {}
+        }
     }
 
     // 5. Verify clean state
@@ -252,6 +269,19 @@ async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
     }
 }
 
+/// Return `true` if the given git push stderr indicates a recoverable rejection
+/// (remote advanced / non-fast-forward) that should be retried with fetch+rebase.
+///
+/// Non-rejection failures (auth, network, repo config) return `false` and should
+/// not trigger a fetch+rebase retry because the underlying error will persist.
+fn is_rejection_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("rejected")
+        || lower.contains("non-fast-forward")
+        || lower.contains("fetch first")
+        || lower.contains("failed to push some refs")
+}
+
 /// Push the local base ref to remote. On rejection (remote advanced),
 /// fetches and rebases once, then retries. Returns `true` if push succeeded.
 async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> bool {
@@ -285,6 +315,18 @@ async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> 
             Ok(output) if output.status.success() => return true,
             Ok(output) if attempt < max_retries => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
+                // Only fetch+rebase when the failure is a rejection (remote advanced).
+                // Auth, network, or repo-config errors won't be fixed by a rebase, so
+                // retrying is wasted work — bail out immediately instead.
+                if !is_rejection_error(&stderr) {
+                    tracing::error!(
+                        attempt,
+                        base_ref,
+                        %stderr,
+                        "git push failed with non-retryable error (not a rejection) — aborting"
+                    );
+                    return false;
+                }
                 tracing::warn!(attempt, base_ref, %stderr, "git push rejected, fetching and rebasing");
                 // Fetch latest
                 let _ = Command::new("git")
@@ -299,36 +341,37 @@ async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> 
                     .output()
                     .await;
                 if let Ok(r) = &rebase
-                    && !r.status.success() {
-                        tracing::error!(
-                            base_ref,
-                            stderr = %String::from_utf8_lossy(&r.stderr),
-                            "rebase onto origin/{} failed — aborting push retry", base_ref
-                        );
-                        let abort_result = Command::new("git")
-                            .args(["rebase", "--abort"])
-                            .current_dir(repo_path)
-                            .output()
-                            .await;
-                        match &abort_result {
-                            Ok(o) if !o.status.success() => {
-                                tracing::error!(
-                                    base_ref,
-                                    stderr = %String::from_utf8_lossy(&o.stderr),
-                                    "push_with_retry: rebase --abort itself failed"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    base_ref,
-                                    error = %e,
-                                    "push_with_retry: failed to run rebase --abort"
-                                );
-                            }
-                            _ => {}
+                    && !r.status.success()
+                {
+                    tracing::error!(
+                        base_ref,
+                        stderr = %String::from_utf8_lossy(&r.stderr),
+                        "rebase onto origin/{} failed — aborting push retry", base_ref
+                    );
+                    let abort_result = Command::new("git")
+                        .args(["rebase", "--abort"])
+                        .current_dir(repo_path)
+                        .output()
+                        .await;
+                    match &abort_result {
+                        Ok(o) if !o.status.success() => {
+                            tracing::error!(
+                                base_ref,
+                                stderr = %String::from_utf8_lossy(&o.stderr),
+                                "push_with_retry: rebase --abort itself failed"
+                            );
                         }
-                        return false;
+                        Err(e) => {
+                            tracing::error!(
+                                base_ref,
+                                error = %e,
+                                "push_with_retry: failed to run rebase --abort"
+                            );
+                        }
+                        _ => {}
                     }
+                    return false;
+                }
             }
             Ok(output) => {
                 tracing::error!(
@@ -447,11 +490,16 @@ pub async fn try_create_pull_request(
     // Create PR via gh CLI
     let pr_result = Command::new("gh")
         .args([
-            "pr", "create",
-            "--title", task_title,
-            "--body", task_description,
-            "--base", default_base_ref,
-            "--head", branch,
+            "pr",
+            "create",
+            "--title",
+            task_title,
+            "--body",
+            task_description,
+            "--base",
+            default_base_ref,
+            "--head",
+            branch,
         ])
         .current_dir(worktree_path)
         .output()
@@ -537,16 +585,10 @@ pub(crate) fn truncate_description(description: &str, max_chars: usize) -> Strin
     }
 
     // Try to find the first paragraph (before the first blank line or markdown separator)
-    let first_para = description
-        .split("\n\n")
-        .next()
-        .unwrap_or(description);
+    let first_para = description.split("\n\n").next().unwrap_or(description);
 
     // Also try splitting on markdown horizontal rules
-    let first_section = first_para
-        .split("\n---\n")
-        .next()
-        .unwrap_or(first_para);
+    let first_section = first_para.split("\n---\n").next().unwrap_or(first_para);
 
     // Strip leading markdown headers (# lines) to get to the actual content
     let cleaned: String = first_section
@@ -594,8 +636,14 @@ pub(crate) enum MergeBackOutcome {
 ///
 /// Standalone helper for use by both infrastructure.rs and helpers.rs.
 /// Falls back to returning `task_id` itself if the query fails.
-pub async fn find_root_ancestor_id<T: TaskRepository + ?Sized>(task_id: Uuid, task_repo: &T) -> Uuid {
-    task_repo.find_root_task_id(task_id).await.unwrap_or(task_id)
+pub async fn find_root_ancestor_id<T: TaskRepository + ?Sized>(
+    task_id: Uuid,
+    task_repo: &T,
+) -> Uuid {
+    task_repo
+        .find_root_task_id(task_id)
+        .await
+        .unwrap_or(task_id)
 }
 
 /// Helper function to run post-completion workflow (verification and merging).
@@ -638,8 +686,7 @@ pub async fn run_post_completion_workflow(
     merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
     fetch_on_sync: bool,
     post_completion_chain: Arc<tokio::sync::RwLock<super::middleware::PostCompletionChain>>,
-) -> DomainResult<()>
-{
+) -> DomainResult<()> {
     use super::middleware::PostCompletionContext;
 
     let mut ctx = PostCompletionContext {
@@ -668,7 +715,6 @@ pub async fn run_post_completion_workflow(
     chain.run(&mut ctx).await
 }
 
-
 /// Merge a subtask's branch into the root ancestor's feature branch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn merge_subtask_into_feature_branch(
@@ -681,8 +727,7 @@ pub(crate) async fn merge_subtask_into_feature_branch(
     repo_path: &std::path::Path,
     default_base_ref: &str,
     merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
-) -> DomainResult<MergeBackOutcome>
-{
+) -> DomainResult<MergeBackOutcome> {
     use tokio::process::Command;
 
     let subtask_wt = match worktree_repo.get_by_task(task_id).await? {
@@ -703,7 +748,11 @@ pub(crate) async fn merge_subtask_into_feature_branch(
 
     // Check if subtask has commits ahead of feature branch
     let log_output = Command::new("git")
-        .args(["log", &format!("{}..{}", root_wt.branch, subtask_wt.branch), "--oneline"])
+        .args([
+            "log",
+            &format!("{}..{}", root_wt.branch, subtask_wt.branch),
+            "--oneline",
+        ])
         .current_dir(repo_path)
         .output()
         .await;
@@ -722,7 +771,9 @@ pub(crate) async fn merge_subtask_into_feature_branch(
         Some(repo) => repo,
         None => {
             tracing::warn!(task_id = %task_id, "merge_request_repo not available, cannot merge subtask");
-            return Err(DomainError::ValidationFailed("MergeRequestRepository not configured".to_string()));
+            return Err(DomainError::ValidationFailed(
+                "MergeRequestRepository not configured".to_string(),
+            ));
         }
     };
     let verifier = IntegrationVerifierService::new(
@@ -747,26 +798,30 @@ pub(crate) async fn merge_subtask_into_feature_branch(
     );
 
     // Queue merge: subtask branch → feature branch, in root's worktree
-    merge_queue.queue_merge_back(
-        task_id,
-        &subtask_wt.branch,
-        &root_wt.branch,
-        &root_wt.path,
-    ).await?;
+    merge_queue
+        .queue_merge_back(task_id, &subtask_wt.branch, &root_wt.branch, &root_wt.path)
+        .await?;
 
     // Process immediately
     match merge_queue.process_next().await? {
         Some(result) if result.success => {
-            let _ = event_tx.send(SwarmEvent::SubtaskMergedToFeature {
-                task_id,
-                feature_branch: root_wt.branch.clone(),
-            }).await;
+            let _ = event_tx
+                .send(SwarmEvent::SubtaskMergedToFeature {
+                    task_id,
+                    feature_branch: root_wt.branch.clone(),
+                })
+                .await;
 
-            audit_log.info(
-                AuditCategory::Task,
-                AuditAction::TaskCompleted,
-                format!("Subtask {} merged into feature branch '{}'", task_id, root_wt.branch),
-            ).await;
+            audit_log
+                .info(
+                    AuditCategory::Task,
+                    AuditAction::TaskCompleted,
+                    format!(
+                        "Subtask {} merged into feature branch '{}'",
+                        task_id, root_wt.branch
+                    ),
+                )
+                .await;
 
             Ok(MergeBackOutcome::Merged)
         }
@@ -774,25 +829,54 @@ pub(crate) async fn merge_subtask_into_feature_branch(
             // Conflict detected. The MergeQueue recorded it with status=Conflict.
             // The existing process_merge_conflict_specialists (specialist_triggers.rs)
             // will pick this up on next tick and spawn a specialist.
-            audit_log.info(
-                AuditCategory::Task,
-                AuditAction::TaskFailed,
-                format!(
-                    "Merge conflict merging subtask {} into feature branch: {:?}",
-                    task_id, result.conflict_files
-                ),
-            ).await;
+            audit_log
+                .info(
+                    AuditCategory::Task,
+                    AuditAction::TaskFailed,
+                    format!(
+                        "Merge conflict merging subtask {} into feature branch: {:?}",
+                        task_id, result.conflict_files
+                    ),
+                )
+                .await;
 
             Ok(MergeBackOutcome::ConflictQueued)
         }
         Some(result) => {
             // Non-conflict merge failure
             Err(DomainError::ExecutionFailed(
-                result.error.unwrap_or_else(|| "Unknown merge failure".to_string())
+                result
+                    .error
+                    .unwrap_or_else(|| "Unknown merge failure".to_string()),
             ))
         }
         None => Ok(MergeBackOutcome::NoCommits),
     }
+}
+
+/// Per-repo-path auto-ship locks.
+///
+/// Keyed by the canonical repository path so that auto-ship operations
+/// targeting the same working tree serialize (required — they share a git
+/// index), while ships targeting different repos can run in parallel.
+static SHIP_LOCKS: tokio::sync::OnceCell<
+    tokio::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+> = tokio::sync::OnceCell::const_new();
+
+/// Get (or lazily create) the auto-ship mutex for a specific repo path.
+///
+/// The returned `Arc<Mutex<()>>` is cached in the global map, so subsequent
+/// calls with the same (canonicalized) path return the same mutex instance.
+async fn ship_lock_for(repo_path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let map = SHIP_LOCKS
+        .get_or_init(|| async { tokio::sync::Mutex::new(std::collections::HashMap::new()) })
+        .await;
+    let canonical = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let mut guard = map.lock().await;
+    guard
+        .entry(canonical)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 /// Check if all tasks in a tree are terminal and, if so, create a single PR.
@@ -807,12 +891,12 @@ pub(crate) async fn try_auto_ship(
     default_base_ref: &str,
     output_delivery: OutputDelivery,
     fetch_on_sync: bool,
-) -> Option<String>
-{
-    // Serialize all auto-ship operations. The git checkout → merge --squash → commit
-    // sequence operates on the shared repo working directory and must not run concurrently.
-    static SHIP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _guard = SHIP_LOCK.lock().await;
+) -> Option<String> {
+    // Serialize auto-ship operations *per repo path*. The git checkout → merge --squash → commit
+    // sequence operates on the shared repo working directory and must not run concurrently for
+    // the same repo; but ships targeting different repos are independent and may run in parallel.
+    let lock = ship_lock_for(repo_path).await;
+    let _guard = lock.lock().await;
 
     // Pre-flight: ensure the shared working directory is clean before starting.
     // A previous auto-ship may have left dirty state if its cleanup was incomplete.
@@ -839,8 +923,7 @@ pub(crate) async fn try_auto_ship(
     if root_task.status == TaskStatus::Validating {
         use crate::domain::models::workflow_state::WorkflowState;
 
-        let workflow_state = root_task.context.custom.get("workflow_state")
-            .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
+        let workflow_state = root_task.workflow_state();
 
         match &workflow_state {
             Some(WorkflowState::Completed { .. }) => {
@@ -907,11 +990,11 @@ pub(crate) async fn try_auto_ship(
                         continue;
                     }
 
-                    let workflow_state = st.context.custom.get("workflow_state")
-                        .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
+                    let workflow_state = st.workflow_state();
 
                     match &workflow_state {
-                        Some(WorkflowState::PhaseReady { .. }) | Some(WorkflowState::PhaseGate { .. }) => {
+                        Some(WorkflowState::PhaseReady { .. })
+                        | Some(WorkflowState::PhaseGate { .. }) => {
                             tracing::warn!(
                                 descendant_task_id = %st.id,
                                 workflow_state = ?workflow_state,
@@ -929,7 +1012,8 @@ pub(crate) async fn try_auto_ship(
                             let _ = st.transition_to(TaskStatus::Complete);
                             let _ = task_repo.update(&st).await;
                         }
-                        Some(WorkflowState::Failed { .. }) | Some(WorkflowState::Rejected { .. }) => {
+                        Some(WorkflowState::Failed { .. })
+                        | Some(WorkflowState::Rejected { .. }) => {
                             tracing::warn!(
                                 descendant_task_id = %st.id,
                                 workflow_state = ?workflow_state,
@@ -964,11 +1048,16 @@ pub(crate) async fn try_auto_ship(
     if root_task.status != TaskStatus::Complete
         && !has_any_successful_descendant(root_id, &*task_repo).await
     {
-        audit_log.info(
-            AuditCategory::Task,
-            AuditAction::TaskCompleted,
-            format!("All tasks in tree {} terminal but none succeeded - no PR", root_id),
-        ).await;
+        audit_log
+            .info(
+                AuditCategory::Task,
+                AuditAction::TaskCompleted,
+                format!(
+                    "All tasks in tree {} terminal but none succeeded - no PR",
+                    root_id
+                ),
+            )
+            .await;
         return None;
     }
 
@@ -1017,7 +1106,11 @@ pub(crate) async fn try_auto_ship(
                 _ => {}
             }
             let ff = TokioCommand::new("git")
-                .args(["merge", "--ff-only", &format!("origin/{}", default_base_ref)])
+                .args([
+                    "merge",
+                    "--ff-only",
+                    &format!("origin/{}", default_base_ref),
+                ])
                 .current_dir(repo_path)
                 .output()
                 .await;
@@ -1072,7 +1165,11 @@ pub(crate) async fn try_auto_ship(
     let has_commits = {
         use tokio::process::Command;
         Command::new("git")
-            .args(["log", &format!("{}..{}", default_base_ref, root_wt.branch), "--oneline"])
+            .args([
+                "log",
+                &format!("{}..{}", default_base_ref, root_wt.branch),
+                "--oneline",
+            ])
             .current_dir(repo_path)
             .output()
             .await
@@ -1087,11 +1184,16 @@ pub(crate) async fn try_auto_ship(
             base_ref = %default_base_ref,
             "Completed task tree has no commits to ship — feature branch has no commits ahead of base"
         );
-        audit_log.info(
-            AuditCategory::Task,
-            AuditAction::TaskCompleted,
-            format!("Feature branch {} has no commits ahead of {} - no PR", root_wt.branch, default_base_ref),
-        ).await;
+        audit_log
+            .info(
+                AuditCategory::Task,
+                AuditAction::TaskCompleted,
+                format!(
+                    "Feature branch {} has no commits ahead of {} - no PR",
+                    root_wt.branch, default_base_ref
+                ),
+            )
+            .await;
         let _ = event_tx.send(SwarmEvent::TaskFailed {
             task_id: root_id,
             error: format!(
@@ -1184,16 +1286,14 @@ pub(crate) async fn try_auto_ship(
         .await;
 
     let commit_sha = match commit_output {
-        Ok(output) if output.status.success() => {
-            TokioCommand::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(repo_path)
-                .output()
-                .await
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_default()
-        }
+        Ok(output) if output.status.success() => TokioCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo_path)
+            .output()
+            .await
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default(),
         Ok(output) => {
             tracing::warn!(
                 root_task_id = %root_id,
@@ -1212,28 +1312,34 @@ pub(crate) async fn try_auto_ship(
 
     // Push merged base ref to remote so subsequent auto-ships and worktree
     // creations see the latest state.
-    if fetch_on_sync
-        && !push_with_retry(repo_path, default_base_ref, 2).await {
-            tracing::error!(
-                root_task_id = %root_id,
-                commit_sha = %commit_sha,
-                "auto-ship committed locally but push to remote failed — \
-                 next auto-ship will attempt to rebase and push"
-            );
-            // Don't return None — the local commit is valid and the push
-            // will be retried when the next auto-ship syncs.
-        }
+    if fetch_on_sync && !push_with_retry(repo_path, default_base_ref, 2).await {
+        tracing::error!(
+            root_task_id = %root_id,
+            commit_sha = %commit_sha,
+            "auto-ship committed locally but push to remote failed — \
+             next auto-ship will attempt to rebase and push"
+        );
+        // Don't return None — the local commit is valid and the push
+        // will be retried when the next auto-ship syncs.
+    }
 
-    let _ = event_tx.send(SwarmEvent::TaskMerged {
-        task_id: root_id,
-        commit_sha: commit_sha.clone(),
-    }).await;
+    let _ = event_tx
+        .send(SwarmEvent::TaskMerged {
+            task_id: root_id,
+            commit_sha: commit_sha.clone(),
+        })
+        .await;
 
-    audit_log.info(
-        AuditCategory::Task,
-        AuditAction::TaskCompleted,
-        format!("Task tree {} merged to {}: {}", root_id, default_base_ref, commit_sha),
-    ).await;
+    audit_log
+        .info(
+            AuditCategory::Task,
+            AuditAction::TaskCompleted,
+            format!(
+                "Task tree {} merged to {}: {}",
+                root_id, default_base_ref, commit_sha
+            ),
+        )
+        .await;
 
     Some(commit_sha)
 }
@@ -1363,7 +1469,10 @@ async fn collect_descendant_work<T: TaskRepository + ?Sized, W: WorktreeReposito
 }
 
 /// BFS check: all descendants in terminal state.
-async fn all_descendants_terminal<T: TaskRepository + ?Sized>(root_id: Uuid, task_repo: &T) -> bool {
+async fn all_descendants_terminal<T: TaskRepository + ?Sized>(
+    root_id: Uuid,
+    task_repo: &T,
+) -> bool {
     let mut queue = vec![root_id];
     while let Some(id) = queue.pop() {
         let subtasks = match task_repo.get_subtasks(id).await {
@@ -1371,7 +1480,9 @@ async fn all_descendants_terminal<T: TaskRepository + ?Sized>(root_id: Uuid, tas
             Err(_) => return false,
         };
         for st in subtasks {
-            if !st.is_terminal() { return false; }
+            if !st.is_terminal() {
+                return false;
+            }
             queue.push(st.id);
         }
     }
@@ -1379,12 +1490,17 @@ async fn all_descendants_terminal<T: TaskRepository + ?Sized>(root_id: Uuid, tas
 }
 
 /// BFS check: any descendant completed successfully.
-async fn has_any_successful_descendant<T: TaskRepository + ?Sized>(root_id: Uuid, task_repo: &T) -> bool {
+async fn has_any_successful_descendant<T: TaskRepository + ?Sized>(
+    root_id: Uuid,
+    task_repo: &T,
+) -> bool {
     let mut queue = vec![root_id];
     while let Some(id) = queue.pop() {
         if let Ok(subtasks) = task_repo.get_subtasks(id).await {
             for st in &subtasks {
-                if st.status == TaskStatus::Complete { return true; }
+                if st.status == TaskStatus::Complete {
+                    return true;
+                }
                 queue.push(st.id);
             }
         }
@@ -1421,7 +1537,8 @@ mod tests {
                      A huge block of system prompt text that goes on and on \
                      and should never appear in a PR description because it is \
                      the internal plumbing of the convergence engine and not \
-                     relevant to reviewers at all. ".repeat(5);
+                     relevant to reviewers at all. "
+            .repeat(5);
         let result = truncate_description(&desc, 300);
         assert!(result.len() <= 303); // 300 + "..."
         assert!(!result.contains("# Convergence Check"));
@@ -1457,7 +1574,10 @@ mod tests {
     fn truncate_all_headers_falls_back_to_first_content_line() {
         // Must exceed max_chars to trigger truncation logic
         let long_body = "x".repeat(400);
-        let desc = format!("# Header One\n## Header Two\n### Header Three\n\n{}", long_body);
+        let desc = format!(
+            "# Header One\n## Header Two\n### Header Three\n\n{}",
+            long_body
+        );
         let result = truncate_description(&desc, 300);
         // First paragraph is all headers; after filtering, it's empty.
         // Falls back to first non-header, non-empty line from the full description.
@@ -1498,6 +1618,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let removed = remove_transient_artifacts(dir.path().to_str().unwrap());
         assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn is_rejection_error_detects_common_reject_phrases() {
+        // Typical non-fast-forward rejection from `git push`
+        let stderr = " ! [rejected]        main -> main (non-fast-forward)\n\
+                      error: failed to push some refs to 'origin'\n\
+                      hint: Updates were rejected because the tip of your current branch is behind\n\
+                      hint: its remote counterpart. Integrate the remote changes (e.g.\n\
+                      hint: 'git pull ...') before pushing again.\n";
+        assert!(is_rejection_error(stderr));
+
+        // "fetch first" variant (when remote has commits we don't)
+        let stderr2 = " ! [rejected]  main -> main (fetch first)\n";
+        assert!(is_rejection_error(stderr2));
+
+        // Case-insensitive match
+        assert!(is_rejection_error("REJECTED: NON-FAST-FORWARD"));
+    }
+
+    #[test]
+    fn is_rejection_error_ignores_non_rejection_failures() {
+        // Auth failure — retrying with fetch+rebase won't help
+        let auth = "fatal: Authentication failed for 'https://github.com/foo/bar.git/'\n";
+        assert!(!is_rejection_error(auth));
+
+        // Network failure
+        let net = "fatal: unable to access 'https://github.com/foo/bar.git/': Could not resolve host: github.com\n";
+        assert!(!is_rejection_error(net));
+
+        // Repo config error (missing remote etc.)
+        let cfg = "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n";
+        assert!(!is_rejection_error(cfg));
+
+        // Empty stderr
+        assert!(!is_rejection_error(""));
     }
 
     /// Helper: create a temp git repo with an initial commit.
@@ -1690,7 +1846,10 @@ mod tests {
             .current_dir(p)
             .output()
             .unwrap();
-        assert!(checkout.status.success(), "failed to checkout default branch");
+        assert!(
+            checkout.status.success(),
+            "failed to checkout default branch"
+        );
         std::fs::write(p.join("file.txt"), "main-content-for-rebase").unwrap();
         std::process::Command::new("git")
             .args(["add", "."])
@@ -1732,6 +1891,103 @@ mod tests {
         assert!(
             !git_dir.join("rebase-merge").exists() && !git_dir.join("rebase-apply").exists(),
             "rebase state directories should be cleaned up"
+        );
+    }
+
+    #[tokio::test]
+    async fn ship_lock_for_same_path_serializes() {
+        // Two concurrent ship_lock_for() calls against the same path must return
+        // locks that serialize — i.e. while task A holds the guard, task B's
+        // attempt to acquire blocks and should time out.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+
+        // Acquire the lock for `path` and hold it inside a spawned task.
+        let path_a = path.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn(async move {
+            let lock = ship_lock_for(&path_a).await;
+            let _guard = lock.lock().await;
+            // Signal that we're holding the lock.
+            let _ = ready_tx.send(());
+            // Wait until the test tells us to release.
+            let _ = release_rx.await;
+        });
+
+        // Wait until the holder task has acquired the lock.
+        ready_rx.await.unwrap();
+
+        // Now try to acquire the same-path lock from another task; it must block.
+        let path_b = path.clone();
+        let contender = tokio::spawn(async move {
+            let lock = ship_lock_for(&path_b).await;
+            let _guard = lock.lock().await;
+        });
+
+        // The contender should NOT finish while the holder still owns the guard.
+        let contention = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            contender.await.unwrap();
+        })
+        .await;
+        assert!(
+            contention.is_err(),
+            "contender acquired same-path lock while holder was still active"
+        );
+
+        // Release the holder; contender should then be able to acquire.
+        let _ = release_tx.send(());
+        holder.await.unwrap();
+
+        // Now re-acquire on a fresh contender to confirm liveness (the earlier
+        // contender future was dropped by `timeout` so we spawn a new one).
+        let path_c = path.clone();
+        let follow_up = tokio::spawn(async move {
+            let lock = ship_lock_for(&path_c).await;
+            let _guard = lock.lock().await;
+        });
+        tokio::time::timeout(std::time::Duration::from_millis(500), follow_up)
+            .await
+            .expect("follow-up acquire should succeed after holder released")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ship_lock_for_different_paths_are_independent() {
+        // Two different paths should yield two distinct Arc<Mutex<()>> instances,
+        // and both locks should be holdable concurrently without blocking.
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let path_a = dir_a.path().to_path_buf();
+        let path_b = dir_b.path().to_path_buf();
+
+        let lock_a = ship_lock_for(&path_a).await;
+        let lock_b = ship_lock_for(&path_b).await;
+
+        // Different paths ⇒ different Arc instances (pointer inequality).
+        assert!(
+            !Arc::ptr_eq(&lock_a, &lock_b),
+            "distinct repo paths must produce distinct lock instances"
+        );
+
+        // Hold lock_a; lock_b acquire should still complete well within a short timeout.
+        let _guard_a = lock_a.lock().await;
+
+        let lock_b_for_task = lock_b.clone();
+        let acquired = tokio::time::timeout(std::time::Duration::from_millis(500), async move {
+            let _guard_b = lock_b_for_task.lock().await;
+        })
+        .await;
+        assert!(
+            acquired.is_ok(),
+            "different-path lock must be acquirable while another path's lock is held"
+        );
+
+        // And ship_lock_for(same path) returns the same instance (pointer equality).
+        let lock_a_again = ship_lock_for(&path_a).await;
+        assert!(
+            Arc::ptr_eq(&lock_a, &lock_a_again),
+            "same repo path must return the cached lock instance"
         );
     }
 }

@@ -62,7 +62,10 @@ impl RouteTaskMiddleware {
         agent_repo: &dyn AgentRepository,
         required_tools: &[String],
     ) -> Option<String> {
-        let templates = agent_repo.list_templates(AgentFilter::default()).await.ok()?;
+        let templates = agent_repo
+            .list_templates(AgentFilter::default())
+            .await
+            .ok()?;
 
         let mut best_match: Option<(String, usize)> = None;
 
@@ -72,8 +75,7 @@ impl RouteTaskMiddleware {
                 continue;
             }
 
-            let tool_names: Vec<&str> =
-                template.tools.iter().map(|t| t.name.as_str()).collect();
+            let tool_names: Vec<&str> = template.tools.iter().map(|t| t.name.as_str()).collect();
             let matched_count = required_tools
                 .iter()
                 .filter(|req| tool_names.iter().any(|t| t.eq_ignore_ascii_case(req)))
@@ -106,10 +108,7 @@ impl PreSpawnMiddleware for RouteTaskMiddleware {
         "route-task"
     }
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision> {
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
         let agent_type = Self::route(&ctx.task, &*ctx.agent_repo).await;
 
         // Persist routing decision only when task.agent_type was None — same

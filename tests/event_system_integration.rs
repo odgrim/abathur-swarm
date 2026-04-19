@@ -6,20 +6,20 @@
 //! 3. TriggerRuleEngine evaluates rules and fires actions
 //! 4. Replay missed events from the store catches up handlers
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use uuid::Uuid;
 
 use abathur::adapters::sqlite::{
-    create_migrated_test_pool, SqliteEventRepository, SqliteGoalRepository,
-    SqliteMemoryRepository, SqliteTaskRepository,
+    SqliteEventRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
+    create_migrated_test_pool,
 };
 use abathur::domain::models::{GoalPriority, TaskPriority, TaskSource};
 use abathur::services::command_bus::{
-    CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand,
-    GoalCommandHandler, MemoryCommandHandler, TaskCommand, TaskCommandHandler,
+    CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, GoalCommandHandler,
+    MemoryCommandHandler, TaskCommand, TaskCommandHandler,
 };
 use abathur::services::event_bus::{
     EventBus, EventBusConfig, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber,
@@ -80,7 +80,11 @@ impl EventHandler for CountingHandler {
         }
     }
 
-    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+    async fn handle(
+        &self,
+        _event: &UnifiedEvent,
+        _ctx: &HandlerContext,
+    ) -> Result<Reaction, String> {
         self.counter.fetch_add(1, Ordering::SeqCst);
         Ok(Reaction::None)
     }
@@ -124,7 +128,11 @@ async fn test_task_mutation_emits_and_persists_event() {
 
     let first = &events[0];
     match &first.payload {
-        EventPayload::TaskSubmitted { task_id, task_title, .. } => {
+        EventPayload::TaskSubmitted {
+            task_id,
+            task_title,
+            ..
+        } => {
             assert_eq!(*task_id, task.id);
             assert_eq!(task_title, "Integration test task");
         }
@@ -232,7 +240,11 @@ async fn test_reactor_dispatches_to_handler() {
     reactor.stop();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
 
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "Handler should have been called exactly once");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "Handler should have been called exactly once"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -357,8 +369,8 @@ async fn test_replay_missed_events_catches_up() {
     }
 
     let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-    let reactor = EventReactor::new(event_bus.clone(), ReactorConfig::default())
-        .with_store(store.clone());
+    let reactor =
+        EventReactor::new(event_bus.clone(), ReactorConfig::default()).with_store(store.clone());
 
     let (handler, counter) = CountingHandler::new(
         "replay-counter",
@@ -369,7 +381,11 @@ async fn test_replay_missed_events_catches_up() {
     let replayed = reactor.replay_missed_events().await.expect("replay");
 
     assert_eq!(replayed, 5, "Should have replayed all 5 events");
-    assert_eq!(counter.load(Ordering::SeqCst), 5, "Handler should have processed all 5 events");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        5,
+        "Handler should have processed all 5 events"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +450,14 @@ async fn test_command_bus_routes_and_emits() {
         .await
         .expect("query");
 
-    assert!(!events.is_empty(), "CommandBus routed task should emit events");
     assert!(
-        events.iter().any(|e| matches!(&e.payload, EventPayload::TaskSubmitted { .. })),
+        !events.is_empty(),
+        "CommandBus routed task should emit events"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::TaskSubmitted { .. })),
         "Should contain TaskSubmitted event"
     );
 }
@@ -638,7 +659,11 @@ async fn test_trigger_count_threshold() {
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_eq!(counter.load(Ordering::SeqCst), 0, "Should not trigger below threshold");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "Should not trigger below threshold"
+    );
 
     // Send 3rd failure — should trigger
     let event = UnifiedEvent {

@@ -20,21 +20,32 @@
 //!
 //! The guiding intent is extracted from goals to provide context for task verification,
 //! but the goal itself is never "verified as complete."
+//!
+//! ## Module layout
+//!
+//! - [`prompt`] holds the verifier agent's system prompt, the per-run prompt
+//!   builder, and the overseer-evidence appender.
+//! - [`parser`] parses the verifier agent's structured text responses back
+//!   into [`IntentVerificationResult`] domain values.
+//! - This module owns the `IntentVerifierService` itself: repository I/O,
+//!   substrate orchestration, the convergence loop, and the
+//!   [`ConvergentIntentVerifier`] trait impl.
 
-use std::sync::Arc;
+mod parser;
+mod prompt;
+
 use async_trait::async_trait;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{
-    BranchVerificationRequest, BranchVerificationResult, ConstraintConformance,
-    ConstraintEvaluation, ConvergenceConfig, ConvergenceState,
-    DependentTaskAugmentation, GapCategory, GapSeverity, HumanEscalation, IntentGap,
-    IntentSatisfaction, IntentVerificationResult, NewTaskGuidance, OriginalIntent,
-    RepromptApproach, RepromptGuidance, RepromptStrategySelector, SessionStatus,
-    SubstrateConfig, SubstrateRequest, Task, TaskPriority, TaskSource, TaskStatus, TaskType,
-};
 use crate::domain::models::convergence::OverseerSignals;
+use crate::domain::models::{
+    BranchVerificationRequest, BranchVerificationResult, ConvergenceConfig, ConvergenceState,
+    DependentTaskAugmentation, IntentSatisfaction, IntentVerificationResult, NewTaskGuidance,
+    OriginalIntent, SessionStatus, SubstrateConfig, SubstrateRequest, Task, TaskPriority,
+    TaskSource, TaskStatus, TaskType,
+};
 use crate::domain::ports::{GoalRepository, Substrate, TaskRepository};
 
 /// Configuration for the intent verifier.
@@ -100,7 +111,12 @@ where
         task_repo: Arc<T>,
         substrate: Arc<dyn Substrate>,
     ) -> Self {
-        Self::new(goal_repo, task_repo, substrate, IntentVerifierConfig::default())
+        Self::new(
+            goal_repo,
+            task_repo,
+            substrate,
+            IntentVerifierConfig::default(),
+        )
     }
 
     /// Extract the guiding intent from a goal for task verification.
@@ -152,9 +168,9 @@ where
         // evaluates task output against them.
         for hint in &task.context.hints {
             if let Some(constraint) = hint.strip_prefix("constraint:") {
-                intent.key_requirements.push(
-                    format!("[CONSTRAINT] {}", constraint.trim())
-                );
+                intent
+                    .key_requirements
+                    .push(format!("[CONSTRAINT] {}", constraint.trim()));
             }
         }
 
@@ -173,13 +189,12 @@ where
     ) -> DomainResult<IntentVerificationResult> {
         if tasks.is_empty() {
             // No tasks to verify - return satisfied
-            return Ok(IntentVerificationResult::new(
-                Uuid::nil(),
-                IntentSatisfaction::Satisfied,
-            )
-            .with_confidence(1.0)
-            .with_iteration(iteration)
-            .with_summary("No tasks to verify"));
+            return Ok(
+                IntentVerificationResult::new(Uuid::nil(), IntentSatisfaction::Satisfied)
+                    .with_confidence(1.0)
+                    .with_iteration(iteration)
+                    .with_summary("No tasks to verify"),
+            );
         }
 
         // Build an intent from the batch context
@@ -196,15 +211,17 @@ where
         // Gather requirements from all tasks, including constraint hints
         let mut seen_constraints = std::collections::HashSet::new();
         for task in tasks {
-            intent.key_requirements.push(format!("Task '{}': {}", task.title, task.description));
+            intent
+                .key_requirements
+                .push(format!("Task '{}': {}", task.title, task.description));
 
             for hint in &task.context.hints {
                 if let Some(constraint) = hint.strip_prefix("constraint:") {
                     let trimmed = constraint.trim().to_string();
                     if seen_constraints.insert(trimmed.clone()) {
-                        intent.key_requirements.push(
-                            format!("[CONSTRAINT] {}", trimmed)
-                        );
+                        intent
+                            .key_requirements
+                            .push(format!("[CONSTRAINT] {}", trimmed));
                     }
                 }
             }
@@ -221,7 +238,8 @@ where
         iteration: u32,
     ) -> DomainResult<IntentVerificationResult> {
         let intent = self.extract_task_intent(task.id).await?;
-        self.verify_intent(&intent, std::slice::from_ref(task), iteration).await
+        self.verify_intent(&intent, std::slice::from_ref(task), iteration)
+            .await
     }
 
     /// Verify that completed tasks satisfy the original intent.
@@ -232,7 +250,12 @@ where
         iteration: u32,
     ) -> DomainResult<IntentVerificationResult> {
         // Build the verification prompt
-        let prompt = self.build_verification_prompt(intent, completed_tasks).await?;
+        let prompt = prompt::build_verification_prompt(
+            intent,
+            completed_tasks,
+            self.config.include_artifacts,
+        )
+        .await?;
 
         // Create substrate request for the verifier agent
         // Use the first task's worktree so the verifier can read actual code/diffs.
@@ -256,7 +279,7 @@ where
         let request = SubstrateRequest::new(
             Uuid::new_v4(),
             &self.config.verifier_agent_type,
-            INTENT_VERIFIER_SYSTEM_PROMPT,
+            prompt::INTENT_VERIFIER_SYSTEM_PROMPT,
             &prompt,
         )
         .with_config(config);
@@ -266,7 +289,7 @@ where
 
         // Parse the response to build the verification result
         let result = if session.status == SessionStatus::Completed {
-            self.parse_verification_response(&session, intent, completed_tasks, iteration)?
+            parser::parse_verification_response(&session, intent, completed_tasks, iteration)?
         } else {
             // Verification failed - return indeterminate
             IntentVerificationResult::new(intent.id, IntentSatisfaction::Indeterminate)
@@ -298,12 +321,18 @@ where
         &self,
         intent: OriginalIntent,
         initial_tasks: Vec<Task>,
-        execute_tasks_fn: impl Fn(&[NewTaskGuidance], &[Uuid]) -> std::pin::Pin<Box<dyn std::future::Future<Output = DomainResult<Vec<Task>>> + Send>> + Send,
+        execute_tasks_fn: impl Fn(
+            &[NewTaskGuidance],
+            &[Uuid],
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = DomainResult<Vec<Task>>> + Send>,
+        > + Send,
     ) -> DomainResult<ConvergenceState> {
         let mut state = ConvergenceState::new(intent.clone());
         let mut current_tasks = initial_tasks;
         let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(self.config.convergence.convergence_timeout_secs);
+        let timeout =
+            std::time::Duration::from_secs(self.config.convergence.convergence_timeout_secs);
 
         loop {
             // Check timeout
@@ -359,13 +388,11 @@ where
 
             // Execute the re-prompt if we have guidance
             if let Some(guidance) = &result.reprompt_guidance {
-                tracing::info!(
-                    "Executing re-prompt with approach: {:?}",
-                    guidance.approach
-                );
+                tracing::info!("Executing re-prompt with approach: {:?}", guidance.approach);
 
                 // Execute new/retry tasks
-                let new_tasks = execute_tasks_fn(&guidance.tasks_to_add, &guidance.tasks_to_retry).await?;
+                let new_tasks =
+                    execute_tasks_fn(&guidance.tasks_to_add, &guidance.tasks_to_retry).await?;
                 current_tasks.extend(new_tasks);
             } else {
                 // No guidance, can't continue
@@ -378,382 +405,6 @@ where
         Ok(state)
     }
 
-    /// Build the verification prompt.
-    async fn build_verification_prompt(
-        &self,
-        intent: &OriginalIntent,
-        completed_tasks: &[Task],
-    ) -> DomainResult<String> {
-        let mut prompt = String::new();
-
-        // Original intent section
-        prompt.push_str("## Original Intent\n\n");
-        prompt.push_str(&format!("**Source**: {:?}\n\n", intent.source_type));
-        prompt.push_str(&format!("**Description**:\n{}\n\n", intent.original_text));
-
-        if !intent.key_requirements.is_empty() {
-            prompt.push_str("**Key Requirements**:\n");
-            for req in &intent.key_requirements {
-                prompt.push_str(&format!("- {}\n", req));
-            }
-            prompt.push('\n');
-        }
-
-        if !intent.success_criteria.is_empty() {
-            prompt.push_str("**Success Criteria**:\n");
-            for criterion in &intent.success_criteria {
-                prompt.push_str(&format!("- {}\n", criterion));
-            }
-            prompt.push('\n');
-        }
-
-        // Completed work section
-        prompt.push_str("## Completed Work\n\n");
-
-        for task in completed_tasks {
-            prompt.push_str(&format!("### Task: {}\n\n", task.title));
-            prompt.push_str(&format!("**Description**: {}\n\n", task.description));
-
-            if !task.artifacts.is_empty() && self.config.include_artifacts {
-                prompt.push_str("**Artifacts**:\n");
-                for artifact in &task.artifacts {
-                    prompt.push_str(&format!("- {} ({:?})\n", artifact.uri, artifact.artifact_type));
-                }
-                prompt.push('\n');
-            }
-
-            if let Some(worktree) = &task.worktree_path {
-                prompt.push_str(&format!("**Worktree**: {}\n\n", worktree));
-            }
-        }
-
-        // Evaluation request
-        prompt.push_str("## Evaluation Request\n\n");
-        prompt.push_str(
-            "Please evaluate whether the completed work satisfies the original intent.\n\n\
-            Use `git diff` in the worktree to inspect the actual changes, then consider:\n\
-            1. Does the work address all key requirements?\n\
-            2. Are the success criteria met?\n\
-            3. Is there any work that was implied but not explicitly stated that's missing?\n\
-            4. If someone submitted this exact prompt again, would there be additional work done?\n\
-            5. **Round-trip completeness**: If the change involves a feature with complementary \
-            paths (read/write, encode/decode, serialize/deserialize), were ALL directions \
-            modified and tested? A write-only fix for a read+write feature is incomplete.\n\
-            6. **Test realism**: Do the tests use realistic configurations and inputs, or only \
-            trivial setups that wouldn't catch real-world failures?\n\n\
-            Provide your evaluation in the following format:\n\n\
-            ```\n\
-            SATISFACTION: <satisfied|partial|unsatisfied>\n\
-            CONFIDENCE: <0.0-1.0>\n\
-            SUMMARY: <one paragraph summary of what was accomplished>\n\
-            GAPS:\n\
-            - <gap description> | <minor|moderate|major|critical> | <suggested action>\n\
-            FOCUS_AREAS:\n\
-            - <area to focus on if re-prompting>\n\
-            NEW_TASKS:\n\
-            - <title> | <description> | <high|normal|low>\n\
-            ```\n",
-        );
-
-        Ok(prompt)
-    }
-
-    /// Parse the verification response from the agent.
-    fn parse_verification_response(
-        &self,
-        session: &crate::domain::models::SubstrateSession,
-        intent: &OriginalIntent,
-        completed_tasks: &[Task],
-        iteration: u32,
-    ) -> DomainResult<IntentVerificationResult> {
-        // Get the final response text from the session result
-        let response_text = session
-            .result
-            .clone()
-            .unwrap_or_default();
-
-        // Parse the structured response
-        let mut result = IntentVerificationResult::new(intent.id, IntentSatisfaction::Indeterminate)
-            .with_iteration(iteration);
-
-        // Add evaluated tasks
-        for task in completed_tasks {
-            result = result.with_task(task.id);
-        }
-
-        // Parse SATISFACTION
-        if let Some(sat_line) = response_text.lines().find(|l| l.starts_with("SATISFACTION:")) {
-            let sat_value = sat_line.trim_start_matches("SATISFACTION:").trim().to_lowercase();
-            result.satisfaction = match sat_value.as_str() {
-                "satisfied" => IntentSatisfaction::Satisfied,
-                "partial" => IntentSatisfaction::Partial,
-                "unsatisfied" => IntentSatisfaction::Unsatisfied,
-                _ => IntentSatisfaction::Indeterminate,
-            };
-        }
-
-        // Parse CONFIDENCE
-        if let Some(conf_line) = response_text.lines().find(|l| l.starts_with("CONFIDENCE:")) {
-            let conf_str = conf_line.trim_start_matches("CONFIDENCE:").trim();
-            if let Ok(conf) = conf_str.parse::<f64>() {
-                result = result.with_confidence(conf);
-            }
-        }
-
-        // Parse NEEDS_HUMAN and HUMAN_REASON for escalation
-        let needs_human = response_text.lines()
-            .find(|l| l.starts_with("NEEDS_HUMAN:"))
-            .map(|l| l.trim_start_matches("NEEDS_HUMAN:").trim().to_lowercase() == "yes")
-            .unwrap_or(false);
-
-        if needs_human {
-            let human_reason = response_text.lines()
-                .find(|l| l.starts_with("HUMAN_REASON:"))
-                .map(|l| l.trim_start_matches("HUMAN_REASON:").trim().to_string())
-                .unwrap_or_else(|| "Human judgment required".to_string());
-
-            result = result.with_escalation(HumanEscalation::new(human_reason));
-        }
-
-        // Parse SUMMARY
-        if let Some(sum_line) = response_text.lines().find(|l| l.starts_with("SUMMARY:")) {
-            let summary = sum_line.trim_start_matches("SUMMARY:").trim();
-            result = result.with_summary(summary);
-        }
-
-        // Parse GAPS (format: description | severity | action | category)
-        let mut in_gaps = false;
-        for line in response_text.lines() {
-            if line.starts_with("GAPS:") {
-                in_gaps = true;
-                continue;
-            }
-            if in_gaps {
-                if line.starts_with("IMPLICIT_GAPS:") || line.starts_with("CONSTRAINT_CONFORMANCE:")
-                   || line.starts_with("FOCUS_AREAS:")
-                   || line.starts_with("NEW_TASKS:") || line.is_empty() {
-                    in_gaps = false;
-                    continue;
-                }
-                if line.starts_with("- ")
-                    && let Some(gap) = Self::parse_gap_line(line, false) {
-                        result = result.with_gap(gap);
-                    }
-            }
-        }
-
-        // Parse IMPLICIT_GAPS (format: description | severity | rationale)
-        let mut in_implicit = false;
-        for line in response_text.lines() {
-            if line.starts_with("IMPLICIT_GAPS:") {
-                in_implicit = true;
-                continue;
-            }
-            if in_implicit {
-                if line.starts_with("CONSTRAINT_CONFORMANCE:") || line.starts_with("FOCUS_AREAS:")
-                   || line.starts_with("NEW_TASKS:") || line.is_empty() {
-                    in_implicit = false;
-                    continue;
-                }
-                if line.starts_with("- ")
-                    && let Some(gap) = Self::parse_gap_line(line, true) {
-                        result = result.with_implicit_gap(gap);
-                    }
-            }
-        }
-
-        // Parse CONSTRAINT_CONFORMANCE (format: constraint text | status | explanation)
-        let mut in_constraints = false;
-        for line in response_text.lines() {
-            if line.starts_with("CONSTRAINT_CONFORMANCE:") {
-                in_constraints = true;
-                continue;
-            }
-            if in_constraints {
-                if line.starts_with("FOCUS_AREAS:") || line.starts_with("NEW_TASKS:")
-                   || line.starts_with("REPROMPT_STRATEGY:") || line.is_empty() {
-                    in_constraints = false;
-                    continue;
-                }
-                if line.starts_with("- ") {
-                    let parts: Vec<&str> = line.trim_start_matches("- ").split('|').collect();
-                    if parts.len() >= 2 {
-                        let constraint = parts[0].trim().to_string();
-                        let status = parts[1].trim().parse::<ConstraintConformance>()
-                            .unwrap_or(ConstraintConformance::Deviating);
-                        let explanation = if parts.len() > 2 {
-                            parts[2].trim().to_string()
-                        } else {
-                            String::new()
-                        };
-
-                        result = result.with_constraint_evaluation(ConstraintEvaluation {
-                            constraint: constraint.clone(),
-                            status,
-                            explanation,
-                        });
-
-                        // For violating constraints, also create a corresponding IntentGap
-                        if status == ConstraintConformance::Violating {
-                            let severity = if constraint.starts_with("[MUST]") {
-                                GapSeverity::Critical
-                            } else if constraint.starts_with("[WITHIN]") || constraint.starts_with("[CONSTRAINT]") {
-                                GapSeverity::Major
-                            } else {
-                                GapSeverity::Moderate
-                            };
-                            result = result.with_gap(
-                                IntentGap::new(
-                                    format!("Constraint violation: {}", constraint),
-                                    severity,
-                                ).with_category(GapCategory::ConstraintViolation)
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Parse REPROMPT_STRATEGY and STRATEGY_RATIONALE
-        let strategy = response_text.lines()
-            .find(|l| l.starts_with("REPROMPT_STRATEGY:"))
-            .and_then(|l| {
-                let s = l.trim_start_matches("REPROMPT_STRATEGY:").trim();
-                s.parse::<RepromptApproach>().ok()
-            });
-
-        let _strategy_rationale = response_text.lines()
-            .find(|l| l.starts_with("STRATEGY_RATIONALE:"))
-            .map(|l| l.trim_start_matches("STRATEGY_RATIONALE:").trim().to_string());
-
-        // Build reprompt guidance if not satisfied
-        if result.satisfaction != IntentSatisfaction::Satisfied {
-            // Use the strategy from the agent if provided, otherwise compute based on gaps
-            let approach = strategy.unwrap_or_else(|| {
-                RepromptStrategySelector::select_strategy(&result)
-            });
-
-            let mut guidance = RepromptGuidance::new(approach);
-
-            // Parse FOCUS_AREAS
-            let mut in_focus = false;
-            for line in response_text.lines() {
-                if line.starts_with("FOCUS_AREAS:") {
-                    in_focus = true;
-                    continue;
-                }
-                if in_focus {
-                    if line.starts_with("NEW_TASKS:") || line.starts_with("REPROMPT_STRATEGY:") || line.is_empty() {
-                        in_focus = false;
-                        continue;
-                    }
-                    if line.starts_with("- ") {
-                        guidance = guidance.with_focus(line.trim_start_matches("- ").trim());
-                    }
-                }
-            }
-
-            // Parse NEW_TASKS (format: title | description | priority | execution_mode)
-            let mut in_new_tasks = false;
-            for line in response_text.lines() {
-                if line.starts_with("NEW_TASKS:") {
-                    in_new_tasks = true;
-                    continue;
-                }
-                if in_new_tasks {
-                    if line.starts_with("REPROMPT_STRATEGY:") || line.is_empty()
-                       || (!line.starts_with("- ") && !line.starts_with("  ")) {
-                        in_new_tasks = false;
-                        continue;
-                    }
-                    if line.starts_with("- ") {
-                        let parts: Vec<&str> = line.trim_start_matches("- ").split('|').collect();
-                        if parts.len() >= 2 {
-                            let title = parts[0].trim();
-                            let description = parts[1].trim();
-                            let mut task = NewTaskGuidance::new(title, description);
-
-                            if parts.len() > 2
-                                && parts[2].trim().to_lowercase().as_str() == "high" { task = task.high_priority() }
-
-                            if parts.len() > 3
-                                && parts[3].trim().to_lowercase().as_str() == "blocking" { task = task.blocking() }
-
-                            guidance = guidance.with_new_task(task);
-                        }
-                    }
-                }
-            }
-
-            // Add context from gaps (both explicit and implicit)
-            let all_gaps: Vec<_> = result.all_gaps().collect();
-            if !all_gaps.is_empty() {
-                let gap_context = all_gaps
-                    .iter()
-                    .map(|g| {
-                        let implicit_marker = if g.is_implicit { " [IMPLICIT]" } else { "" };
-                        format!("- [{}]{} {}", g.category.as_str(), implicit_marker, g.description)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                guidance = guidance.with_context(format!("Previous gaps identified:\n{}", gap_context));
-            }
-
-            result = result.with_reprompt_guidance(guidance);
-        }
-
-        // Check for auto-escalation based on gap patterns
-        if result.escalation.is_none()
-            && let Some(auto_escalation) = result.should_escalate() {
-                result = result.with_escalation(auto_escalation);
-            }
-
-        Ok(result)
-    }
-
-    /// Parse a gap line into an IntentGap.
-    fn parse_gap_line(line: &str, is_implicit: bool) -> Option<IntentGap> {
-        let parts: Vec<&str> = line.trim_start_matches("- ").split('|').collect();
-        if parts.is_empty() {
-            return None;
-        }
-
-        let description = parts[0].trim().to_string();
-        let severity = if parts.len() > 1 {
-            match parts[1].trim().to_lowercase().as_str() {
-                "minor" => GapSeverity::Minor,
-                "moderate" => GapSeverity::Moderate,
-                "major" => GapSeverity::Major,
-                "critical" => GapSeverity::Critical,
-                _ => GapSeverity::Moderate,
-            }
-        } else {
-            GapSeverity::Moderate
-        };
-
-        let mut gap = IntentGap::new(description, severity);
-
-        if is_implicit {
-            // For implicit gaps: description | severity | rationale
-            if parts.len() > 2 {
-                gap = gap.as_implicit(parts[2].trim());
-            } else {
-                gap = gap.as_implicit("Implicit requirement not met");
-            }
-        } else {
-            // For explicit gaps: description | severity | action | category
-            if parts.len() > 2 {
-                gap = gap.with_action(parts[2].trim());
-            }
-            if parts.len() > 3
-                && let Ok(cat) = parts[3].trim().parse::<GapCategory>() {
-                    gap = gap.with_category(cat);
-                }
-        }
-
-        Some(gap)
-    }
-
     /// Verify a dependency branch before dependent tasks proceed.
     pub async fn verify_branch(
         &self,
@@ -763,9 +414,10 @@ where
         let mut branch_tasks = Vec::new();
         for task_id in &request.branch_tasks {
             if let Some(task) = self.task_repo.get(*task_id).await?
-                && task.status == TaskStatus::Complete {
-                    branch_tasks.push(task);
-                }
+                && task.status == TaskStatus::Complete
+            {
+                branch_tasks.push(task);
+            }
         }
 
         if branch_tasks.is_empty() {
@@ -776,11 +428,13 @@ where
         }
 
         // Verify the branch against its objective
-        let verification = self.verify_task_batch(
-            &branch_tasks,
-            &request.branch_objective,
-            1, // First iteration for branch
-        ).await?;
+        let verification = self
+            .verify_task_batch(
+                &branch_tasks,
+                &request.branch_objective,
+                1, // First iteration for branch
+            )
+            .await?;
 
         // Build branch result
         let mut branch_result = if verification.satisfaction == IntentSatisfaction::Satisfied {
@@ -837,9 +491,8 @@ where
         overmind: &crate::services::OvermindService,
     ) -> DomainResult<crate::domain::models::overmind::OvermindEscalationDecision> {
         use crate::domain::models::overmind::{
-            EscalationRequest, EscalationContext, EscalationTrigger,
-            EscalationPreferences, OvermindEscalationDecision, OvermindEscalationUrgency,
-            DecisionMetadata,
+            DecisionMetadata, EscalationContext, EscalationPreferences, EscalationRequest,
+            EscalationTrigger, OvermindEscalationDecision, OvermindEscalationUrgency,
         };
 
         // Only handle indeterminate results
@@ -860,7 +513,8 @@ where
         }
 
         // Build the escalation context
-        let attempts_made: Vec<String> = result.gaps
+        let attempts_made: Vec<String> = result
+            .gaps
             .iter()
             .filter_map(|g| g.suggested_action.clone())
             .collect();
@@ -870,8 +524,7 @@ where
             task_id: result.evaluated_tasks.first().copied(),
             situation: format!(
                 "Intent verification returned indeterminate result (confidence: {:.2}). Summary: {}",
-                result.confidence,
-                result.accomplishment_summary
+                result.confidence, result.accomplishment_summary
             ),
             attempts_made,
             time_spent_minutes: 0, // We don't track this
@@ -901,7 +554,8 @@ where
                     should_escalate: true,
                     urgency: Some(OvermindEscalationUrgency::Medium),
                     questions: vec![
-                        "Please review the verification result and clarify requirements".to_string(),
+                        "Please review the verification result and clarify requirements"
+                            .to_string(),
                     ],
                     context_for_human: result.accomplishment_summary.clone(),
                     alternatives_if_unavailable: vec![
@@ -925,10 +579,7 @@ where
         goal_id: Option<Uuid>,
         iteration: u32,
     ) -> DomainResult<Uuid> {
-        let title = format!(
-            "Intent verification (iteration {})",
-            iteration
-        );
+        let title = format!("Intent verification (iteration {})", iteration);
         let description = format!(
             "LLM-based intent verification for task '{}'. \
              Evaluating whether completed work satisfies the original intent.",
@@ -948,21 +599,13 @@ where
             serde_json::Value::String(verified_task.id.to_string()),
         );
         if let Some(gid) = goal_id {
-            task.context.custom.insert(
-                "goal_id".to_string(),
-                serde_json::Value::String(gid.to_string()),
-            );
+            task.set_goal_id(gid);
         }
-        task.context.custom.insert(
-            "iteration".to_string(),
-            serde_json::json!(iteration),
-        );
+        task.set_iteration(iteration as u64);
 
         // Propagate idempotency key from the verified task's context so that
         // duplicate verification dispatches are deduplicated at the DB level.
-        if let Some(idem_key) = verified_task.context.custom.get("verification_idempotency_key")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(idem_key) = verified_task.verification_idempotency_key() {
             task.idempotency_key = Some(idem_key.to_string());
         }
 
@@ -980,41 +623,32 @@ where
         verification_task_id: Uuid,
         result: &IntentVerificationResult,
     ) -> DomainResult<()> {
-        let mut task = self.task_repo.get(verification_task_id).await?
+        let mut task = self
+            .task_repo
+            .get(verification_task_id)
+            .await?
             .ok_or(DomainError::TaskNotFound(verification_task_id))?;
 
         // Store verification results in task context custom map
-        task.context.custom.insert(
-            "satisfaction".to_string(),
-            serde_json::Value::String(result.satisfaction.as_str().to_string()),
-        );
-        task.context.custom.insert(
-            "confidence".to_string(),
-            serde_json::json!(result.confidence),
-        );
-        task.context.custom.insert(
-            "gaps_count".to_string(),
-            serde_json::json!(result.total_gap_count()),
-        );
-        task.context.custom.insert(
-            "accomplishment_summary".to_string(),
-            serde_json::Value::String(result.accomplishment_summary.clone()),
-        );
+        task.set_satisfaction(result.satisfaction.as_str().to_string());
+        task.set_confidence(result.confidence);
+        task.set_gaps_count(result.total_gap_count() as u64);
+        task.set_accomplishment_summary(result.accomplishment_summary.clone());
 
         // Store gaps as structured JSON
-        let gaps_json: Vec<serde_json::Value> = result.all_gaps().map(|g| {
-            serde_json::json!({
-                "description": g.description,
-                "severity": g.severity.as_str(),
-                "category": g.category.as_str(),
-                "suggested_action": g.suggested_action,
-                "is_implicit": g.is_implicit,
+        let gaps_json: Vec<serde_json::Value> = result
+            .all_gaps()
+            .map(|g| {
+                serde_json::json!({
+                    "description": g.description,
+                    "severity": g.severity.as_str(),
+                    "category": g.category.as_str(),
+                    "suggested_action": g.suggested_action,
+                    "is_implicit": g.is_implicit,
+                })
             })
-        }).collect();
-        task.context.custom.insert(
-            "gaps".to_string(),
-            serde_json::Value::Array(gaps_json),
-        );
+            .collect();
+        task.set_gaps(serde_json::Value::Array(gaps_json));
 
         // Mark complete
         task.transition_to(TaskStatus::Complete)
@@ -1100,7 +734,9 @@ where
             let mut intent = if let Some(gid) = goal_id {
                 match self.extract_guiding_intent(gid).await {
                     Ok(i) => i,
-                    Err(_) => OriginalIntent::from_task(impl_tasks[0].id, &impl_tasks[0].description),
+                    Err(_) => {
+                        OriginalIntent::from_task(impl_tasks[0].id, &impl_tasks[0].description)
+                    }
                 }
             } else {
                 OriginalIntent::from_task(impl_tasks[0].id, &impl_tasks[0].description)
@@ -1111,7 +747,7 @@ where
             }
 
             if let Some(signals) = overseer_signals {
-                append_overseer_evidence(&mut intent.original_text, signals);
+                prompt::append_overseer_evidence(&mut intent.original_text, signals);
             }
 
             let verification_task_id = self
@@ -1129,7 +765,10 @@ where
                 Err(e) => {
                     if let Some(vtid) = verification_task_id {
                         let _ = self
-                            .fail_verification_task(vtid, &format!("Verification infrastructure error: {}", e))
+                            .fail_verification_task(
+                                vtid,
+                                &format!("Verification infrastructure error: {}", e),
+                            )
                             .await;
                     }
                     Err(e)
@@ -1166,7 +805,7 @@ where
         // preconditions — the verifier decides whether failures are relevant
         // to the task's intent or are pre-existing/unrelated.
         if let Some(signals) = overseer_signals {
-            append_overseer_evidence(&mut intent.original_text, signals);
+            prompt::append_overseer_evidence(&mut intent.original_text, signals);
         }
 
         // Create a verification task to make this run visible in the task tree.
@@ -1192,7 +831,10 @@ where
                 // Fail the verification task on error
                 if let Some(vtid) = verification_task_id {
                     let _ = self
-                        .fail_verification_task(vtid, &format!("Verification infrastructure error: {}", e))
+                        .fail_verification_task(
+                            vtid,
+                            &format!("Verification infrastructure error: {}", e),
+                        )
                         .await;
                 }
                 Err(e)
@@ -1201,328 +843,13 @@ where
     }
 }
 
-/// Append structured overseer evidence to an intent text string.
-///
-/// This consolidates static-check signals (build, type-check, tests, lint,
-/// security, custom) into a markdown section that the verifier can reason over.
-fn append_overseer_evidence(text: &mut String, signals: &OverseerSignals) {
-    let mut evidence = String::from(
-        "\n\n## Overseer Evidence\n\n\
-         The following static check results are provided as context for your \
-         judgment. A failing build or test is important evidence but does NOT \
-         automatically mean the intent is unsatisfied — use your judgment about \
-         whether failures are related to the task's intent or are pre-existing/unrelated. \
-         If new security vulnerabilities were introduced by the work, this is a strong \
-         signal against satisfaction unless the task explicitly involves security \
-         trade-offs. Your assessment of intent satisfaction is the authoritative \
-         finality decision.\n\n",
-    );
-
-    if let Some(ref build) = signals.build_result {
-        evidence.push_str(&format!(
-            "- **Build**: {} ({})\n",
-            if build.success { "PASS" } else { "FAIL" },
-            if build.error_count > 0 {
-                format!("{} error(s)", build.error_count)
-            } else {
-                "clean".to_string()
-            },
-        ));
-        if !build.errors.is_empty() {
-            for err in build.errors.iter().take(5) {
-                evidence.push_str(&format!("  - {}\n", err));
-            }
-        }
-    }
-
-    if let Some(ref tc) = signals.type_check {
-        evidence.push_str(&format!(
-            "- **Type Check**: {} ({})\n",
-            if tc.clean { "CLEAN" } else { "FAIL" },
-            if tc.error_count > 0 {
-                format!("{} error(s)", tc.error_count)
-            } else {
-                "clean".to_string()
-            },
-        ));
-        if !tc.errors.is_empty() {
-            for err in tc.errors.iter().take(5) {
-                evidence.push_str(&format!("  - {}\n", err));
-            }
-        }
-    }
-
-    if let Some(ref tests) = signals.test_results {
-        evidence.push_str(&format!(
-            "- **Tests**: {}/{} passing ({} failed, {} regressions)\n",
-            tests.passed, tests.total, tests.failed, tests.regression_count,
-        ));
-        if !tests.failing_test_names.is_empty() {
-            evidence.push_str("  Failing tests:\n");
-            for name in tests.failing_test_names.iter().take(10) {
-                evidence.push_str(&format!("  - {}\n", name));
-            }
-        }
-    }
-
-    if let Some(ref lint) = signals.lint_results {
-        evidence.push_str(&format!(
-            "- **Lint**: {} error(s), {} warning(s)\n",
-            lint.error_count, lint.warning_count,
-        ));
-    }
-
-    if let Some(ref sec) = signals.security_scan {
-        evidence.push_str(&format!(
-            "- **Security**: {} critical, {} high, {} medium finding(s)\n",
-            sec.critical_count, sec.high_count, sec.medium_count,
-        ));
-        if !sec.findings.is_empty() {
-            for finding in sec.findings.iter().take(5) {
-                evidence.push_str(&format!("  - {}\n", finding));
-            }
-        }
-    }
-
-    for check in &signals.custom_checks {
-        evidence.push_str(&format!(
-            "- **Custom '{}' **: {} — {}\n",
-            check.name,
-            if check.passed { "PASS" } else { "FAIL" },
-            check.details,
-        ));
-    }
-
-    if !signals.has_any_signal() {
-        evidence.push_str("- No overseer signals available for this iteration.\n");
-    }
-
-    text.push_str(&evidence);
-}
-
-/// System prompt for the intent verifier agent.
-const INTENT_VERIFIER_SYSTEM_PROMPT: &str = r#"You are an Intent Verifier agent in the Abathur swarm system.
-
-## Role
-Your purpose is to independently evaluate whether completed work truly satisfies the original intent of a task or goal. You are a skeptical but fair evaluator who looks beyond surface-level completion to assess whether the *spirit* of the request was fulfilled.
-
-## The Re-Prompt Test (Core Principle)
-Ask yourself: **"If someone submitted the exact same prompt/request again, would there be additional work that should be done?"**
-
-If the answer is YES, the work is not fully satisfying the intent. This is your north star.
-
-## Deep Intent Analysis
-
-### 1. Explicit vs Implicit Requirements
-Every request has multiple layers:
-
-**Explicit Requirements** (stated directly):
-- Features, behaviors, or outputs mentioned in the request
-- Specific constraints or conditions stated
-- Named technologies, patterns, or approaches
-
-**Implicit Requirements** (reasonable expectations):
-- Industry-standard practices for the domain
-- Error handling and edge cases a professional would address
-- Security considerations for the context
-- Performance expectations appropriate to the use case
-- Maintainability and code quality norms
-- Documentation that a handoff would require
-
-**Contextual Requirements** (derived from situation):
-- Integration with existing codebase patterns
-- Consistency with project conventions
-- Dependencies on or from other components
-- Deployment and operational concerns
-
-### 2. The "Reasonable Professional" Standard
-Ask: Would a skilled professional, given this request and context, have done more?
-- Not about perfection, but about professional completeness
-- Consider what would embarrass the implementer if missed
-- Think about what a code reviewer would flag
-
-### 3. Stakeholder Perspective Analysis
-Consider multiple viewpoints:
-- **End User**: Does this solve their actual problem?
-- **Developer**: Is this maintainable and understandable?
-- **Operator**: Can this be deployed and monitored?
-- **Security**: Are there obvious vulnerabilities?
-- **Future Self**: Will this cause problems later?
-
-## Evaluation Checklist
-
-### Functional Completeness
-- [ ] All stated features implemented
-- [ ] Happy path works correctly
-- [ ] Common error cases handled
-- [ ] Edge cases addressed (empty inputs, large inputs, concurrent access)
-- [ ] Failure modes graceful
-- [ ] Complementary paths complete (if feature has read/write, encode/decode, or similar pairs, ALL directions work)
-- [ ] Tests use realistic configurations, not just minimal toy setups
-
-### Integration Quality
-- [ ] Works with existing code/systems
-- [ ] Follows project conventions
-- [ ] Dependencies properly managed
-- [ ] No breaking changes to dependents
-
-### Operational Readiness
-- [ ] Appropriate logging/observability
-- [ ] Configuration externalized where appropriate
-- [ ] Error messages actionable
-- [ ] Performance acceptable for use case
-
-### Code Quality
-- [ ] Tests for critical paths
-- [ ] Code understandable without deep context
-- [ ] No obvious security issues
-- [ ] No technical debt that would block future work
-
-## Nuance Detection
-
-### Watch for These Patterns
-
-**Surface Completion, Deeper Gaps**:
-- Feature "works" but doesn't handle realistic scenarios
-- Tests pass but don't cover meaningful cases
-- Code compiles but has obvious logic errors
-
-**Partial Implementation**:
-- Started but didn't finish a logical unit
-- Implemented the easy parts, skipped the hard parts
-- Left TODOs or FIXMEs for critical functionality
-- Fixed only one direction of a round-trip (e.g. write but not read, encode but not decode)
-
-**Incomplete Round-Trip**:
-- Feature has complementary paths (read/write, serialize/deserialize, import/export) but only one direction was changed
-- Tests only exercise one direction, leaving the other untested
-- Tests use trivial/toy configurations that don't match realistic usage (e.g. simple constructor instead of loading from real data files)
-
-**Wrong Abstraction Level**:
-- Solved a different problem than asked
-- Over-engineered simple request
-- Under-engineered complex request
-
-**Missing Connections**:
-- Implemented in isolation, not integrated
-- Created components that don't work together
-- Forgot to wire up to entry points
-
-### Questions That Reveal Gaps
-1. "What happens when X fails?" (error handling)
-2. "What if there are 1000 of these?" (scale)
-3. "What if two users do this simultaneously?" (concurrency)
-4. "What if the input is malicious?" (security)
-5. "How would a new developer understand this?" (clarity)
-6. "How would we know if this broke in production?" (observability)
-7. "Does this feature have a complementary path (read/write, encode/decode, serialize/deserialize, import/export)? Were ALL complementary paths modified and tested?" (round-trip completeness)
-8. "Do the tests exercise the same code paths and configurations a realistic caller would use, or only trivial/toy setups?" (test realism)
-9. "Are there edge-case inputs (empty, mismatched lengths, boundary values) that the tests don't cover but a user could plausibly provide?" (edge-case coverage)
-
-## Goal Constraint Evaluation
-
-When Key Requirements include tagged constraints ([MUST], [SHOULD], [WITHIN], [CONSTRAINT]),
-evaluate each one explicitly:
-
-- **[MUST] (Invariant)**: These MUST NOT be violated. Any violation is a critical gap.
-  Invariant violations should be severity: critical and category: constraint_violation.
-- **[SHOULD] (Preference)**: These SHOULD be followed. Deviations are acceptable when
-  justified but should be noted. Unjustified deviations are moderate gaps.
-- **[WITHIN] (Boundary)**: Work must stay within these boundaries. Exceeding boundaries
-  is a major gap.
-- **[CONSTRAINT]**: Treat as a strong requirement (between SHOULD and MUST). Violations
-  are major gaps unless justified.
-
-Report constraint evaluations in the CONSTRAINT_CONFORMANCE section of your output.
-
-## Output Format
-
-Provide your evaluation in this exact format:
-
-```
-SATISFACTION: <satisfied|partial|unsatisfied|indeterminate>
-CONFIDENCE: <0.0-1.0>
-NEEDS_HUMAN: <yes|no>
-HUMAN_REASON: <reason if needs human judgment>
-SUMMARY: <one paragraph describing what was accomplished>
-GAPS:
-- <gap description> | <minor|moderate|major|critical> | <suggested action> | <category>
-IMPLICIT_GAPS:
-- <implied requirement that was missed> | <severity> | <why this was expected>
-CONSTRAINT_CONFORMANCE:
-- <constraint text> | <conforming|deviating|violating> | <explanation>
-FOCUS_AREAS:
-- <area to focus on if re-prompting>
-NEW_TASKS:
-- <title> | <description> | <high|normal|low> | <blocking|parallel>
-REPROMPT_STRATEGY: <retry_same|retry_augmented|add_tasks|restructure|escalate>
-STRATEGY_RATIONALE: <why this strategy>
-```
-
-## Gap Categories
-- `functional`: Missing features or behaviors
-- `error_handling`: Missing or inadequate error cases
-- `integration`: Doesn't work with other components
-- `testing`: Insufficient test coverage
-- `security`: Security vulnerabilities or concerns
-- `performance`: Performance issues or concerns
-- `observability`: Missing logging, metrics, or monitoring
-- `documentation`: Missing or inadequate docs
-- `maintainability`: Code quality or design issues
-
-## Severity Calibration
-
-- **Minor**: Polish items, nice-to-haves, stylistic issues
-  - Would not block a code review
-  - Could be addressed in a follow-up
-
-- **Moderate**: Expected features missing, non-critical paths broken
-  - A reviewer would request changes
-  - Users would notice but could work around
-
-- **Major**: Core functionality gaps, important use cases broken
-  - Would block a code review
-  - Users would be significantly impacted
-
-- **Critical**: Fundamental requirements unmet, security issues, data loss risks
-  - Work is essentially not done
-  - Would cause immediate problems in production
-
-## Re-Prompt Strategy Selection
-
-Choose based on the nature of gaps:
-
-- **retry_same**: Gaps suggest the agent misunderstood; same prompt with emphasis
-- **retry_augmented**: Add context about what was missed to the same tasks
-- **add_tasks**: Gaps require new work not covered by existing tasks
-- **restructure**: Fundamental approach was wrong, need different decomposition
-- **escalate**: Gaps require human judgment, policy decisions, or access agent lacks
-
-## When to Mark NEEDS_HUMAN: yes
-
-- Ambiguous requirements that could reasonably go multiple ways
-- Policy or business logic decisions not specified
-- Security-sensitive decisions requiring authorization
-- Trade-offs between competing concerns with no clear winner
-- Access or permissions the system lacks
-- Recurring gaps that haven't been resolved after multiple iterations (drift)
-
-## Important Principles
-
-1. **Be thorough but fair** - Don't fail work for trivialities
-2. **Be specific** - Vague gaps can't be addressed
-3. **Be actionable** - Every gap should have a clear fix path
-4. **Be calibrated** - Severity should match actual impact
-5. **Be honest about uncertainty** - Use indeterminate when you can't tell
-6. **Consider context** - A prototype has different standards than production code
-"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::models::{
-        ConstraintConformance, ConstraintEvaluation,
-        SessionStatus, SubstrateSession, SubstrateConfig, TaskPriority,
+        ConstraintConformance, ConstraintEvaluation, GapCategory, GapSeverity, IntentGap,
+        NewTaskGuidance, RepromptApproach, RepromptGuidance, SessionStatus, SubstrateConfig,
+        SubstrateSession, TaskPriority,
     };
 
     #[test]
@@ -1672,8 +999,7 @@ NEW_TASKS:
     }
 
     fn create_mock_task(title: &str) -> Task {
-        Task::with_title(title, "Test description")
-            .with_priority(TaskPriority::Normal)
+        Task::with_title(title, "Test description").with_priority(TaskPriority::Normal)
     }
 
     /// Simplified response parser for testing (mirrors the actual parser logic)
@@ -1685,16 +1011,23 @@ NEW_TASKS:
     ) -> IntentVerificationResult {
         let response_text = session.result.clone().unwrap_or_default();
 
-        let mut result = IntentVerificationResult::new(intent.id, IntentSatisfaction::Indeterminate)
-            .with_iteration(iteration);
+        let mut result =
+            IntentVerificationResult::new(intent.id, IntentSatisfaction::Indeterminate)
+                .with_iteration(iteration);
 
         for task in completed_tasks {
             result = result.with_task(task.id);
         }
 
         // Parse SATISFACTION
-        if let Some(sat_line) = response_text.lines().find(|l| l.starts_with("SATISFACTION:")) {
-            let sat_value = sat_line.trim_start_matches("SATISFACTION:").trim().to_lowercase();
+        if let Some(sat_line) = response_text
+            .lines()
+            .find(|l| l.starts_with("SATISFACTION:"))
+        {
+            let sat_value = sat_line
+                .trim_start_matches("SATISFACTION:")
+                .trim()
+                .to_lowercase();
             result.satisfaction = match sat_value.as_str() {
                 "satisfied" => IntentSatisfaction::Satisfied,
                 "partial" => IntentSatisfaction::Partial,
@@ -1725,7 +1058,10 @@ NEW_TASKS:
                 continue;
             }
             if in_gaps {
-                if line.starts_with("FOCUS_AREAS:") || line.starts_with("NEW_TASKS:") || line.is_empty() {
+                if line.starts_with("FOCUS_AREAS:")
+                    || line.starts_with("NEW_TASKS:")
+                    || line.is_empty()
+                {
                     in_gaps = false;
                     continue;
                 }
@@ -1758,7 +1094,9 @@ NEW_TASKS:
         // Build reprompt guidance if not satisfied
         if result.satisfaction != IntentSatisfaction::Satisfied {
             let mut guidance = RepromptGuidance::new(
-                if !result.gaps.is_empty() && result.gaps.iter().any(|g| g.severity >= GapSeverity::Major) {
+                if !result.gaps.is_empty()
+                    && result.gaps.iter().any(|g| g.severity >= GapSeverity::Major)
+                {
                     RepromptApproach::RetryAndAddTasks
                 } else {
                     RepromptApproach::RetryWithContext
@@ -1802,11 +1140,9 @@ NEW_TASKS:
                             let description = parts[1].trim();
                             let mut task = NewTaskGuidance::new(title, description);
 
-                            if parts.len() > 2 {
-                                match parts[2].trim().to_lowercase().as_str() {
-                                    "high" => task = task.high_priority(),
-                                    _ => {}
-                                }
+                            if parts.len() > 2 && parts[2].trim().to_lowercase().as_str() == "high"
+                            {
+                                task = task.high_priority()
                             }
 
                             guidance = guidance.with_new_task(task);
@@ -1826,8 +1162,11 @@ NEW_TASKS:
                 continue;
             }
             if in_constraints {
-                if line.starts_with("FOCUS_AREAS:") || line.starts_with("NEW_TASKS:")
-                   || line.starts_with("REPROMPT_STRATEGY:") || line.is_empty() {
+                if line.starts_with("FOCUS_AREAS:")
+                    || line.starts_with("NEW_TASKS:")
+                    || line.starts_with("REPROMPT_STRATEGY:")
+                    || line.is_empty()
+                {
                     in_constraints = false;
                     continue;
                 }
@@ -1835,7 +1174,9 @@ NEW_TASKS:
                     let parts: Vec<&str> = line.trim_start_matches("- ").split('|').collect();
                     if parts.len() >= 2 {
                         let constraint = parts[0].trim().to_string();
-                        let status = parts[1].trim().parse::<ConstraintConformance>()
+                        let status = parts[1]
+                            .trim()
+                            .parse::<ConstraintConformance>()
                             .unwrap_or(ConstraintConformance::Deviating);
                         let explanation = if parts.len() > 2 {
                             parts[2].trim().to_string()
@@ -1850,7 +1191,9 @@ NEW_TASKS:
                         if status == ConstraintConformance::Violating {
                             let severity = if constraint.starts_with("[MUST]") {
                                 GapSeverity::Critical
-                            } else if constraint.starts_with("[WITHIN]") || constraint.starts_with("[CONSTRAINT]") {
+                            } else if constraint.starts_with("[WITHIN]")
+                                || constraint.starts_with("[CONSTRAINT]")
+                            {
                                 GapSeverity::Major
                             } else {
                                 GapSeverity::Moderate
@@ -1859,7 +1202,8 @@ NEW_TASKS:
                                 IntentGap::new(
                                     format!("Constraint violation: {}", constraint),
                                     severity,
-                                ).with_category(GapCategory::ConstraintViolation)
+                                )
+                                .with_category(GapCategory::ConstraintViolation),
                             );
                         }
                     }
@@ -1893,19 +1237,40 @@ NEW_TASKS:
         let result = parse_test_response(&session, &intent, &tasks, 1);
 
         assert_eq!(result.constraint_evaluations.len(), 3);
-        assert_eq!(result.constraint_evaluations[0].status, ConstraintConformance::Conforming);
-        assert_eq!(result.constraint_evaluations[0].constraint, "[MUST] No unsafe code");
-        assert_eq!(result.constraint_evaluations[1].status, ConstraintConformance::Deviating);
-        assert_eq!(result.constraint_evaluations[2].status, ConstraintConformance::Violating);
-        assert_eq!(result.constraint_evaluations[2].constraint, "[WITHIN] Rust stable toolchain");
+        assert_eq!(
+            result.constraint_evaluations[0].status,
+            ConstraintConformance::Conforming
+        );
+        assert_eq!(
+            result.constraint_evaluations[0].constraint,
+            "[MUST] No unsafe code"
+        );
+        assert_eq!(
+            result.constraint_evaluations[1].status,
+            ConstraintConformance::Deviating
+        );
+        assert_eq!(
+            result.constraint_evaluations[2].status,
+            ConstraintConformance::Violating
+        );
+        assert_eq!(
+            result.constraint_evaluations[2].constraint,
+            "[WITHIN] Rust stable toolchain"
+        );
 
         // Violating constraint should produce a gap
-        let constraint_gaps: Vec<_> = result.gaps.iter()
+        let constraint_gaps: Vec<_> = result
+            .gaps
+            .iter()
             .filter(|g| g.category == GapCategory::ConstraintViolation)
             .collect();
         assert_eq!(constraint_gaps.len(), 1);
         assert_eq!(constraint_gaps[0].severity, GapSeverity::Major); // [WITHIN] -> Major
-        assert!(constraint_gaps[0].description.contains("[WITHIN] Rust stable toolchain"));
+        assert!(
+            constraint_gaps[0]
+                .description
+                .contains("[WITHIN] Rust stable toolchain")
+        );
     }
 
     #[test]
@@ -1927,9 +1292,14 @@ NEW_TASKS:
         let result = parse_test_response(&session, &intent, &tasks, 1);
 
         assert_eq!(result.constraint_evaluations.len(), 1);
-        assert_eq!(result.constraint_evaluations[0].status, ConstraintConformance::Violating);
+        assert_eq!(
+            result.constraint_evaluations[0].status,
+            ConstraintConformance::Violating
+        );
 
-        let constraint_gaps: Vec<_> = result.gaps.iter()
+        let constraint_gaps: Vec<_> = result
+            .gaps
+            .iter()
             .filter(|g| g.category == GapCategory::ConstraintViolation)
             .collect();
         assert_eq!(constraint_gaps.len(), 1);

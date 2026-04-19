@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **YAML workflows as single source of truth** — Six hardcoded Rust workflow builders removed; workflows now resolve exclusively from inline `[[workflows]]` entries in `abathur.toml` and YAML files in `workflows_dir`. `abathur init` scaffolds default `<name>.yaml` files (preserving any existing edits).
+- **Quiet windows** — New cron-scheduled cost-control windows during which the swarm pauses dispatch (migration 014, `abathur quiet-window` management, IANA timezones). Combined with budget pressure, this scales the swarm to zero during expensive pricing windows.
+- **Week-day/time gating** — Configurable working-hours schedule (`abathur.toml`) so Abathur runs only Monday–Friday during approved hours by default.
+- **Federation (A2A protocol v0.3)** — Adopt standard Agent2Agent wire format: domain types, `HttpA2AClient`, `/.well-known/agent.json` discovery, federation-aware `tasks/send` routing, `/rpc/stream` SSE endpoint for `tasks/sendSubscribe`.
+- **Federated goals** — `FederatedGoal` model with Pending→Delegated→Active→Converging→Converged state machine, `ConvergenceContract` signals (BuildPassing, TestsPassing, ConvergenceLevel, Custom), `SwarmOverseer`, child-side goal tracking, and cross-swarm dependency DAG executor (migration 010).
+- **Federation priority middleware** — Dedicated orchestrator middleware stack (federation_priority, autoship, budget, circuit_breaker, guardrails, mcp_readiness, merge_queue, pull_request, quiet_window, route_task, subtask_merge, verification) replacing the prior helpers god-module.
+- **ClickUp Federation Proxy (Human Cerebrate)** — Standalone `human-cerebrate` crate that speaks the federation JSON-RPC protocol and creates/polls ClickUp tasks, letting the overmind delegate real-world tasks to humans with zero changes to core federation code.
+- **Pull-request ingestion** — GitHub Issues adapter now ingests and reviews PRs (not just issues), with a new "rejected" status for issues that are no longer valid.
+- **Event outbox** — Transactional outbox pattern (migration 008) so events are persisted within the same transaction as domain mutations and published by a background poller, closing the persist/publish gap.
+- **Merge requests schema** — Persisted two-stage merge queue (migration 009) so conflict records survive across ephemeral `MergeQueue` instances.
+- **Template stats persistence** — Evolution loop's `TemplateStats`, `TaskExecution`, and version-change history now survive process restarts (migration 013).
+- **Task FK constraints & composite indexes** — Added cascade-delete FKs across `convergence_trajectories`, `worktrees`, `merge_requests`, `agent_instances`, and `events` (migration 011); added `idx_tasks_status_priority` and deadline/goal partial indexes (migration 012) to eliminate full-table scans in `get_ready_tasks`.
+- **Cron triggers** — Schedule a prompt to run on crontab-style cadence (`abathur trigger`/`abathur cron`).
+- **`abathur task prune`** — Filter-based prune subcommand (status, age, agent) that respects the DAG and refuses to delete tasks in an active dependency tree unless `--force`.
+- **`abathur task submit -f <FILE>`** — Read the prompt from a file, with the same treatment as inline `<PROMPT>`.
+- **Configurable max turns per agent role** — New `[max_turns.<role>]` config with example fixtures.
+- **Encrypted webhook secrets at rest** — `webhook_subscriptions.secret` is encrypted with AES-256-GCM when `ABATHUR_MASTER_KEY` is set (32-byte key).
+- **Recursive blocking cascade** — `TaskFailedBlockHandler` now iteratively blocks the entire dependent subtree (not just direct dependents) on retry exhaustion or cancellation.
+- **Watermark-safe event pruning** — Event pruning retains events at or above the minimum handler watermark to prevent deletion before all handlers have processed them.
+- **Global budget-pressure gate** — The convergence loop now terminates early with `BudgetDenied` when the tracker reports critical pressure (>95% consumed) instead of burning the last dollar on one task.
+- **Guardrails at task submission** — HTTP `submit_task` runs a pre-flight `check_task_creation()` and returns 400 `GUARDRAIL_BLOCKED` over concurrent-task limits.
+- **Critical handler designation** — Handlers can now opt into fast-retry and alerting semantics.
+- **Optimistic locking on `task_repo.update()`** — `WHERE version = ?` enforces concurrent-update detection; callers now handle `ConcurrencyConflict` with retry.
+- **Workflow phase failure recovery** — New `WorkflowPhaseFailureHandler` recovers from failed phase subtasks instead of leaving parent tasks Running forever.
+- **Inter-functional contract documentation** — Full catalog of event-bus, task-lifecycle, workflow, convergence, and service-dependency contracts plus shortcomings analysis.
+
+### Changed
+
+- **Default workflows directory** — `workflows_dir` moved from the repo root to `.abathur/workflows`; `.gitignore` updated; embedded template paths and tests follow suit.
+- **CLI verb consistency** — Unified verbs across goal/task/agent/event/memory/schedule/trigger/workflow/adapter (e.g. `goals set` vs `task submit`), new display formatting module, and a UX pass over every human operator command.
+- **Agent-type plumbing** — Agent type now threaded end-to-end through paths that previously discarded it.
+- **`abathur task list`** — Dropped priority column, added agent-type column, aligned formatting; `-l`/`--limit` flag now actually limits results; end-to-end CLI tests added.
+- **Execution-mode classification weights** — Agent-role signal rebalanced from ±5 to ±2 so complexity, description, anti-pattern hints, and parent inheritance matter again.
+- **Convergence threshold default** — YAML `ConvergenceLevel.min_level` default is now 0.8 (matching `SwarmOverseer`), not an impractical 1.0.
+- **`ANTHROPIC_API_KEY` validation** — No longer an unconditional startup check; only required by substrates that need it (`anthropic_api`).
+- **Branch-name validation in merge queue** — Rejects empty names, names starting with non-alphanumerics (`-flag` injection), and anything outside `[a-zA-Z0-9/_.\-]`.
+- **Structured database errors** — `DatabaseError(String)` replaced with a categorized enum so handlers can react correctly (conflict vs timeout vs real failure).
+- **Dual-publish guard** — When both `TaskService.event_bus` and `CommandBus` outbox are wired, `TaskService` skips direct publish inside the transaction scope to avoid duplicates.
+- **Atomic retry-or-block** — The separate retry and block handlers on `TaskFailed` are merged into a single atomic handler to remove the race between them.
+
+### Fixed
+
+- **Memory timestamps** — Removed `datetime('now')` defaults on `memories.created_at`/`updated_at`/`last_accessed_at` (they emitted non-RFC3339 strings that poisoned `DateTime::parse_from_rfc3339`); callers must now supply explicit RFC3339 values.
+- **Federation priority** — Federation work is now correctly prioritized by the orchestrator middleware chain.
+- **Domain inference false positives** — Exclude `token budget`/`token limit`/`token count` from security classification and `mcp server`/`language server`/`lsp server` from backend classification; add `jwt` as a security keyword; regression tests added.
+- **`converge_parallel()` never detecting `OverseerConverged`** — The `LoopControl` returned by `iterate_once()` was being discarded in both phases, making `OverseerConverged` unreachable; dead `best_converged: Option<usize>` removed.
+- **Circuit-breaker test assertions** — `test_circuit_breaker_proceeds_with_fewer_than_three_tasks` corrected to assert `Reaction::None` (which the handler always returns) and verify behavior by checking for a newly created convergence-check record.
+- **Memory-service merge conflicts** — Resolved long-standing conflicts in `memory_service.rs` and brought migration 013 into place cleanly.
+- **Worktree merge fixes** — Multiple merge-path corrections, including switching `check_merge_conflicts` to the `git merge-tree --write-tree` invocation, distinguishing exit code 1 (conflicts) from ≥2 (errors), and broadening `extract_conflict_files` to all `CONFLICT` line formats (Issue #45).
+- **`try_auto_ship` concurrency** — Added a `tokio::sync::Mutex` to serialize auto-ship so concurrent squash-merges stop racing on the shared working directory.
+- **Federation contract violations** — Closed the convergence pipeline so `FederatedGoalConverged`/`Failed` actually emit; switched `task_to_federated_goal` to `String` keys (A2A task IDs aren't always UUIDs); fixed 13 pre-existing event-bus contract violations.
+- **Convergence FK violation** — `prepare()` now threads the real `task_id` instead of `Uuid::new_v4()`, fixing SQLite error 787 against the migration-011 FK on `convergence_trajectories`.
+- **Priority inversion** — `WorkflowSubtaskCompletionHandler` moved from HIGH to SYSTEM priority so workflow advancement runs alongside readiness cascade (S3).
+- **Event-bus silent drops** — Hardened event delivery so dropped `TaskReady` events no longer starve tasks that are Ready in the DB but never scheduled (S5).
+- **SQLite `prune_older_than()`** — Fixed COALESCE fallback so pruning still works when no watermarks exist.
+- **Hourly guardrail reset** — `Guardrails::reset_hourly()` is now actually called so the hourly token limit resets (Issue #42).
+- **TOCTOU race in token-limit guardrail** — Check-and-record made atomic (Issue #41).
+- **Guardrail file-path matching** — `.env`/secrets patterns now match the real paths they were supposed to (Issue #48).
+- **N+1 query in `calculate_depth`/`find_root_task`** — Unbounded DB queries per task collapsed into bounded traversal (Issue #43).
+- **`goal_id` in `TaskSubmitted`** — No longer uses `parent_id` or fabricates a UUID (Issue #44).
+- **Worktree path traversal** — Worktree paths validated before being used as git workdirs (Issue #39).
+- **Convergence trajectory cascade-delete** — No more orphaned rows when a task is deleted (Issue #61).
+- **Memory-store version conflicts** — Auto-increment memory version on duplicate `(namespace, key)` instead of hitting UNIQUE violations; Jaccard test data adjusted for `>0.9` similarity threshold.
+- **Startup triage prompt** — The triage agent now has its real task ID injected into the user prompt instead of guessing `{{task_id}}` and failing UUID parse.
+- **Unbounded prompt growth** — `heuristic_refinement_prompt` now strips existing "Refinement Notes" blocks before appending new ones, preventing 16-block accumulation in long-lived agents.
+- **Workflow validating state** — `WorkflowEngine` correctly advances through the validating state.
+- **Workflow subtask guard** — Workflow tasks no longer spawn untracked subtasks.
+- **Reconciliation coverage** — `FastReconciliationHandler` now detects zombie Pending tasks (dependencies Blocked/Failed/Canceled) and mismatched states (S10).
+
+#### Quality-sprint fixes (in-session)
+
+- Tightened workflow engine state transitions — `let _ = ... .await?;` refactored; invalid subtask transitions now fail loudly.
+- Hardened `extract_json_from_response` — added test coverage and removed nested `if && if` chains.
+- Added diagnostic logging when `git reset --hard` fails during auto-ship recovery.
+- `push_with_retry` now bails out on non-rejection push failures instead of wastefully fetch+rebase-looping.
+- Mock `A2AClient` panics now carry diagnostic context via `unreachable!` instead of bare `unimplemented!`.
+- Removed tautological test assertions and replaced runtime constant assertions with compile-time `const _: () = assert!(...)` checks.
+
 ## [0.3.0] - 2026-02-20
 
 ### Added

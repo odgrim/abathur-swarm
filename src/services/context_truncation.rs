@@ -49,8 +49,8 @@ impl Default for TruncationConfig {
 impl TruncationConfig {
     /// Calculate the maximum characters allowed for a single section.
     pub fn max_section_chars(&self) -> usize {
-        let budget_chars =
-            (self.context_window_tokens as f32 * self.max_context_share) as usize * self.chars_per_token;
+        let budget_chars = (self.context_window_tokens as f32 * self.max_context_share) as usize
+            * self.chars_per_token;
         budget_chars.min(self.hard_max_chars)
     }
 }
@@ -228,7 +228,10 @@ mod tests {
         };
         let sections = vec![
             ("short", "hello".to_string()),
-            ("long", "line one\nline two\nline three\nline four\nline five\nline six".to_string()),
+            (
+                "long",
+                "line one\nline two\nline three\nline four\nline five\nline six".to_string(),
+            ),
         ];
         let (result, any_truncated) = truncate_context_sections(sections, &config);
         assert_eq!(result.len(), 2);

@@ -23,14 +23,15 @@ pub struct McpReadinessMiddleware {
 
 impl McpReadinessMiddleware {
     pub fn new(repo_path: PathBuf, a2a_gateway: Option<String>) -> Self {
-        Self { repo_path, a2a_gateway }
+        Self {
+            repo_path,
+            a2a_gateway,
+        }
     }
 
     async fn check(&self) -> bool {
         // Abathur binary must exist — MCP stdio servers are forked children.
-        let exe_ok = std::env::current_exe()
-            .map(|p| p.exists())
-            .unwrap_or(false);
+        let exe_ok = std::env::current_exe().map(|p| p.exists()).unwrap_or(false);
         if !exe_ok {
             tracing::warn!("Abathur binary not found — MCP stdio servers cannot launch");
             return false;
@@ -84,10 +85,7 @@ impl PreSpawnMiddleware for McpReadinessMiddleware {
         "mcp-readiness"
     }
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision> {
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
         if self.check().await {
             return Ok(PreSpawnDecision::Continue);
         }

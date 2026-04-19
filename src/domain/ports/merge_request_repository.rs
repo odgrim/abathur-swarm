@@ -29,7 +29,8 @@ pub trait MergeRequestRepository: Send + Sync {
     async fn list_by_task(&self, task_id: Uuid) -> DomainResult<Vec<MergeRequest>>;
 
     /// Get all conflict records needing resolution (status=Conflict, attempts < max).
-    async fn list_unresolved_conflicts(&self, max_attempts: u32) -> DomainResult<Vec<MergeRequest>>;
+    async fn list_unresolved_conflicts(&self, max_attempts: u32)
+    -> DomainResult<Vec<MergeRequest>>;
 
     /// Delete merge requests with terminal status older than the given duration.
     async fn prune_terminal(&self, older_than: chrono::Duration) -> DomainResult<u64>;

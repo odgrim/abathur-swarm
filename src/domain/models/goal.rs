@@ -79,7 +79,6 @@ impl GoalStatus {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Active)
     }
-
 }
 
 /// Priority level for goals.
@@ -144,7 +143,11 @@ pub struct GoalConstraint {
 }
 
 impl GoalConstraint {
-    pub fn new(name: impl Into<String>, description: impl Into<String>, constraint_type: ConstraintType) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        constraint_type: ConstraintType,
+    ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),

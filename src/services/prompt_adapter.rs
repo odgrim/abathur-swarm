@@ -8,9 +8,7 @@
 use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::adapter::{
-    AdapterManifest, EgressAction, EgressResult,
-};
+use crate::domain::models::adapter::{AdapterManifest, EgressAction, EgressResult};
 use crate::domain::ports::adapter::EgressAdapter;
 
 /// An adapter backed entirely by a prompt template.
@@ -52,7 +50,7 @@ impl EgressAdapter for PromptAdapter {
     /// Always returns an error — prompt adapters do not execute actions
     /// directly. The agent should follow the prompt instructions instead.
     async fn execute(&self, _action: &EgressAction) -> DomainResult<EgressResult> {
-        Err(DomainError::ExecutionFailed(format!(
+        Err(DomainError::NotImplemented(format!(
             "Adapter '{}' is a prompt-only adapter. Use the prompt instructions \
              injected into the agent context instead of calling execute directly.",
             self.manifest.name
@@ -63,9 +61,7 @@ impl EgressAdapter for PromptAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::adapter::{
-        AdapterCapability, AdapterDirection, AdapterType,
-    };
+    use crate::domain::models::adapter::{AdapterCapability, AdapterDirection, AdapterType};
 
     fn test_manifest() -> AdapterManifest {
         AdapterManifest::new("test-prompt", AdapterType::Prompt, AdapterDirection::Egress)

@@ -604,9 +604,11 @@ impl IntentVerificationResult {
     pub fn should_iterate(&self) -> bool {
         // Don't iterate if human escalation is blocking
         if let Some(ref esc) = self.escalation
-            && esc.needs_human && esc.urgency == EscalationUrgency::Blocking {
-                return false;
-            }
+            && esc.needs_human
+            && esc.urgency == EscalationUrgency::Blocking
+        {
+            return false;
+        }
         self.satisfaction.should_retry() && self.reprompt_guidance.is_some()
     }
 
@@ -617,9 +619,9 @@ impl IntentVerificationResult {
 
     /// Check if progress is blocked pending human input.
     pub fn is_blocked_on_human(&self) -> bool {
-        self.escalation.as_ref().is_some_and(|e| {
-            e.needs_human && e.urgency == EscalationUrgency::Blocking
-        })
+        self.escalation
+            .as_ref()
+            .is_some_and(|e| e.needs_human && e.urgency == EscalationUrgency::Blocking)
     }
 
     /// Get the most severe gap, if any.
@@ -629,7 +631,8 @@ impl IntentVerificationResult {
 
     /// Get the most severe gap from either explicit or implicit gaps.
     pub fn most_severe_any_gap(&self) -> Option<&IntentGap> {
-        self.gaps.iter()
+        self.gaps
+            .iter()
             .chain(self.implicit_gaps.iter())
             .max_by_key(|g| g.severity)
     }
@@ -663,38 +666,49 @@ impl IntentVerificationResult {
     pub fn should_escalate(&self) -> Option<HumanEscalation> {
         // Invariant ([MUST]) constraint violations always escalate
         if self.constraint_evaluations.iter().any(|eval| {
-            eval.status == ConstraintConformance::Violating
-                && eval.constraint.starts_with("[MUST]")
+            eval.status == ConstraintConformance::Violating && eval.constraint.starts_with("[MUST]")
         }) {
-            let violated: Vec<_> = self.constraint_evaluations.iter()
-                .filter(|eval| eval.status == ConstraintConformance::Violating && eval.constraint.starts_with("[MUST]"))
+            let violated: Vec<_> = self
+                .constraint_evaluations
+                .iter()
+                .filter(|eval| {
+                    eval.status == ConstraintConformance::Violating
+                        && eval.constraint.starts_with("[MUST]")
+                })
                 .map(|eval| eval.constraint.clone())
                 .collect();
-            return Some(HumanEscalation::new(
-                format!("Invariant constraint violation: {}", violated.join("; "))
-            ).with_urgency(EscalationUrgency::High)
-             .with_context(format!(
-                 "The following invariant constraints were violated: {}",
-                 violated.join("; ")
-             ))
-             .with_question("Should work continue despite these invariant violations?"));
+            return Some(
+                HumanEscalation::new(format!(
+                    "Invariant constraint violation: {}",
+                    violated.join("; ")
+                ))
+                .with_urgency(EscalationUrgency::High)
+                .with_context(format!(
+                    "The following invariant constraints were violated: {}",
+                    violated.join("; ")
+                ))
+                .with_question("Should work continue despite these invariant violations?"),
+            );
         }
 
         // Critical security gaps always escalate
-        if self.has_security_gaps() && self.gaps_by_category(GapCategory::Security)
-            .iter().any(|g| g.severity >= GapSeverity::Major)
+        if self.has_security_gaps()
+            && self
+                .gaps_by_category(GapCategory::Security)
+                .iter()
+                .any(|g| g.severity >= GapSeverity::Major)
         {
             return Some(HumanEscalation::security_decision(
-                "Security-related gaps require human review"
+                "Security-related gaps require human review",
             ));
         }
 
         // Many implicit gaps suggest requirements ambiguity
         if self.implicit_gaps.len() >= 3 {
-            return Some(HumanEscalation::ambiguous_requirements(
-                format!("Multiple implicit requirements ({}) were missed, suggesting the original intent may be unclear",
-                    self.implicit_gaps.len())
-            ));
+            return Some(HumanEscalation::ambiguous_requirements(format!(
+                "Multiple implicit requirements ({}) were missed, suggesting the original intent may be unclear",
+                self.implicit_gaps.len()
+            )));
         }
 
         // Already has explicit escalation
@@ -913,23 +927,31 @@ impl RepromptStrategySelector {
     pub fn select_strategy(result: &IntentVerificationResult) -> RepromptApproach {
         // Check for escalation triggers first
         if let Some(ref escalation) = result.escalation
-            && escalation.needs_human && escalation.urgency == EscalationUrgency::Blocking {
-                return RepromptApproach::Escalate {
-                    reason: escalation.reason.clone(),
-                };
-            }
+            && escalation.needs_human
+            && escalation.urgency == EscalationUrgency::Blocking
+        {
+            return RepromptApproach::Escalate {
+                reason: escalation.reason.clone(),
+            };
+        }
 
         // Check for critical gaps - may need restructure
         if result.has_critical_gaps() {
-            let critical_gaps: Vec<_> = result.all_gaps()
+            let critical_gaps: Vec<_> = result
+                .all_gaps()
                 .filter(|g| g.severity == GapSeverity::Critical)
                 .collect();
 
             // If critical gaps are functional, likely need restructure
-            if critical_gaps.iter().any(|g| g.category == GapCategory::Functional) {
+            if critical_gaps
+                .iter()
+                .any(|g| g.category == GapCategory::Functional)
+            {
                 return RepromptApproach::Restructure {
-                    original_problem: "Critical functional gaps indicate fundamental approach issues".to_string(),
-                    suggested_approach: critical_gaps.iter()
+                    original_problem:
+                        "Critical functional gaps indicate fundamental approach issues".to_string(),
+                    suggested_approach: critical_gaps
+                        .iter()
                         .filter_map(|g| g.suggested_action.clone())
                         .collect::<Vec<_>>()
                         .join("; "),
@@ -943,7 +965,9 @@ impl RepromptStrategySelector {
                 augmentation_instructions: format!(
                     "Previous attempt missed {} implicit requirements. Focus on: {}",
                     result.implicit_gaps.len(),
-                    result.implicit_gaps.iter()
+                    result
+                        .implicit_gaps
+                        .iter()
                         .take(3)
                         .map(|g| g.description.as_str())
                         .collect::<Vec<_>>()
@@ -960,9 +984,18 @@ impl RepromptStrategySelector {
         }
 
         // Count gap severities
-        let major_count = result.all_gaps().filter(|g| g.severity == GapSeverity::Major).count();
-        let moderate_count = result.all_gaps().filter(|g| g.severity == GapSeverity::Moderate).count();
-        let minor_count = result.all_gaps().filter(|g| g.severity == GapSeverity::Minor).count();
+        let major_count = result
+            .all_gaps()
+            .filter(|g| g.severity == GapSeverity::Major)
+            .count();
+        let moderate_count = result
+            .all_gaps()
+            .filter(|g| g.severity == GapSeverity::Moderate)
+            .count();
+        let minor_count = result
+            .all_gaps()
+            .filter(|g| g.severity == GapSeverity::Minor)
+            .count();
 
         // Many major gaps - add tasks
         if major_count >= 2 {
@@ -1094,12 +1127,11 @@ pub fn build_task_augmentations(
     // Augment retry tasks
     for task_id in &guidance.tasks_to_retry {
         if pending_tasks.contains(task_id) {
-            let mut aug = TaskAugmentation::new(*task_id)
-                .as_retry(format!(
-                    "{} (confidence: {:.0}%)",
-                    verification.satisfaction.as_str(),
-                    verification.confidence * 100.0
-                ));
+            let mut aug = TaskAugmentation::new(*task_id).as_retry(format!(
+                "{} (confidence: {:.0}%)",
+                verification.satisfaction.as_str(),
+                verification.confidence * 100.0
+            ));
 
             // Add relevant gaps
             for gap in &verification.gaps {
@@ -1281,9 +1313,10 @@ impl ConvergenceState {
             let normalized = Self::normalize_gap_description(&gap.description);
 
             // Check if we've seen a similar gap before
-            let existing = self.gap_fingerprints.iter_mut().find(|fp| {
-                Self::gaps_are_similar(&fp.normalized_description, &normalized)
-            });
+            let existing = self
+                .gap_fingerprints
+                .iter_mut()
+                .find(|fp| Self::gaps_are_similar(&fp.normalized_description, &normalized));
 
             if let Some(fingerprint) = existing {
                 fingerprint.occurrence_count += 1;
@@ -1397,19 +1430,22 @@ impl ConvergenceState {
         let recurring = self.recurring_gaps();
         let recurring_descriptions: Vec<String> = recurring
             .iter()
-            .map(|fp| format!(
-                "- {} (seen {} times, severity: {})",
-                fp.normalized_description,
-                fp.occurrence_count,
-                fp.severity.as_str()
-            ))
+            .map(|fp| {
+                format!(
+                    "- {} (seen {} times, severity: {})",
+                    fp.normalized_description,
+                    fp.occurrence_count,
+                    fp.severity.as_str()
+                )
+            })
             .collect();
 
         let history_len = self.verification_history.len();
         let detail_cutoff = history_len.saturating_sub(2); // Last 2 get full details
 
         // Older iterations: one-line summaries only
-        let previous_attempts: Vec<String> = self.verification_history
+        let previous_attempts: Vec<String> = self
+            .verification_history
             .iter()
             .enumerate()
             .map(|(i, r)| {
@@ -1455,7 +1491,8 @@ impl ConvergenceState {
             drift_detected: self.drift_detected,
             recurring_gap_descriptions: recurring_descriptions,
             previous_attempt_summaries: previous_attempts,
-            focus_areas: self.latest_result()
+            focus_areas: self
+                .latest_result()
                 .and_then(|r| r.reprompt_guidance.as_ref())
                 .map(|g| g.focus_areas.clone())
                 .unwrap_or_default(),
@@ -1503,7 +1540,9 @@ impl IterationContext {
 
         if self.drift_detected {
             context.push_str("**WARNING: Semantic drift detected.** The same gaps keep appearing across iterations.\n");
-            context.push_str("Please carefully review whether you are truly addressing the root cause.\n\n");
+            context.push_str(
+                "Please carefully review whether you are truly addressing the root cause.\n\n",
+            );
         }
 
         if !self.recurring_gap_descriptions.is_empty() {
@@ -1551,7 +1590,11 @@ pub struct BranchVerificationRequest {
 }
 
 impl BranchVerificationRequest {
-    pub fn new(branch_tasks: Vec<Uuid>, waiting_tasks: Vec<Uuid>, objective: impl Into<String>) -> Self {
+    pub fn new(
+        branch_tasks: Vec<Uuid>,
+        waiting_tasks: Vec<Uuid>,
+        objective: impl Into<String>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             branch_tasks,
@@ -1755,7 +1798,12 @@ pub struct EmbeddedGapFingerprint {
 impl EmbeddedGapFingerprint {
     pub fn from_gap(gap: &IntentGap, iteration: u32) -> Self {
         Self {
-            normalized_description: gap.description.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "),
+            normalized_description: gap
+                .description
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
             embedding: gap.embedding.clone(),
             severity: gap.severity,
             category: gap.category,
@@ -1775,7 +1823,9 @@ impl EmbeddedGapFingerprint {
 
         // Fall back to Jaccard if configured
         if config.fallback_to_jaccard {
-            let other_normalized = other.description.to_lowercase()
+            let other_normalized = other
+                .description
+                .to_lowercase()
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -1798,7 +1848,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
         return 0.0;
     }
 
-    let dot_product: f64 = a.iter().zip(b.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum();
+    let dot_product: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum();
     let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
     let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
 
@@ -1870,25 +1924,31 @@ impl EnhancedConvergenceState {
 
     fn update_embedded_fingerprint(&mut self, gap: &IntentGap, iteration: u32) {
         // Find similar existing fingerprint
-        let similar_idx = self.embedded_fingerprints.iter()
+        let similar_idx = self
+            .embedded_fingerprints
+            .iter()
             .position(|fp| fp.is_similar_to(gap, &self.similarity_config));
 
         if let Some(idx) = similar_idx {
             self.embedded_fingerprints[idx].merge(gap);
         } else {
-            self.embedded_fingerprints.push(EmbeddedGapFingerprint::from_gap(gap, iteration));
+            self.embedded_fingerprints
+                .push(EmbeddedGapFingerprint::from_gap(gap, iteration));
         }
     }
 
     fn check_drift(&mut self) {
         // Drift if any fingerprint has 3+ occurrences
-        self.base.drift_detected = self.embedded_fingerprints.iter()
+        self.base.drift_detected = self
+            .embedded_fingerprints
+            .iter()
             .any(|fp| fp.occurrence_count >= 3);
     }
 
     /// Get recurring gaps with their full context.
     pub fn recurring_gaps_detailed(&self) -> Vec<&EmbeddedGapFingerprint> {
-        self.embedded_fingerprints.iter()
+        self.embedded_fingerprints
+            .iter()
             .filter(|fp| fp.occurrence_count > 1)
             .collect()
     }
@@ -1929,7 +1989,11 @@ pub struct GapCluster {
 }
 
 impl GapCluster {
-    pub fn new(representative: impl Into<String>, category: GapCategory, severity: GapSeverity) -> Self {
+    pub fn new(
+        representative: impl Into<String>,
+        category: GapCategory,
+        severity: GapSeverity,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             representative_description: representative.into(),
@@ -2060,7 +2124,10 @@ impl EscalationDecision {
 
     /// Whether this decision allows work to continue.
     pub fn allows_continuation(&self) -> bool {
-        matches!(self, Self::Accept | Self::Clarify { .. } | Self::ModifyIntent { .. })
+        matches!(
+            self,
+            Self::Accept | Self::Clarify { .. } | Self::ModifyIntent { .. }
+        )
     }
 }
 
@@ -2131,8 +2198,8 @@ mod tests {
         assert!(!config.should_continue(&result));
 
         // Max iterations - don't continue
-        let result = IntentVerificationResult::new(intent_id, IntentSatisfaction::Partial)
-            .with_iteration(3);
+        let result =
+            IntentVerificationResult::new(intent_id, IntentSatisfaction::Partial).with_iteration(3);
         assert!(!config.should_continue(&result));
 
         // Partial with low confidence - continue
@@ -2199,17 +2266,26 @@ mod tests {
         // Add similar gaps with slight variations - should be detected as same
         let result1 = IntentVerificationResult::new(Uuid::new_v4(), IntentSatisfaction::Partial)
             .with_iteration(1)
-            .with_gap(IntentGap::new("Missing error handling in API", GapSeverity::Major));
+            .with_gap(IntentGap::new(
+                "Missing error handling in API",
+                GapSeverity::Major,
+            ));
         state.record_verification(result1);
 
         let result2 = IntentVerificationResult::new(Uuid::new_v4(), IntentSatisfaction::Partial)
             .with_iteration(2)
-            .with_gap(IntentGap::new("error handling missing in API", GapSeverity::Major));
+            .with_gap(IntentGap::new(
+                "error handling missing in API",
+                GapSeverity::Major,
+            ));
         state.record_verification(result2);
 
         let result3 = IntentVerificationResult::new(Uuid::new_v4(), IntentSatisfaction::Partial)
             .with_iteration(3)
-            .with_gap(IntentGap::new("API missing error handling", GapSeverity::Major));
+            .with_gap(IntentGap::new(
+                "API missing error handling",
+                GapSeverity::Major,
+            ));
         state.record_verification(result3);
 
         // Should detect drift because the gaps are semantically similar
@@ -2259,7 +2335,7 @@ mod tests {
             .with_reprompt_guidance(
                 RepromptGuidance::new(RepromptApproach::RetryWithContext)
                     .with_focus("Error handling")
-                    .with_retry(task1_id)
+                    .with_retry(task1_id),
             );
 
         let pending_tasks = vec![task1_id, task2_id];
@@ -2268,7 +2344,10 @@ mod tests {
         // Should have augmentation for task1 (retry) and task2 (general gaps)
         assert_eq!(augmentations.len(), 2);
 
-        let task1_aug = augmentations.iter().find(|a| a.task_id == task1_id).unwrap();
+        let task1_aug = augmentations
+            .iter()
+            .find(|a| a.task_id == task1_id)
+            .unwrap();
         assert!(task1_aug.is_retry);
         assert!(!task1_aug.focus_areas.is_empty());
     }
@@ -2284,8 +2363,7 @@ mod tests {
             .with_confidence(0.6)
             .with_gap(IntentGap::new("Missing tests", GapSeverity::Major))
             .with_reprompt_guidance(
-                RepromptGuidance::new(RepromptApproach::RetryWithContext)
-                    .with_focus("Unit tests")
+                RepromptGuidance::new(RepromptApproach::RetryWithContext).with_focus("Unit tests"),
             );
         state.record_verification(result);
 
@@ -2323,10 +2401,22 @@ mod tests {
 
     #[test]
     fn test_constraint_conformance_from_str() {
-        assert_eq!("conforming".parse::<ConstraintConformance>(), Ok(ConstraintConformance::Conforming));
-        assert_eq!("deviating".parse::<ConstraintConformance>(), Ok(ConstraintConformance::Deviating));
-        assert_eq!("violating".parse::<ConstraintConformance>(), Ok(ConstraintConformance::Violating));
-        assert_eq!("Conforming".parse::<ConstraintConformance>(), Ok(ConstraintConformance::Conforming));
+        assert_eq!(
+            "conforming".parse::<ConstraintConformance>(),
+            Ok(ConstraintConformance::Conforming)
+        );
+        assert_eq!(
+            "deviating".parse::<ConstraintConformance>(),
+            Ok(ConstraintConformance::Deviating)
+        );
+        assert_eq!(
+            "violating".parse::<ConstraintConformance>(),
+            Ok(ConstraintConformance::Violating)
+        );
+        assert_eq!(
+            "Conforming".parse::<ConstraintConformance>(),
+            Ok(ConstraintConformance::Conforming)
+        );
         assert!("unknown".parse::<ConstraintConformance>().is_err());
     }
 
@@ -2346,8 +2436,14 @@ mod tests {
             });
 
         assert_eq!(result.constraint_evaluations.len(), 2);
-        assert_eq!(result.constraint_evaluations[0].status, ConstraintConformance::Conforming);
-        assert_eq!(result.constraint_evaluations[1].status, ConstraintConformance::Deviating);
+        assert_eq!(
+            result.constraint_evaluations[0].status,
+            ConstraintConformance::Conforming
+        );
+        assert_eq!(
+            result.constraint_evaluations[1].status,
+            ConstraintConformance::Deviating
+        );
     }
 
     #[test]
@@ -2384,8 +2480,17 @@ mod tests {
 
     #[test]
     fn test_gap_category_constraint_violation() {
-        assert_eq!(GapCategory::ConstraintViolation.as_str(), "constraint_violation");
-        assert_eq!("constraint_violation".parse::<GapCategory>(), Ok(GapCategory::ConstraintViolation));
-        assert_eq!("constraintviolation".parse::<GapCategory>(), Ok(GapCategory::ConstraintViolation));
+        assert_eq!(
+            GapCategory::ConstraintViolation.as_str(),
+            "constraint_violation"
+        );
+        assert_eq!(
+            "constraint_violation".parse::<GapCategory>(),
+            Ok(GapCategory::ConstraintViolation)
+        );
+        assert_eq!(
+            "constraintviolation".parse::<GapCategory>(),
+            Ok(GapCategory::ConstraintViolation)
+        );
     }
 }

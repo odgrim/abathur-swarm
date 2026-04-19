@@ -9,9 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::adapter::{
-    AdapterManifest, EgressAction, EgressResult, IngestionItem,
-};
+use crate::domain::models::adapter::{AdapterManifest, EgressAction, EgressResult, IngestionItem};
 
 /// Port for adapters that pull work items from an external system.
 ///

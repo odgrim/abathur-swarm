@@ -5,17 +5,19 @@
 //! - Pruning decayed memories below threshold
 //! - Promoting memories based on access patterns
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::{interval, Instant};
+use tokio::sync::{RwLock, mpsc};
+use tokio::time::{Instant, interval};
 
 use crate::domain::errors::DomainResult;
 use crate::domain::ports::MemoryRepository;
+use crate::services::clock::{DynClock, system_clock};
 use crate::services::event_bus::{EventBus, EventCategory, EventPayload, EventSeverity};
 use crate::services::event_factory;
 use crate::services::memory_service::{MaintenanceReport, MemoryService};
+use crate::services::supervise;
 
 /// Configuration for the memory decay daemon.
 #[derive(Debug, Clone)]
@@ -109,8 +111,7 @@ pub enum StopReason {
 }
 
 /// Status of the decay daemon.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DaemonStatus {
     /// Whether the daemon is running.
     pub running: bool,
@@ -129,7 +130,6 @@ pub struct DaemonStatus {
     /// Total memories promoted.
     pub total_promoted: u64,
 }
-
 
 /// Handle to control the decay daemon.
 pub struct DaemonHandle {
@@ -164,6 +164,7 @@ where
     status: Arc<RwLock<DaemonStatus>>,
     stop_flag: Arc<AtomicBool>,
     event_bus: Option<Arc<EventBus>>,
+    clock: DynClock,
 }
 
 impl<R> MemoryDecayDaemon<R>
@@ -178,6 +179,7 @@ where
             status: Arc::new(RwLock::new(DaemonStatus::default())),
             stop_flag: Arc::new(AtomicBool::new(false)),
             event_bus: None,
+            clock: system_clock(),
         }
     }
 
@@ -189,6 +191,12 @@ where
     /// Set the event bus for publishing maintenance events.
     pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
         self.event_bus = Some(event_bus);
+        self
+    }
+
+    /// Inject a custom clock (for deterministic testing).
+    pub fn with_clock(mut self, clock: DynClock) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -204,7 +212,7 @@ where
     pub async fn run(self) -> mpsc::Receiver<DecayDaemonEvent> {
         let (tx, rx) = mpsc::channel(100);
 
-        tokio::spawn(async move {
+        supervise("memory_decay_daemon", async move {
             self.run_loop(tx).await;
         });
 
@@ -231,7 +239,8 @@ where
 
         // Run on startup if configured
         if self.config.run_on_startup {
-            self.run_maintenance_cycle(&tx, &mut consecutive_failures).await;
+            self.run_maintenance_cycle(&tx, &mut consecutive_failures)
+                .await;
         }
 
         let stopped_reason = loop {
@@ -264,7 +273,11 @@ where
         }
 
         // Emit exactly one Stopped event.
-        let _ = tx.send(DecayDaemonEvent::Stopped { reason: stopped_reason }).await;
+        let _ = tx
+            .send(DecayDaemonEvent::Stopped {
+                reason: stopped_reason,
+            })
+            .await;
     }
 
     /// Run a single maintenance cycle.
@@ -279,7 +292,9 @@ where
             status.total_runs
         };
 
-        let _ = tx.send(DecayDaemonEvent::MaintenanceStarted { run_number }).await;
+        let _ = tx
+            .send(DecayDaemonEvent::MaintenanceStarted { run_number })
+            .await;
 
         let start = Instant::now();
         let result = self.memory_service.run_maintenance().await;
@@ -305,11 +320,13 @@ where
                     status.total_promoted += report.promoted;
                 }
 
-                let _ = tx.send(DecayDaemonEvent::MaintenanceCompleted {
-                    run_number,
-                    report,
-                    duration_ms,
-                }).await;
+                let _ = tx
+                    .send(DecayDaemonEvent::MaintenanceCompleted {
+                        run_number,
+                        report,
+                        duration_ms,
+                    })
+                    .await;
             }
             Err(e) => {
                 *consecutive_failures += 1;
@@ -321,12 +338,14 @@ where
                     status.consecutive_failures = *consecutive_failures;
                 }
 
-                let _ = tx.send(DecayDaemonEvent::MaintenanceFailed {
-                    run_number,
-                    error: error_str.clone(),
-                    consecutive_failures: *consecutive_failures,
-                    max_consecutive_failures: self.config.max_consecutive_failures,
-                }).await;
+                let _ = tx
+                    .send(DecayDaemonEvent::MaintenanceFailed {
+                        run_number,
+                        error: error_str.clone(),
+                        consecutive_failures: *consecutive_failures,
+                        max_consecutive_failures: self.config.max_consecutive_failures,
+                    })
+                    .await;
 
                 // Publish failure event to EventBus for system-wide observability
                 if let Some(ref bus) = self.event_bus {
@@ -341,7 +360,8 @@ where
                             consecutive_failures: *consecutive_failures,
                             max_consecutive_failures: self.config.max_consecutive_failures,
                         },
-                    )).await;
+                    ))
+                    .await;
                 }
 
                 // Emit a warning when we hit the warning threshold (exactly once).
@@ -354,11 +374,13 @@ where
                         max = self.config.max_consecutive_failures,
                         "Memory decay daemon approaching failure limit"
                     );
-                    let _ = tx.send(DecayDaemonEvent::FailureThresholdWarning {
-                        consecutive_failures: *consecutive_failures,
-                        max_consecutive_failures: self.config.max_consecutive_failures,
-                        latest_error: error_str.clone(),
-                    }).await;
+                    let _ = tx
+                        .send(DecayDaemonEvent::FailureThresholdWarning {
+                            consecutive_failures: *consecutive_failures,
+                            max_consecutive_failures: self.config.max_consecutive_failures,
+                            latest_error: error_str.clone(),
+                        })
+                        .await;
 
                     // Publish degraded warning to EventBus for system-wide observability
                     if let Some(ref bus) = self.event_bus {
@@ -372,7 +394,8 @@ where
                                 max_consecutive_failures: self.config.max_consecutive_failures,
                                 latest_error: error_str,
                             },
-                        )).await;
+                        ))
+                        .await;
                     }
                 }
             }
@@ -435,34 +458,72 @@ mod tests {
 
     #[async_trait]
     impl MemoryRepository for FailingMemoryRepository {
-        async fn store(&self, _memory: &Memory) -> DomainResult<()> { Ok(()) }
-        async fn get(&self, _id: Uuid) -> DomainResult<Option<Memory>> { Ok(None) }
-        async fn get_by_key(&self, _key: &str, _namespace: &str) -> DomainResult<Option<Memory>> { Ok(None) }
-        async fn update(&self, _memory: &Memory) -> DomainResult<()> { Ok(()) }
-        async fn delete(&self, _id: Uuid) -> DomainResult<()> { Ok(()) }
-        async fn query(&self, _query: MemoryQuery) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn search(&self, _query: &str, _namespace: Option<&str>, _limit: usize) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn list_by_tier(&self, _tier: MemoryTier) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn list_by_namespace(&self, _namespace: &str) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn get_expired(&self) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn store(&self, _memory: &Memory) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn get(&self, _id: Uuid) -> DomainResult<Option<Memory>> {
+            Ok(None)
+        }
+        async fn get_by_key(&self, _key: &str, _namespace: &str) -> DomainResult<Option<Memory>> {
+            Ok(None)
+        }
+        async fn update(&self, _memory: &Memory) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _id: Uuid) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn query(&self, _query: MemoryQuery) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn search(
+            &self,
+            _query: &str,
+            _namespace: Option<&str>,
+            _limit: usize,
+        ) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn list_by_tier(&self, _tier: MemoryTier) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn list_by_namespace(&self, _namespace: &str) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn get_expired(&self) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
         async fn prune_expired(&self) -> DomainResult<u64> {
             if self.should_fail.load(Ordering::SeqCst) {
-                Err(DomainError::DatabaseError("simulated prune failure".to_string()))
+                Err(DomainError::DatabaseError(
+                    "simulated prune failure".to_string(),
+                ))
             } else {
                 Ok(0)
             }
         }
-        async fn get_decayed(&self, _threshold: f32) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn get_for_task(&self, _task_id: Uuid) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn get_for_goal(&self, _goal_id: Uuid) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn count_by_tier(&self) -> DomainResult<std::collections::HashMap<MemoryTier, u64>> { Ok(std::collections::HashMap::new()) }
+        async fn get_decayed(&self, _threshold: f32) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn get_for_task(&self, _task_id: Uuid) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn get_for_goal(&self, _goal_id: Uuid) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn count_by_tier(&self) -> DomainResult<std::collections::HashMap<MemoryTier, u64>> {
+            Ok(std::collections::HashMap::new())
+        }
     }
 
     /// Helper to create a daemon with the FailingMemoryRepository.
     fn make_daemon(
         should_fail: bool,
         config: DecayDaemonConfig,
-    ) -> (MemoryDecayDaemon<FailingMemoryRepository>, Arc<FailingMemoryRepository>) {
+    ) -> (
+        MemoryDecayDaemon<FailingMemoryRepository>,
+        Arc<FailingMemoryRepository>,
+    ) {
         let repo = Arc::new(FailingMemoryRepository::new(should_fail));
         let service = Arc::new(MemoryService::new(repo.clone()));
         let daemon = MemoryDecayDaemon::new(service, config);
@@ -501,7 +562,10 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(event) = rx.recv().await {
                 match &event {
-                    DecayDaemonEvent::MaintenanceFailed { consecutive_failures, .. } => {
+                    DecayDaemonEvent::MaintenanceFailed {
+                        consecutive_failures,
+                        ..
+                    } => {
                         failure_events.push(*consecutive_failures);
                     }
                     DecayDaemonEvent::FailureThresholdWarning {
@@ -646,7 +710,10 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(event) = rx.recv().await {
                 match &event {
-                    DecayDaemonEvent::MaintenanceFailed { consecutive_failures, .. } => {
+                    DecayDaemonEvent::MaintenanceFailed {
+                        consecutive_failures,
+                        ..
+                    } => {
                         if *consecutive_failures > max_consecutive_seen {
                             max_consecutive_seen = *consecutive_failures;
                         }
@@ -673,7 +740,10 @@ mod tests {
             saw_success_after_failure,
             "Should have seen a successful run after a failure"
         );
-        assert!(max_consecutive_seen >= 1, "Should have seen at least one failure");
+        assert!(
+            max_consecutive_seen >= 1,
+            "Should have seen at least one failure"
+        );
 
         let status = handle.status().await;
         assert_eq!(
@@ -829,21 +899,56 @@ mod tests {
 
     #[async_trait]
     impl MemoryRepository for EventProducingMemoryRepository {
-        async fn store(&self, _memory: &Memory) -> DomainResult<()> { Ok(()) }
-        async fn get(&self, _id: Uuid) -> DomainResult<Option<Memory>> { Ok(None) }
-        async fn get_by_key(&self, _key: &str, _namespace: &str) -> DomainResult<Option<Memory>> { Ok(None) }
-        async fn update(&self, _memory: &Memory) -> DomainResult<()> { Ok(()) }
-        async fn delete(&self, _id: Uuid) -> DomainResult<()> { Ok(()) }
-        async fn query(&self, _query: MemoryQuery) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn search(&self, _query: &str, _namespace: Option<&str>, _limit: usize) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn list_by_tier(&self, _tier: MemoryTier) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn list_by_namespace(&self, _namespace: &str) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn get_expired(&self) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn prune_expired(&self) -> DomainResult<u64> { Ok(3) }
-        async fn get_decayed(&self, _threshold: f32) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn get_for_task(&self, _task_id: Uuid) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn get_for_goal(&self, _goal_id: Uuid) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
-        async fn count_by_tier(&self) -> DomainResult<std::collections::HashMap<MemoryTier, u64>> { Ok(std::collections::HashMap::new()) }
+        async fn store(&self, _memory: &Memory) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn get(&self, _id: Uuid) -> DomainResult<Option<Memory>> {
+            Ok(None)
+        }
+        async fn get_by_key(&self, _key: &str, _namespace: &str) -> DomainResult<Option<Memory>> {
+            Ok(None)
+        }
+        async fn update(&self, _memory: &Memory) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _id: Uuid) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn query(&self, _query: MemoryQuery) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn search(
+            &self,
+            _query: &str,
+            _namespace: Option<&str>,
+            _limit: usize,
+        ) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn list_by_tier(&self, _tier: MemoryTier) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn list_by_namespace(&self, _namespace: &str) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn get_expired(&self) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn prune_expired(&self) -> DomainResult<u64> {
+            Ok(3)
+        }
+        async fn get_decayed(&self, _threshold: f32) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn get_for_task(&self, _task_id: Uuid) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn get_for_goal(&self, _goal_id: Uuid) -> DomainResult<Vec<Memory>> {
+            Ok(Vec::new())
+        }
+        async fn count_by_tier(&self) -> DomainResult<std::collections::HashMap<MemoryTier, u64>> {
+            Ok(std::collections::HashMap::new())
+        }
     }
 
     /// Helper to create a daemon backed by EventProducingMemoryRepository.
@@ -862,8 +967,7 @@ mod tests {
         let bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let mut subscriber = bus.subscribe();
 
-        let daemon = make_event_producing_daemon(DecayDaemonConfig::default())
-            .with_event_bus(bus);
+        let daemon = make_event_producing_daemon(DecayDaemonConfig::default()).with_event_bus(bus);
 
         let report = daemon.run_once().await.expect("run_once should succeed");
         assert_eq!(report.expired_pruned, 3);
@@ -893,7 +997,10 @@ mod tests {
         // Daemon without an EventBus should still succeed when events are generated.
         let daemon = make_event_producing_daemon(DecayDaemonConfig::default());
 
-        let report = daemon.run_once().await.expect("run_once should succeed without EventBus");
+        let report = daemon
+            .run_once()
+            .await
+            .expect("run_once should succeed without EventBus");
         assert_eq!(report.expired_pruned, 3);
         assert_eq!(report.decayed_pruned, 0);
         assert_eq!(report.promoted, 0);

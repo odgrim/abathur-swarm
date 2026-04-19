@@ -30,19 +30,22 @@ impl<R: TaskScheduleRepository> TaskScheduleService<R> {
         // Validate cron expression if applicable
         if let TaskScheduleType::Cron { ref expression } = schedule.schedule {
             use std::str::FromStr;
-            cron::Schedule::from_str(expression)
-                .map_err(|e| crate::domain::errors::DomainError::ValidationFailed(
-                    format!("Invalid cron expression '{}': {}", expression, e)
-                ))?;
+            cron::Schedule::from_str(expression).map_err(|e| {
+                crate::domain::errors::DomainError::ValidationFailed(format!(
+                    "Invalid cron expression '{}': {}",
+                    expression, e
+                ))
+            })?;
         }
 
         // Validate interval
         if let TaskScheduleType::Interval { every_secs } = schedule.schedule
-            && every_secs < 10 {
-                return Err(crate::domain::errors::DomainError::ValidationFailed(
-                    "Interval must be at least 10 seconds".to_string()
-                ));
-            }
+            && every_secs < 10
+        {
+            return Err(crate::domain::errors::DomainError::ValidationFailed(
+                "Interval must be at least 10 seconds".to_string(),
+            ));
+        }
 
         self.repo.create(&schedule).await?;
         Ok(schedule)
@@ -59,13 +62,19 @@ impl<R: TaskScheduleRepository> TaskScheduleService<R> {
     }
 
     /// List schedules with optional filter.
-    pub async fn list_schedules(&self, filter: TaskScheduleFilter) -> DomainResult<Vec<TaskSchedule>> {
+    pub async fn list_schedules(
+        &self,
+        filter: TaskScheduleFilter,
+    ) -> DomainResult<Vec<TaskSchedule>> {
         self.repo.list(filter).await
     }
 
     /// Enable (unpause) a schedule.
     pub async fn enable_schedule(&self, id: Uuid) -> DomainResult<TaskSchedule> {
-        let mut schedule = self.repo.get(id).await?
+        let mut schedule = self
+            .repo
+            .get(id)
+            .await?
             .ok_or(crate::domain::errors::DomainError::TaskScheduleNotFound(id))?;
         schedule.status = TaskScheduleStatus::Active;
         schedule.updated_at = Utc::now();
@@ -75,7 +84,10 @@ impl<R: TaskScheduleRepository> TaskScheduleService<R> {
 
     /// Disable (pause) a schedule.
     pub async fn disable_schedule(&self, id: Uuid) -> DomainResult<TaskSchedule> {
-        let mut schedule = self.repo.get(id).await?
+        let mut schedule = self
+            .repo
+            .get(id)
+            .await?
             .ok_or(crate::domain::errors::DomainError::TaskScheduleNotFound(id))?;
         schedule.status = TaskScheduleStatus::Paused;
         schedule.updated_at = Utc::now();
@@ -90,7 +102,10 @@ impl<R: TaskScheduleRepository> TaskScheduleService<R> {
 
     /// Record that a task was created by this schedule.
     pub async fn record_fire(&self, id: Uuid, task_id: Uuid) -> DomainResult<()> {
-        let mut schedule = self.repo.get(id).await?
+        let mut schedule = self
+            .repo
+            .get(id)
+            .await?
             .ok_or(crate::domain::errors::DomainError::TaskScheduleNotFound(id))?;
         schedule.fire_count += 1;
         schedule.last_fired_at = Some(Utc::now());
@@ -110,12 +125,12 @@ impl<R: TaskScheduleRepository> TaskScheduleService<R> {
     pub fn to_event_schedule_type(schedule: &TaskScheduleType) -> ScheduleType {
         match schedule {
             TaskScheduleType::Once { at } => ScheduleType::Once { at: *at },
-            TaskScheduleType::Interval { every_secs } => {
-                ScheduleType::Interval { every: Duration::from_secs(*every_secs) }
-            }
-            TaskScheduleType::Cron { expression } => {
-                ScheduleType::Cron { expression: expression.clone() }
-            }
+            TaskScheduleType::Interval { every_secs } => ScheduleType::Interval {
+                every: Duration::from_secs(*every_secs),
+            },
+            TaskScheduleType::Cron { expression } => ScheduleType::Cron {
+                expression: expression.clone(),
+            },
         }
     }
 

@@ -8,13 +8,11 @@ use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{
-    SessionStatus, SubstrateOutput, SubstrateRequest, SubstrateSession,
-};
+use crate::domain::models::{SessionStatus, SubstrateOutput, SubstrateRequest, SubstrateSession};
 use crate::domain::ports::Substrate;
 
 /// Configuration for the Anthropic API substrate.
@@ -53,7 +51,9 @@ impl Default for AnthropicApiConfig {
 impl AnthropicApiConfig {
     /// Get API key from config or environment.
     pub fn get_api_key(&self) -> Option<String> {
-        self.api_key.clone().or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+        self.api_key
+            .clone()
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
     }
 
     /// Create config with explicit API key.
@@ -86,7 +86,9 @@ pub struct CacheControl {
 
 impl CacheControl {
     pub fn ephemeral() -> Self {
-        Self { control_type: "ephemeral".to_string() }
+        Self {
+            control_type: "ephemeral".to_string(),
+        }
     }
 }
 
@@ -254,7 +256,9 @@ impl AnthropicApiSubstrate {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| {
+                DomainError::SubstrateError(format!("Failed to create HTTP client: {}", e))
+            })?;
 
         Ok(Self {
             config,
@@ -274,7 +278,10 @@ impl AnthropicApiSubstrate {
     /// markers for prompt caching. The stable base prompt gets a cache breakpoint
     /// so subsequent calls with the same prefix get ~90% input token savings.
     fn build_request(&self, request: &SubstrateRequest) -> MessagesRequest {
-        let model = request.config.model.clone()
+        let model = request
+            .config
+            .model
+            .clone()
             .unwrap_or_else(|| self.config.default_model.clone());
 
         let messages = vec![Message {
@@ -291,7 +298,9 @@ impl AnthropicApiSubstrate {
             // The entire system prompt is marked as cacheable (ephemeral).
             // On subsequent calls with the same system prompt prefix,
             // Anthropic will serve from cache (~90% input token savings).
-            Some(vec![SystemContentBlock::cached_text(&request.system_prompt)])
+            Some(vec![SystemContentBlock::cached_text(
+                &request.system_prompt,
+            )])
         };
 
         MessagesRequest {
@@ -320,13 +329,19 @@ impl AnthropicApiSubstrate {
 
     /// Execute a non-streaming request.
     async fn execute_sync(&self, request: &SubstrateRequest) -> DomainResult<(String, Usage)> {
-        let api_key = self.config.get_api_key()
-            .ok_or_else(|| DomainError::ValidationFailed("ANTHROPIC_API_KEY not set".to_string()))?;
+        let api_key = self
+            .config
+            .get_api_key()
+            .ok_or_else(|| DomainError::ConfigError {
+                key: "ANTHROPIC_API_KEY".to_string(),
+                reason: "ANTHROPIC_API_KEY not set".to_string(),
+            })?;
 
         let mut api_request = self.build_request(request);
         api_request.stream = false;
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/v1/messages", self.config.base_url))
             .header(header::CONTENT_TYPE, "application/json")
             .header("x-api-key", &api_key)
@@ -334,21 +349,26 @@ impl AnthropicApiSubstrate {
             .json(&api_request)
             .send()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("API request failed: {}", e)))?;
+            .map_err(|e| DomainError::SubstrateError(format!("API request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(DomainError::ValidationFailed(format!(
-                "API error {}: {}", status, body
+            return Err(DomainError::SubstrateError(format!(
+                "API error {}: {}",
+                status, body
             )));
         }
 
-        let result: MessagesResponse = response.json().await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to parse response: {}", e)))?;
+        let result: MessagesResponse = response
+            .json()
+            .await
+            .map_err(|e| DomainError::SubstrateError(format!("Failed to parse response: {}", e)))?;
 
         // Extract text from content blocks
-        let text = result.content.iter()
+        let text = result
+            .content
+            .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
@@ -414,8 +434,13 @@ impl Substrate for AnthropicApiSubstrate {
         &self,
         request: SubstrateRequest,
     ) -> DomainResult<(mpsc::Receiver<SubstrateOutput>, SubstrateSession)> {
-        let api_key = self.config.get_api_key()
-            .ok_or_else(|| DomainError::ValidationFailed("ANTHROPIC_API_KEY not set".to_string()))?;
+        let api_key = self
+            .config
+            .get_api_key()
+            .ok_or_else(|| DomainError::ConfigError {
+                key: "ANTHROPIC_API_KEY".to_string(),
+                reason: "ANTHROPIC_API_KEY not set".to_string(),
+            })?;
 
         // Create session
         let mut session = SubstrateSession::new(
@@ -458,9 +483,11 @@ impl Substrate for AnthropicApiSubstrate {
             let response = match response {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx.send(SubstrateOutput::Error {
-                        message: format!("Request failed: {}", e),
-                    }).await;
+                    let _ = tx
+                        .send(SubstrateOutput::Error {
+                            message: format!("Request failed: {}", e),
+                        })
+                        .await;
                     return;
                 }
             };
@@ -468,9 +495,11 @@ impl Substrate for AnthropicApiSubstrate {
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                let _ = tx.send(SubstrateOutput::Error {
-                    message: format!("API error {}: {}", status, body),
-                }).await;
+                let _ = tx
+                    .send(SubstrateOutput::Error {
+                        message: format!("API error {}: {}", status, body),
+                    })
+                    .await;
                 return;
             }
 
@@ -478,9 +507,11 @@ impl Substrate for AnthropicApiSubstrate {
             let body = match response.text().await {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = tx.send(SubstrateOutput::Error {
-                        message: format!("Failed to read response: {}", e),
-                    }).await;
+                    let _ = tx
+                        .send(SubstrateOutput::Error {
+                            message: format!("Failed to read response: {}", e),
+                        })
+                        .await;
                     return;
                 }
             };
@@ -496,9 +527,11 @@ impl Substrate for AnthropicApiSubstrate {
                         StreamEvent::ContentBlockDelta { delta, .. } => {
                             if !delta.text.is_empty() {
                                 all_text.push_str(&delta.text);
-                                let _ = tx.send(SubstrateOutput::AssistantText {
-                                    content: delta.text,
-                                }).await;
+                                let _ = tx
+                                    .send(SubstrateOutput::AssistantText {
+                                        content: delta.text,
+                                    })
+                                    .await;
                             }
                         }
                         StreamEvent::MessageStart { message } => {
@@ -506,23 +539,32 @@ impl Substrate for AnthropicApiSubstrate {
                         }
                         StreamEvent::MessageDelta { usage, .. } => {
                             total_output = usage.output_tokens;
-                            let _ = tx.send(SubstrateOutput::TurnComplete {
-                                turn_number: 1,
-                                input_tokens: total_input,
-                                output_tokens: total_output,
-                            }).await;
+                            let _ = tx
+                                .send(SubstrateOutput::TurnComplete {
+                                    turn_number: 1,
+                                    input_tokens: total_input,
+                                    output_tokens: total_output,
+                                })
+                                .await;
                         }
                         StreamEvent::MessageStop => {
-                            let _ = tx.send(SubstrateOutput::SessionComplete {
-                                result: all_text.clone(),
-                            }).await;
+                            let _ = tx
+                                .send(SubstrateOutput::SessionComplete {
+                                    result: all_text.clone(),
+                                })
+                                .await;
                         }
                         StreamEvent::Error { error } => {
-                            let _ = tx.send(SubstrateOutput::Error {
-                                message: error.message,
-                            }).await;
+                            let _ = tx
+                                .send(SubstrateOutput::Error {
+                                    message: error.message,
+                                })
+                                .await;
                         }
-                        StreamEvent::ContentBlockStart { content_block: ContentBlock::ToolUse { id, name, .. }, .. } => {
+                        StreamEvent::ContentBlockStart {
+                            content_block: ContentBlock::ToolUse { id, name, .. },
+                            ..
+                        } => {
                             let _ = tx.send(SubstrateOutput::ToolStart { name, id }).await;
                         }
                         _ => {}
@@ -532,28 +574,35 @@ impl Substrate for AnthropicApiSubstrate {
 
             // If we didn't get streaming events, try parsing as a regular JSON response
             if all_text.is_empty()
-                && let Ok(result) = serde_json::from_str::<MessagesResponse>(&body) {
-                    for block in &result.content {
-                        if let ContentBlock::Text { text } = block {
-                            all_text.push_str(text);
-                            let _ = tx.send(SubstrateOutput::AssistantText {
+                && let Ok(result) = serde_json::from_str::<MessagesResponse>(&body)
+            {
+                for block in &result.content {
+                    if let ContentBlock::Text { text } = block {
+                        all_text.push_str(text);
+                        let _ = tx
+                            .send(SubstrateOutput::AssistantText {
                                 content: text.clone(),
-                            }).await;
-                        }
+                            })
+                            .await;
                     }
-                    total_input = result.usage.input_tokens;
-                    total_output = result.usage.output_tokens;
+                }
+                total_input = result.usage.input_tokens;
+                total_output = result.usage.output_tokens;
 
-                    let _ = tx.send(SubstrateOutput::TurnComplete {
+                let _ = tx
+                    .send(SubstrateOutput::TurnComplete {
                         turn_number: 1,
                         input_tokens: total_input,
                         output_tokens: total_output,
-                    }).await;
+                    })
+                    .await;
 
-                    let _ = tx.send(SubstrateOutput::SessionComplete {
+                let _ = tx
+                    .send(SubstrateOutput::SessionComplete {
                         result: all_text.clone(),
-                    }).await;
-                }
+                    })
+                    .await;
+            }
 
             // Update session
             {
@@ -578,12 +627,13 @@ impl Substrate for AnthropicApiSubstrate {
         additional_prompt: Option<String>,
     ) -> DomainResult<SubstrateSession> {
         let sessions = self.sessions.read().await;
-        let session = sessions.get(&session_id)
-            .ok_or_else(|| DomainError::ValidationFailed(format!("Session {} not found", session_id)))?;
+        let session = sessions.get(&session_id).ok_or_else(|| {
+            DomainError::ValidationFailed(format!("Session {} not found", session_id))
+        })?;
 
         if !session.status.is_terminal() {
             return Err(DomainError::ValidationFailed(
-                "Cannot resume active session".to_string()
+                "Cannot resume active session".to_string(),
             ));
         }
 
@@ -618,7 +668,8 @@ impl Substrate for AnthropicApiSubstrate {
 
     async fn is_running(&self, session_id: Uuid) -> DomainResult<bool> {
         let sessions = self.sessions.read().await;
-        Ok(sessions.get(&session_id)
+        Ok(sessions
+            .get(&session_id)
             .map(|s| s.status == SessionStatus::Active)
             .unwrap_or(false))
     }
@@ -638,15 +689,13 @@ mod tests {
 
     #[test]
     fn test_config_with_api_key() {
-        let config = AnthropicApiConfig::default()
-            .with_api_key("test-key");
+        let config = AnthropicApiConfig::default().with_api_key("test-key");
         assert_eq!(config.api_key, Some("test-key".to_string()));
     }
 
     #[test]
     fn test_config_with_model() {
-        let config = AnthropicApiConfig::default()
-            .with_model("claude-opus-4-5-20251101");
+        let config = AnthropicApiConfig::default().with_model("claude-opus-4-5-20251101");
         assert_eq!(config.default_model, "claude-opus-4-5-20251101");
     }
 

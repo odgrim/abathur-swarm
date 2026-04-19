@@ -230,11 +230,26 @@ mod tests {
 
     #[test]
     fn test_escalate_complexity() {
-        assert_eq!(escalate_complexity(Complexity::Trivial, 0), Complexity::Trivial);
-        assert_eq!(escalate_complexity(Complexity::Trivial, 1), Complexity::Simple);
-        assert_eq!(escalate_complexity(Complexity::Trivial, 2), Complexity::Moderate);
-        assert_eq!(escalate_complexity(Complexity::Trivial, 3), Complexity::Complex);
-        assert_eq!(escalate_complexity(Complexity::Trivial, 10), Complexity::Complex); // caps at Complex
+        assert_eq!(
+            escalate_complexity(Complexity::Trivial, 0),
+            Complexity::Trivial
+        );
+        assert_eq!(
+            escalate_complexity(Complexity::Trivial, 1),
+            Complexity::Simple
+        );
+        assert_eq!(
+            escalate_complexity(Complexity::Trivial, 2),
+            Complexity::Moderate
+        );
+        assert_eq!(
+            escalate_complexity(Complexity::Trivial, 3),
+            Complexity::Complex
+        );
+        assert_eq!(
+            escalate_complexity(Complexity::Trivial, 10),
+            Complexity::Complex
+        ); // caps at Complex
     }
 
     #[test]

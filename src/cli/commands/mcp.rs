@@ -12,8 +12,8 @@ use crate::adapters::mcp::{
     MemoryHttpServer, TasksHttpConfig, TasksHttpServer,
 };
 use crate::adapters::sqlite::{
-    all_embedded_migrations, create_pool, Migrator, SqliteAgentRepository, SqliteGoalRepository,
-    SqliteMemoryRepository, SqliteTaskRepository,
+    Migrator, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository,
+    SqliteTaskRepository, all_embedded_migrations, create_pool,
 };
 use crate::domain::models::a2a::A2AAgentCard;
 use crate::services::command_bus::CommandBus;
@@ -62,14 +62,27 @@ impl McpServices {
     /// Also starts a background [`OutboxPoller`] to publish events written
     /// to the outbox table. The poller handle is returned so callers can
     /// stop it on shutdown if needed.
-    fn into_command_bus(self) -> (TaskService<SqliteTaskRepository>, MemoryService<SqliteMemoryRepository>, Arc<CommandBus>, crate::services::outbox_poller::OutboxPollerHandle) {
-        let outbox_repo: Arc<dyn crate::domain::ports::OutboxRepository> = Arc::new(crate::adapters::sqlite::SqliteOutboxRepository::new(self.pool.clone()));
-        let command_bus = Arc::new(CommandBus::new(
-            Arc::new(self.task_service.clone()),
-            Arc::new(self.goal_service),
-            Arc::new(self.memory_service.clone()),
-            self.event_bus.clone(),
-        ).with_pool(self.pool.clone()).with_outbox(outbox_repo.clone()));
+    fn into_command_bus(
+        self,
+    ) -> (
+        TaskService<SqliteTaskRepository>,
+        MemoryService<SqliteMemoryRepository>,
+        Arc<CommandBus>,
+        crate::services::outbox_poller::OutboxPollerHandle,
+    ) {
+        let outbox_repo: Arc<dyn crate::domain::ports::OutboxRepository> = Arc::new(
+            crate::adapters::sqlite::SqliteOutboxRepository::new(self.pool.clone()),
+        );
+        let command_bus = Arc::new(
+            CommandBus::new(
+                Arc::new(self.task_service.clone()),
+                Arc::new(self.goal_service),
+                Arc::new(self.memory_service.clone()),
+                self.event_bus.clone(),
+            )
+            .with_pool(self.pool.clone())
+            .with_outbox(outbox_repo.clone()),
+        );
 
         // Start a background poller so outbox events are published.
         let poller = crate::services::outbox_poller::OutboxPoller::new(
@@ -79,7 +92,12 @@ impl McpServices {
         );
         let poller_handle = poller.start();
 
-        (self.task_service, self.memory_service, command_bus, poller_handle)
+        (
+            self.task_service,
+            self.memory_service,
+            command_bus,
+            poller_handle,
+        )
     }
 }
 
@@ -247,13 +265,32 @@ pub async fn execute(args: McpArgs, json_mode: bool) -> Result<()> {
             agents_port,
             a2a_port,
             host,
-        } => start_all(host, memory_port, tasks_port, agents_port, a2a_port, json_mode).await,
-        McpCommand::Stdio { db_path, task_id, workflow_session } => start_stdio(db_path, task_id, workflow_session).await,
+        } => {
+            start_all(
+                host,
+                memory_port,
+                tasks_port,
+                agents_port,
+                a2a_port,
+                json_mode,
+            )
+            .await
+        }
+        McpCommand::Stdio {
+            db_path,
+            task_id,
+            workflow_session,
+        } => start_stdio(db_path, task_id, workflow_session).await,
         McpCommand::Status => show_status(json_mode).await,
     }
 }
 
-async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
+async fn start_memory_http(
+    host: String,
+    port: u16,
+    enable_cors: bool,
+    json_mode: bool,
+) -> Result<()> {
     let services = McpServices::init("abathur.db").await?;
     let (_, memory_service, command_bus, _poller_handle) = services.into_command_bus();
 
@@ -276,7 +313,10 @@ async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode
         println!("Starting MCP Memory HTTP Server");
         println!("   Host: {}", host);
         println!("   Port: {}", port);
-        println!("   CORS: {}", if enable_cors { "enabled" } else { "disabled" });
+        println!(
+            "   CORS: {}",
+            if enable_cors { "enabled" } else { "disabled" }
+        );
         println!();
     }
 
@@ -286,7 +326,12 @@ async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode
     Ok(())
 }
 
-async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
+async fn start_tasks_http(
+    host: String,
+    port: u16,
+    enable_cors: bool,
+    json_mode: bool,
+) -> Result<()> {
     let services = McpServices::init("abathur.db").await?;
     let (task_service, _, command_bus, _poller_handle) = services.into_command_bus();
 
@@ -309,7 +354,10 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
         println!("Starting MCP Tasks HTTP Server");
         println!("   Host: {}", host);
         println!("   Port: {}", port);
-        println!("   CORS: {}", if enable_cors { "enabled" } else { "disabled" });
+        println!(
+            "   CORS: {}",
+            if enable_cors { "enabled" } else { "disabled" }
+        );
         println!();
     }
 
@@ -319,7 +367,12 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
     Ok(())
 }
 
-async fn start_agents_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
+async fn start_agents_http(
+    host: String,
+    port: u16,
+    enable_cors: bool,
+    json_mode: bool,
+) -> Result<()> {
     let services = McpServices::init("abathur.db").await?;
     let agent_repo = Arc::new(SqliteAgentRepository::new(services.pool));
     let service = AgentService::new(agent_repo, services.event_bus);
@@ -343,7 +396,10 @@ async fn start_agents_http(host: String, port: u16, enable_cors: bool, json_mode
         println!("Starting MCP Agents HTTP Server");
         println!("   Host: {}", host);
         println!("   Port: {}", port);
-        println!("   CORS: {}", if enable_cors { "enabled" } else { "disabled" });
+        println!(
+            "   CORS: {}",
+            if enable_cors { "enabled" } else { "disabled" }
+        );
         println!();
     }
 
@@ -391,10 +447,17 @@ async fn start_a2a_http(
         println!("Starting A2A HTTP Gateway");
         println!("   Host: {}", host);
         println!("   Port: {}", port);
-        println!("   CORS: {}", if enable_cors { "enabled" } else { "disabled" });
+        println!(
+            "   CORS: {}",
+            if enable_cors { "enabled" } else { "disabled" }
+        );
         println!(
             "   Streaming: {}",
-            if enable_streaming { "enabled" } else { "disabled" }
+            if enable_streaming {
+                "enabled"
+            } else {
+                "disabled"
+            }
         );
         println!(
             "   Push notifications: {}",
@@ -408,7 +471,10 @@ async fn start_a2a_http(
     // Register default agent cards
     register_default_agents(&gateway).await;
 
-    gateway.serve().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+    gateway
+        .serve()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     Ok(())
 }
@@ -559,7 +625,11 @@ async fn start_all(
     Ok(())
 }
 
-async fn start_stdio(db_path: String, task_id: Option<String>, workflow_session: bool) -> Result<()> {
+async fn start_stdio(
+    db_path: String,
+    task_id: Option<String>,
+    workflow_session: bool,
+) -> Result<()> {
     use crate::adapters::mcp::StdioServer;
     use crate::cli::id_resolver::resolve_task_id;
 
@@ -577,8 +647,15 @@ async fn start_stdio(db_path: String, task_id: Option<String>, workflow_session:
 
     let (task_service, memory_service, command_bus, _poller_handle) = services.into_command_bus();
 
-    let server = StdioServer::new(task_service, agent_service, memory_service, goal_repo, command_bus, task_uuid)
-        .with_workflow_session(workflow_session);
+    let server = StdioServer::new(
+        task_service,
+        agent_service,
+        memory_service,
+        goal_repo,
+        command_bus,
+        task_uuid,
+    )
+    .with_workflow_session(workflow_session);
     server.run().await?;
 
     Ok(())
@@ -643,7 +720,5 @@ async fn register_default_agents(gateway: &A2AHttpGateway) {
         .accepts_message_type(MessageType::DelegateTask)
         .accepts_message_type(MessageType::HandoffRequest);
 
-    gateway
-        .register_agents(vec![overmind])
-        .await;
+    gateway.register_agents(vec![overmind]).await;
 }

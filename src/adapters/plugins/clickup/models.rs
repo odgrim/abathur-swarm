@@ -130,7 +130,10 @@ mod tests {
         let json = r#"{ "id": "xyz789", "url": "https://app.clickup.com/t/xyz789" }"#;
         let resp: ClickUpTaskResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.id, "xyz789");
-        assert_eq!(resp.url.as_deref(), Some("https://app.clickup.com/t/xyz789"));
+        assert_eq!(
+            resp.url.as_deref(),
+            Some("https://app.clickup.com/t/xyz789")
+        );
     }
 
     #[test]

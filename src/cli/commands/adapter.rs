@@ -4,14 +4,14 @@
 //! and enabled adapters, enabling/disabling them, showing detailed info,
 //! and running health checks.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-use crate::adapters::plugins::{find_known_adapter, KnownAdapter, KNOWN_ADAPTERS};
+use crate::adapters::plugins::{KNOWN_ADAPTERS, KnownAdapter, find_known_adapter};
 use crate::cli::display::{
-    list_table, output, render_list, truncate_ellipsis, CommandOutput, DetailView,
+    CommandOutput, DetailView, list_table, output, render_list, truncate_ellipsis,
 };
 use crate::domain::models::adapter::{AdapterManifest, EgressAction, EgressResult};
 use crate::services::adapter_loader::find_missing_env_vars;
@@ -178,12 +178,14 @@ impl CommandOutput for AdapterInfoOutput {
         }
 
         if let Some(config) = &self.config {
-            view = view.section("Config")
+            view = view
+                .section("Config")
                 .item(&serde_json::to_string_pretty(config).unwrap_or_default());
         }
 
         if let Some(summary) = &self.adapter_md_summary {
-            view = view.section("ADAPTER.md")
+            view = view
+                .section("ADAPTER.md")
                 .item(&truncate_ellipsis(summary, 500));
         }
 
@@ -225,7 +227,11 @@ impl CommandOutput for AdapterDoctorOutput {
                 let icon = if check.passed { "PASS" } else { "FAIL" };
                 lines.push(format!("  [{}] {}: {}", icon, check.check, check.message));
             }
-            let overall = if result.healthy { "healthy" } else { "unhealthy" };
+            let overall = if result.healthy {
+                "healthy"
+            } else {
+                "unhealthy"
+            };
             lines.push(format!("  Overall: {}\n", overall));
         }
 
@@ -330,7 +336,10 @@ fn env_var_status(known: &KnownAdapter) -> String {
     } else if missing.is_empty() {
         "ok".to_string()
     } else {
-        format!("missing: {}", missing.iter().map(|v| **v).collect::<Vec<_>>().join(", "))
+        format!(
+            "missing: {}",
+            missing.iter().map(|v| **v).collect::<Vec<_>>().join(", ")
+        )
     }
 }
 
@@ -339,8 +348,8 @@ fn read_manifest(adapters_dir: &Path, name: &str) -> Result<AdapterManifest> {
     let manifest_path = adapters_dir.join(name).join("adapter.toml");
     let content = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest: AdapterManifest =
-        toml::from_str(&content).with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+    let manifest: AdapterManifest = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
     Ok(manifest)
 }
 
@@ -371,58 +380,54 @@ async fn cmd_list(adapters_dir: &Path, json_mode: bool) -> Result<()> {
 
     // Scan for enabled adapters not in KNOWN_ADAPTERS
     if adapters_dir.exists()
-        && let Ok(entries_iter) = std::fs::read_dir(adapters_dir) {
-            for entry in entries_iter.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                if seen.contains(&name) {
-                    continue;
-                }
-                // Try to read manifest for unknown adapters
-                if let Ok(manifest) = read_manifest(adapters_dir, &name) {
-                    entries.push(AdapterListEntry {
-                        name: name.clone(),
-                        adapter_type: manifest.adapter_type.as_str().to_string(),
-                        direction: manifest.direction.as_str().to_string(),
-                        status: "enabled".to_string(),
-                        env_status: {
-                            let missing = find_missing_env_vars(&manifest);
-                            if missing.is_empty() {
-                                "ok".to_string()
-                            } else {
-                                format!("missing: {}", missing.join(", "))
-                            }
-                        },
-                    });
-                } else {
-                    entries.push(AdapterListEntry {
-                        name,
-                        adapter_type: "unknown".to_string(),
-                        direction: "unknown".to_string(),
-                        status: "enabled (invalid)".to_string(),
-                        env_status: "unknown".to_string(),
-                    });
-                }
+        && let Ok(entries_iter) = std::fs::read_dir(adapters_dir)
+    {
+        for entry in entries_iter.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if seen.contains(&name) {
+                continue;
+            }
+            // Try to read manifest for unknown adapters
+            if let Ok(manifest) = read_manifest(adapters_dir, &name) {
+                entries.push(AdapterListEntry {
+                    name: name.clone(),
+                    adapter_type: manifest.adapter_type.as_str().to_string(),
+                    direction: manifest.direction.as_str().to_string(),
+                    status: "enabled".to_string(),
+                    env_status: {
+                        let missing = find_missing_env_vars(&manifest);
+                        if missing.is_empty() {
+                            "ok".to_string()
+                        } else {
+                            format!("missing: {}", missing.join(", "))
+                        }
+                    },
+                });
+            } else {
+                entries.push(AdapterListEntry {
+                    name,
+                    adapter_type: "unknown".to_string(),
+                    direction: "unknown".to_string(),
+                    status: "enabled (invalid)".to_string(),
+                    env_status: "unknown".to_string(),
+                });
             }
         }
+    }
 
     output(&AdapterListOutput { adapters: entries }, json_mode);
     Ok(())
 }
 
-async fn cmd_enable(
-    adapters_dir: &Path,
-    name: &str,
-    force: bool,
-    json_mode: bool,
-) -> Result<()> {
+async fn cmd_enable(adapters_dir: &Path, name: &str, force: bool, json_mode: bool) -> Result<()> {
     let known = find_known_adapter(name).ok_or_else(|| {
         let available: Vec<&str> = KNOWN_ADAPTERS.iter().map(|a| a.name).collect();
         anyhow::anyhow!(
@@ -480,12 +485,7 @@ async fn cmd_enable(
     Ok(())
 }
 
-async fn cmd_disable(
-    adapters_dir: &Path,
-    name: &str,
-    force: bool,
-    json_mode: bool,
-) -> Result<()> {
+async fn cmd_disable(adapters_dir: &Path, name: &str, force: bool, json_mode: bool) -> Result<()> {
     let adapter_dir = adapters_dir.join(name);
 
     if !adapter_dir.exists() {
@@ -493,17 +493,17 @@ async fn cmd_disable(
     }
 
     // Check if config has been customized (differs from default template)
-    if !force
-        && let Some(known) = find_known_adapter(name) {
-            let manifest_path = adapter_dir.join("adapter.toml");
-            if let Ok(current) = std::fs::read_to_string(&manifest_path)
-                && current.trim() != known.default_config.trim() {
-                    bail!(
-                        "Adapter '{}' has a customized adapter.toml. Use --force to remove anyway.",
-                        name
-                    );
-                }
+    if !force && let Some(known) = find_known_adapter(name) {
+        let manifest_path = adapter_dir.join("adapter.toml");
+        if let Ok(current) = std::fs::read_to_string(&manifest_path)
+            && current.trim() != known.default_config.trim()
+        {
+            bail!(
+                "Adapter '{}' has a customized adapter.toml. Use --force to remove anyway.",
+                name
+            );
         }
+    }
 
     fs::remove_dir_all(&adapter_dir)
         .await
@@ -551,7 +551,11 @@ async fn cmd_info(adapters_dir: &Path, name: &str, json_mode: bool) -> Result<()
             description: manifest.description.clone(),
             adapter_type: manifest.adapter_type.as_str().to_string(),
             direction: manifest.direction.as_str().to_string(),
-            capabilities: manifest.capabilities.iter().map(|c| c.as_str().to_string()).collect(),
+            capabilities: manifest
+                .capabilities
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect(),
             status: "enabled".to_string(),
             required_env_vars: required_env,
             config: Some(serde_json::to_value(&manifest.config).unwrap_or_default()),
@@ -566,9 +570,17 @@ async fn cmd_info(adapters_dir: &Path, name: &str, json_mode: bool) -> Result<()
             description: known.description.to_string(),
             adapter_type: known.adapter_type.as_str().to_string(),
             direction: known.direction.as_str().to_string(),
-            capabilities: known.capabilities.iter().map(|c| c.as_str().to_string()).collect(),
+            capabilities: known
+                .capabilities
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect(),
             status: "available (not enabled)".to_string(),
-            required_env_vars: known.required_env_vars.iter().map(|s| s.to_string()).collect(),
+            required_env_vars: known
+                .required_env_vars
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             config: None,
             adapter_md_summary: None,
         };
@@ -578,11 +590,7 @@ async fn cmd_info(adapters_dir: &Path, name: &str, json_mode: bool) -> Result<()
     Ok(())
 }
 
-async fn cmd_doctor(
-    adapters_dir: &Path,
-    name: Option<&str>,
-    json_mode: bool,
-) -> Result<()> {
+async fn cmd_doctor(adapters_dir: &Path, name: Option<&str>, json_mode: bool) -> Result<()> {
     let adapters_to_check: Vec<String> = if let Some(n) = name {
         if !is_enabled(adapters_dir, n) {
             bail!(
@@ -596,15 +604,18 @@ async fn cmd_doctor(
         // Check all enabled adapters
         let mut names = Vec::new();
         if adapters_dir.exists()
-            && let Ok(entries) = std::fs::read_dir(adapters_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() && path.join("adapter.toml").exists()
-                        && let Some(n) = path.file_name() {
-                            names.push(n.to_string_lossy().to_string());
-                        }
+            && let Ok(entries) = std::fs::read_dir(adapters_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path.join("adapter.toml").exists()
+                    && let Some(n) = path.file_name()
+                {
+                    names.push(n.to_string_lossy().to_string());
                 }
             }
+        }
         if names.is_empty() {
             bail!("No enabled adapters found. Enable one with: abathur adapter enable <name>");
         }
@@ -645,10 +656,11 @@ async fn cmd_publish(
         .with_context(|| "Failed to parse action JSON. Expected format: {\"action\":\"update_status\",\"external_id\":\"...\",\"new_status\":\"...\"}".to_string())?;
 
     // Load the adapter registry
-    let loaded_adapters =
-        crate::services::adapter_loader::load_adapters(adapters_dir.parent().unwrap_or(adapters_dir)).await;
-    let prompt_content =
-        crate::services::adapter_loader::collect_prompt_content(&loaded_adapters);
+    let loaded_adapters = crate::services::adapter_loader::load_adapters(
+        adapters_dir.parent().unwrap_or(adapters_dir),
+    )
+    .await;
+    let prompt_content = crate::services::adapter_loader::collect_prompt_content(&loaded_adapters);
     let registry = crate::services::adapter_registry::AdapterRegistry::from_loaded(
         loaded_adapters,
         prompt_content,
@@ -800,7 +812,10 @@ fn run_doctor_checks(adapters_dir: &Path, name: &str) -> Vec<DoctorCheck> {
             checks.push(DoctorCheck {
                 check: "environment variables".to_string(),
                 passed: false,
-                message: format!("Missing env vars referenced in config: {}", missing.join(", ")),
+                message: format!(
+                    "Missing env vars referenced in config: {}",
+                    missing.join(", ")
+                ),
             });
         }
     }
@@ -811,9 +826,10 @@ fn run_doctor_checks(adapters_dir: &Path, name: &str) -> Vec<DoctorCheck> {
         .iter()
         .filter_map(|(k, v)| {
             if let serde_json::Value::String(s) = v
-                && s.is_empty() {
-                    return Some(k.clone());
-                }
+                && s.is_empty()
+            {
+                return Some(k.clone());
+            }
             None
         })
         .collect();
@@ -967,7 +983,10 @@ mod tests {
         assert!(checks[2].passed, "validation check: {}", checks[2].message);
         // config values will fail because list_id is empty
         let config_check = checks.iter().find(|c| c.check == "config values").unwrap();
-        assert!(!config_check.passed, "config check should fail for empty list_id");
+        assert!(
+            !config_check.passed,
+            "config check should fail for empty list_id"
+        );
     }
 
     #[test]

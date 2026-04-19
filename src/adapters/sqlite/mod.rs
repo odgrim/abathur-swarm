@@ -9,31 +9,33 @@ pub mod memory_repository;
 pub mod merge_request_repository;
 pub mod migrations;
 pub mod outbox_repository;
+pub mod quiet_window_repository;
 pub mod refinement_repository;
 pub mod task_repository;
 pub mod task_schedule_repository;
 pub mod trajectory_repository;
-pub mod tx_context;
 pub mod trigger_rule_repository;
+pub mod tx_context;
 pub mod worktree_repository;
-pub mod quiet_window_repository;
 
 pub use agent_repository::SqliteAgentRepository;
-pub use connection::{create_pool, create_test_pool, verify_connection, ConnectionError, PoolConfig};
+pub use connection::{
+    ConnectionError, PoolConfig, create_pool, create_test_pool, verify_connection,
+};
 pub use event_repository::SqliteEventRepository;
 pub use federated_goal_repository::SqliteFederatedGoalRepository;
 pub use goal_repository::SqliteGoalRepository;
 pub use memory_repository::SqliteMemoryRepository;
 pub use merge_request_repository::SqliteMergeRequestRepository;
-pub use migrations::{all_embedded_migrations, Migration, MigrationError, Migrator};
+pub use migrations::{Migration, MigrationError, Migrator, all_embedded_migrations};
 pub use outbox_repository::SqliteOutboxRepository;
+pub use quiet_window_repository::SqliteQuietWindowRepository;
 pub use refinement_repository::SqliteRefinementRepository;
 pub use task_repository::SqliteTaskRepository;
-pub use trajectory_repository::SqliteTrajectoryRepository;
 pub use task_schedule_repository::SqliteTaskScheduleRepository;
+pub use trajectory_repository::SqliteTrajectoryRepository;
 pub use trigger_rule_repository::SqliteTriggerRuleRepository;
 pub use worktree_repository::SqliteWorktreeRepository;
-pub use quiet_window_repository::SqliteQuietWindowRepository;
 
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
@@ -68,7 +70,9 @@ pub fn parse_optional_datetime(s: Option<String>) -> DomainResult<Option<DateTim
 }
 
 /// Parse a JSON string from a SQLite row field, falling back to the type's default.
-pub fn parse_json_or_default<T: serde::de::DeserializeOwned + Default>(s: Option<String>) -> DomainResult<T> {
+pub fn parse_json_or_default<T: serde::de::DeserializeOwned + Default>(
+    s: Option<String>,
+) -> DomainResult<T> {
     s.map(|s| serde_json::from_str(&s))
         .transpose()
         .map_err(|e| DomainError::SerializationError(e.to_string()))
@@ -111,7 +115,9 @@ pub enum DatabaseError {
 pub async fn initialize_database(database_url: &str) -> Result<SqlitePool, DatabaseError> {
     let pool = create_pool(database_url, None).await?;
     let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
+    migrator
+        .run_embedded_migrations(all_embedded_migrations())
+        .await?;
     Ok(pool)
 }
 
@@ -123,15 +129,19 @@ pub async fn initialize_default_database() -> Result<SqlitePool, DatabaseError> 
 pub async fn create_migrated_test_pool() -> Result<SqlitePool, DatabaseError> {
     let pool = create_test_pool().await?;
     let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
+    migrator
+        .run_embedded_migrations(all_embedded_migrations())
+        .await?;
     Ok(pool)
 }
 
 /// Insert a minimal task row for FK constraint satisfaction in tests.
 pub async fn insert_test_task(pool: &SqlitePool, task_id: uuid::Uuid) {
-    sqlx::query("INSERT OR IGNORE INTO tasks (id, title, status) VALUES (?, 'test task', 'pending')")
-        .bind(task_id.to_string())
-        .execute(pool)
-        .await
-        .expect("Failed to insert test task");
+    sqlx::query(
+        "INSERT OR IGNORE INTO tasks (id, title, status) VALUES (?, 'test task', 'pending')",
+    )
+    .bind(task_id.to_string())
+    .execute(pool)
+    .await
+    .expect("Failed to insert test task");
 }

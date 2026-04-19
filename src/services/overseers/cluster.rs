@@ -14,11 +14,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use super::traits::{apply_signal_update, has_blocking_failures, OverseerMeasurement};
+use super::traits::{OverseerMeasurement, apply_signal_update, has_blocking_failures};
 use crate::domain::errors::DomainResult;
 use crate::domain::models::convergence::{
-    ArtifactReference, ConvergencePolicy, Overseer, OverseerCluster, OverseerCost,
-    OverseerSignals,
+    ArtifactReference, ConvergencePolicy, Overseer, OverseerCluster, OverseerCost, OverseerSignals,
 };
 use crate::services::convergence_engine::OverseerMeasurer;
 

@@ -2,16 +2,45 @@
 //!
 //! Provides a broadcast-based event system with sequence numbering,
 //! optional persistence, and correlation tracking.
+//!
+//! # `EventPayload` Variant Organization
+//!
+//! `EventPayload` is a large flat enum (~175 variants). For ease of navigation,
+//! variants are grouped below into sections delimited by `// ====` banners,
+//! matching the canonical [`EventCategory`] values. A mini table of contents:
+//!
+//! - **Orchestrator** — lifecycle, reconciliation, handler/error infra, trigger rules, subsystem errors
+//! - **Goal** — goal lifecycle, status changes, constraints, domains, descriptions
+//! - **Task** — task lifecycle, SLAs, stale-task warnings, worktrees, PRs, merges, execution-recorded
+//! - **Execution** — DAG execution lifecycle, waves, restructure decisions
+//! - **Agent** — agent creation, templates, instance lifecycle, specialist spawns, evolution
+//! - **Verification** — intent/wave/branch verification, task alignment, `TaskVerified`
+//! - **Escalation** — human escalation and responses (blocking and non-blocking)
+//! - **Memory** — memory CRUD, conflicts, pruning, daemon maintenance
+//! - **Scheduler** — scheduled events, quiet-window enter/exit
+//! - **Convergence** — convergence loop iterations, attractor transitions, fresh starts, termination
+//! - **Workflow** — state-machine workflow phases, gates, retries
+//! - **Adapter** — adapter ingestion and egress
+//! - **Budget** — budget pressure and opportunity
+//! - **Federation** — cerebrate connectivity, task delegation, federated goals, swarm DAGs
+//!
+//! # Named Payload Structs
+//!
+//! Variants with 6+ named fields wrap a `…Payload` struct (e.g. `TaskResultPayload`,
+//! `HumanEscalationPayload`) defined alongside the enum. Smaller variants stay
+//! as inline-fields tuple/struct variants. This keeps the enum flat (so that
+//! the ~500+ match arms across the codebase remain simple) while reducing the
+//! worst-case variant girth.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
-use super::event_store::EventStore;
 use super::dag_executor::{ExecutionEvent, ExecutionResults, ExecutionStatus, TaskResult};
+use super::event_store::EventStore;
 use super::swarm_orchestrator::{SwarmEvent, SwarmStats};
 
 /// Unique identifier for an event.
@@ -196,18 +225,146 @@ pub struct UnifiedEvent {
     pub payload: EventPayload,
 }
 
+// ============================================================================
+// Named payload structs for variants with 6+ fields
+//
+// Variants wrapping these structs keep match arms readable while reducing the
+// worst-case variant girth. See the enum definition below for usage.
+// ============================================================================
+
+/// Payload for `EventPayload::IntentVerificationCompleted`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentVerificationCompletedPayload {
+    pub goal_id: Uuid,
+    pub satisfaction: String,
+    pub confidence: f64,
+    pub gaps_count: usize,
+    pub iteration: u32,
+    pub will_retry: bool,
+}
+
+/// Payload for `HumanEscalationRequired` and `HumanEscalationNeeded`.
+///
+/// Both variants have identical shape — Required indicates a new escalation
+/// produced by a monitor; Needed is the execution-side form emitted from the
+/// DAG executor. The fields are the same in either case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanEscalationPayload {
+    pub goal_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+    pub reason: String,
+    pub urgency: String,
+    pub questions: Vec<String>,
+    pub is_blocking: bool,
+}
+
+/// Payload for `EventPayload::ConvergenceIteration`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConvergenceIterationPayload {
+    pub task_id: Uuid,
+    pub trajectory_id: Uuid,
+    pub iteration: u32,
+    pub strategy: String,
+    pub convergence_delta: f64,
+    pub convergence_level: f64,
+    pub attractor_type: String,
+    pub budget_remaining_fraction: f64,
+}
+
+/// Payload for `EventPayload::ConvergenceTerminated`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConvergenceTerminatedPayload {
+    pub task_id: Uuid,
+    pub trajectory_id: Uuid,
+    pub outcome: String,
+    pub total_iterations: u32,
+    pub total_tokens: u64,
+    pub final_convergence_level: f64,
+}
+
+/// Payload for `EventPayload::WorkflowVerificationCompleted`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowVerificationCompletedPayload {
+    pub task_id: Uuid,
+    pub phase_index: usize,
+    pub phase_name: String,
+    pub satisfied: bool,
+    pub retry_count: u32,
+    pub summary: String,
+}
+
 /// Unified event payload combining all SwarmEvent and ExecutionEvent variants.
+///
+/// Variants are organized below into sections by [`EventCategory`] with
+/// banner comments. Variants with 6+ named fields are wrapped in the `…Payload`
+/// structs defined above.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum EventPayload {
-    // Orchestrator lifecycle events
+    // ========================================================================
+    // Orchestrator — lifecycle, reconciliation, handler infra, trigger rules,
+    //                subsystem errors
+    // ========================================================================
     OrchestratorStarted,
     OrchestratorPaused,
     OrchestratorResumed,
     OrchestratorStopped,
     StatusUpdate(SwarmStatsPayload),
 
-    // Goal events
+    ReconciliationCompleted {
+        corrections_made: u32,
+    },
+
+    StartupCatchUpCompleted {
+        orphaned_tasks_fixed: u32,
+        missed_events_replayed: u64,
+        goals_reevaluated: u32,
+        duration_ms: u64,
+    },
+
+    /// Handler error events (emitted by reactor for monitoring).
+    HandlerError {
+        handler_name: String,
+        event_sequence: u64,
+        error: String,
+        circuit_breaker_tripped: bool,
+    },
+
+    /// Emitted when a critical handler's circuit breaker trips.
+    /// Critical handlers are essential for system invariants (e.g. task lifecycle
+    /// transitions) and use aggressive retry with exponential backoff.
+    CriticalHandlerDegraded {
+        handler_name: String,
+        error: String,
+        failure_count: u32,
+        backoff_attempt: u32,
+    },
+
+    TriggerRuleCreated {
+        rule_id: Uuid,
+        rule_name: String,
+    },
+    TriggerRuleToggled {
+        rule_id: Uuid,
+        rule_name: String,
+        enabled: bool,
+    },
+    TriggerRuleDeleted {
+        rule_id: Uuid,
+        rule_name: String,
+    },
+
+    /// A subsystem encountered an error that was isolated (not propagated).
+    /// Emitted when the main loop catches a subsystem failure to ensure
+    /// graceful degradation — no single subsystem failure halts the swarm.
+    SubsystemError {
+        subsystem: String,
+        error: String,
+    },
+
+    // ========================================================================
+    // Goal — goal lifecycle, status changes, constraints, domains, descriptions
+    // ========================================================================
     GoalStarted {
         goal_id: Uuid,
         goal_name: String,
@@ -235,8 +392,44 @@ pub enum EventPayload {
         recurring_gaps: Vec<String>,
         iterations: u32,
     },
+    GoalStatusChanged {
+        goal_id: Uuid,
+        from_status: String,
+        to_status: String,
+    },
+    GoalConstraintViolated {
+        goal_id: Uuid,
+        constraint_name: String,
+        violation: String,
+    },
+    GoalDomainsUpdated {
+        goal_id: Uuid,
+        old_domains: Vec<String>,
+        new_domains: Vec<String>,
+    },
+    GoalDeleted {
+        goal_id: Uuid,
+        goal_name: String,
+    },
+    GoalConstraintsUpdated {
+        goal_id: Uuid,
+    },
+    GoalDescriptionUpdated {
+        goal_id: Uuid,
+        reason: String,
+    },
 
-    // Task lifecycle events
+    /// Emitted when a memory record influences a goal evaluation.
+    MemoryInformedGoal {
+        goal_id: Uuid,
+        memory_id: Uuid,
+        memory_key: String,
+    },
+
+    // ========================================================================
+    // Task — lifecycle, SLAs, stale-task warnings, worktrees, PRs, merges,
+    //        TaskExecutionRecorded
+    // ========================================================================
     TaskSubmitted {
         task_id: Uuid,
         task_title: String,
@@ -273,32 +466,108 @@ pub enum EventPayload {
         attempt: u32,
         max_attempts: u32,
     },
-    TaskVerified {
-        task_id: Uuid,
-        passed: bool,
-        checks_passed: usize,
-        checks_total: usize,
-        failures_summary: Option<String>,
-    },
     TaskQueuedForMerge {
         task_id: Uuid,
         stage: String,
+    },
+    TaskMerged {
+        task_id: Uuid,
+        commit_sha: String,
+    },
+    TaskClaimed {
+        task_id: Uuid,
+        agent_type: String,
+    },
+    TaskCanceled {
+        task_id: Uuid,
+        reason: String,
+    },
+    TaskValidating {
+        task_id: Uuid,
+    },
+    TaskSLAWarning {
+        task_id: Uuid,
+        deadline: String,
+        remaining_secs: i64,
+    },
+    TaskSLACritical {
+        task_id: Uuid,
+        deadline: String,
+        remaining_secs: i64,
+    },
+    TaskSLABreached {
+        task_id: Uuid,
+        deadline: String,
+        overdue_secs: i64,
+    },
+    TaskRunningLong {
+        task_id: Uuid,
+        runtime_secs: u64,
+    },
+    TaskRunningCritical {
+        task_id: Uuid,
+        runtime_secs: u64,
+    },
+    TaskDependencyChanged {
+        task_id: Uuid,
+        added: Vec<Uuid>,
+        removed: Vec<Uuid>,
+    },
+    TaskPriorityChanged {
+        task_id: Uuid,
+        from: String,
+        to: String,
+        reason: String,
+    },
+    TaskDescriptionUpdated {
+        task_id: Uuid,
+        reason: String,
+    },
+    WorktreeCreated {
+        task_id: Uuid,
+        path: String,
+    },
+    WorktreeDestroyed {
+        worktree_id: Uuid,
+        task_id: Uuid,
+        reason: String,
     },
     PullRequestCreated {
         task_id: Uuid,
         pr_url: String,
         branch: String,
     },
-    TaskMerged {
+    SubtaskMergedToFeature {
         task_id: Uuid,
-        commit_sha: String,
-    },
-    WorktreeCreated {
-        task_id: Uuid,
-        path: String,
+        feature_branch: String,
     },
 
-    // Execution events
+    /// Review failure loop-back triggered: spawns a new plan → implement → review cycle.
+    ReviewLoopTriggered {
+        failed_review_task_id: Uuid,
+        iteration: u32,
+        max_iterations: u32,
+        new_plan_task_id: Uuid,
+        /// The new review task ID, stored as successor on the failed review task
+        /// so the parent orchestrating agent can follow the chain.
+        new_review_task_id: Uuid,
+    },
+
+    /// Emitted on task completion for opportunistic convergence memory recording.
+    /// Captures lightweight execution metrics that feed the classification heuristic
+    /// dataset (Part 10.3 of convergence-task-integration spec). The actual memory
+    /// storage is handled by an event handler, not by TaskService.
+    TaskExecutionRecorded {
+        task_id: Uuid,
+        execution_mode: String,
+        complexity: String,
+        succeeded: bool,
+        tokens_used: u64,
+    },
+
+    // ========================================================================
+    // Execution — DAG execution lifecycle, waves, restructure decisions
+    // ========================================================================
     ExecutionStarted {
         total_tasks: usize,
         wave_count: usize,
@@ -325,18 +594,10 @@ pub enum EventPayload {
         decision: String,
     },
 
-    /// Review failure loop-back triggered: spawns a new plan → implement → review cycle.
-    ReviewLoopTriggered {
-        failed_review_task_id: Uuid,
-        iteration: u32,
-        max_iterations: u32,
-        new_plan_task_id: Uuid,
-        /// The new review task ID, stored as successor on the failed review task
-        /// so the parent orchestrating agent can follow the chain.
-        new_review_task_id: Uuid,
-    },
-
-    // Agent events
+    // ========================================================================
+    // Agent — agent creation, templates, instance lifecycle, specialist spawns,
+    //         evolution
+    // ========================================================================
     AgentCreated {
         agent_type: String,
         tier: String,
@@ -356,25 +617,45 @@ pub enum EventPayload {
         current_value: u32,
         limit_value: u32,
     },
-    GoalAlignmentEvaluated {
+    AgentInstanceCompleted {
+        instance_id: Uuid,
         task_id: Uuid,
-        overall_score: f64,
-        passes: bool,
+        tokens_used: u64,
+    },
+    AgentTemplateRegistered {
+        template_name: String,
+        tier: String,
+        version: u32,
+    },
+    AgentTemplateStatusChanged {
+        template_name: String,
+        from_status: String,
+        to_status: String,
+    },
+    AgentInstanceSpawned {
+        instance_id: Uuid,
+        template_name: String,
+        tier: String,
+    },
+    AgentInstanceAssigned {
+        instance_id: Uuid,
+        task_id: Uuid,
+        template_name: String,
+    },
+    AgentInstanceFailed {
+        instance_id: Uuid,
+        task_id: Option<Uuid>,
+        template_name: String,
     },
 
-    // Verification events
+    // ========================================================================
+    // Verification — intent/wave/branch verification, task alignment, verified
+    // ========================================================================
     IntentVerificationStarted {
         goal_id: Uuid,
         iteration: u32,
     },
-    IntentVerificationCompleted {
-        goal_id: Uuid,
-        satisfaction: String,
-        confidence: f64,
-        gaps_count: usize,
-        iteration: u32,
-        will_retry: bool,
-    },
+    IntentVerificationCompleted(IntentVerificationCompletedPayload),
     IntentVerificationRequested {
         goal_id: Option<Uuid>,
         completed_task_ids: Vec<Uuid>,
@@ -417,8 +698,38 @@ pub enum EventPayload {
         gaps_count: usize,
         dependents_can_proceed: bool,
     },
+    GoalAlignmentEvaluated {
+        task_id: Uuid,
+        overall_score: f64,
+        passes: bool,
+    },
+    TaskVerified {
+        task_id: Uuid,
+        passed: bool,
+        checks_passed: usize,
+        checks_total: usize,
+        failures_summary: Option<String>,
+    },
 
-    // Memory events
+    // ========================================================================
+    // Escalation — human escalation and responses (blocking and non-blocking)
+    // ========================================================================
+    HumanEscalationRequired(HumanEscalationPayload),
+    HumanEscalationNeeded(HumanEscalationPayload),
+    HumanResponseReceived {
+        escalation_id: Uuid,
+        decision: String,
+        allows_continuation: bool,
+    },
+    HumanEscalationExpired {
+        task_id: Option<Uuid>,
+        goal_id: Option<Uuid>,
+        default_action: String,
+    },
+
+    // ========================================================================
+    // Memory — memory CRUD, conflicts, pruning, daemon maintenance
+    // ========================================================================
     MemoryStored {
         memory_id: Uuid,
         key: String,
@@ -445,95 +756,6 @@ pub enum EventPayload {
         /// Number of distinct accessors that have accessed this memory.
         distinct_accessor_count: u32,
     },
-
-    // Goal status events
-    GoalStatusChanged {
-        goal_id: Uuid,
-        from_status: String,
-        to_status: String,
-    },
-    GoalConstraintViolated {
-        goal_id: Uuid,
-        constraint_name: String,
-        violation: String,
-    },
-
-    // Task claim event
-    TaskClaimed {
-        task_id: Uuid,
-        agent_type: String,
-    },
-
-    // Task cancellation event
-    TaskCanceled {
-        task_id: Uuid,
-        reason: String,
-    },
-
-    // Scheduler events
-    ScheduledEventFired {
-        schedule_id: Uuid,
-        name: String,
-    },
-    ScheduledEventRegistered {
-        schedule_id: Uuid,
-        name: String,
-        schedule_type: String,
-    },
-    ScheduledEventCanceled {
-        schedule_id: Uuid,
-        name: String,
-    },
-
-    // Agent events
-    AgentInstanceCompleted {
-        instance_id: Uuid,
-        task_id: Uuid,
-        tokens_used: u64,
-    },
-
-    // Goal domain/constraint events
-    GoalDomainsUpdated {
-        goal_id: Uuid,
-        old_domains: Vec<String>,
-        new_domains: Vec<String>,
-    },
-    GoalDeleted {
-        goal_id: Uuid,
-        goal_name: String,
-    },
-    GoalConstraintsUpdated {
-        goal_id: Uuid,
-    },
-
-    // Agent template/instance lifecycle events
-    AgentTemplateRegistered {
-        template_name: String,
-        tier: String,
-        version: u32,
-    },
-    AgentTemplateStatusChanged {
-        template_name: String,
-        from_status: String,
-        to_status: String,
-    },
-    AgentInstanceSpawned {
-        instance_id: Uuid,
-        template_name: String,
-        tier: String,
-    },
-    AgentInstanceAssigned {
-        instance_id: Uuid,
-        task_id: Uuid,
-        template_name: String,
-    },
-    AgentInstanceFailed {
-        instance_id: Uuid,
-        task_id: Option<Uuid>,
-        template_name: String,
-    },
-
-    // Memory conflict events
     MemoryDeleted {
         memory_id: Uuid,
         key: String,
@@ -550,56 +772,6 @@ pub enum EventPayload {
         memory_b: Uuid,
         resolution_type: String,
     },
-
-    // Task validation event
-    TaskValidating {
-        task_id: Uuid,
-    },
-
-    // Reconciliation events
-    ReconciliationCompleted {
-        corrections_made: u32,
-    },
-
-    // Escalation events
-    HumanEscalationRequired {
-        goal_id: Option<Uuid>,
-        task_id: Option<Uuid>,
-        reason: String,
-        urgency: String,
-        questions: Vec<String>,
-        is_blocking: bool,
-    },
-    HumanEscalationNeeded {
-        goal_id: Option<Uuid>,
-        task_id: Option<Uuid>,
-        reason: String,
-        urgency: String,
-        questions: Vec<String>,
-        is_blocking: bool,
-    },
-    HumanResponseReceived {
-        escalation_id: Uuid,
-        decision: String,
-        allows_continuation: bool,
-    },
-
-    // Trigger rule lifecycle events
-    TriggerRuleCreated {
-        rule_id: Uuid,
-        rule_name: String,
-    },
-    TriggerRuleToggled {
-        rule_id: Uuid,
-        rule_name: String,
-        enabled: bool,
-    },
-    TriggerRuleDeleted {
-        rule_id: Uuid,
-        rule_name: String,
-    },
-
-    // Memory maintenance summary
     MemoryMaintenanceCompleted {
         expired_pruned: u64,
         decayed_pruned: u64,
@@ -627,105 +799,38 @@ pub enum EventPayload {
         reason: String,
     },
 
-    // Handler error events (emitted by reactor for monitoring)
-    HandlerError {
-        handler_name: String,
-        event_sequence: u64,
-        error: String,
-        circuit_breaker_tripped: bool,
+    // ========================================================================
+    // Scheduler — scheduled events, quiet-window enter/exit
+    // ========================================================================
+    ScheduledEventFired {
+        schedule_id: Uuid,
+        name: String,
+    },
+    ScheduledEventRegistered {
+        schedule_id: Uuid,
+        name: String,
+        schedule_type: String,
+    },
+    ScheduledEventCanceled {
+        schedule_id: Uuid,
+        name: String,
     },
 
-    /// Emitted when a critical handler's circuit breaker trips.
-    /// Critical handlers are essential for system invariants (e.g. task lifecycle
-    /// transitions) and use aggressive retry with exponential backoff.
-    CriticalHandlerDegraded {
-        handler_name: String,
-        error: String,
-        failure_count: u32,
-        backoff_attempt: u32,
+    /// Emitted when the swarm enters a quiet window — dispatch is suppressed.
+    QuietWindowEntered {
+        window_id: Uuid,
+        window_name: String,
     },
 
-    // Task lifecycle gap events
-    TaskDependencyChanged {
-        task_id: Uuid,
-        added: Vec<Uuid>,
-        removed: Vec<Uuid>,
-    },
-    TaskPriorityChanged {
-        task_id: Uuid,
-        from: String,
-        to: String,
-        reason: String,
+    /// Emitted when the swarm exits a quiet window — dispatch resumes.
+    QuietWindowExited {
+        window_id: Uuid,
+        window_name: String,
     },
 
-    // Escalation gap
-    HumanEscalationExpired {
-        task_id: Option<Uuid>,
-        goal_id: Option<Uuid>,
-        default_action: String,
-    },
-
-    // Worktree gap
-    WorktreeDestroyed {
-        worktree_id: Uuid,
-        task_id: Uuid,
-        reason: String,
-    },
-
-    // Startup/recovery
-    StartupCatchUpCompleted {
-        orphaned_tasks_fixed: u32,
-        missed_events_replayed: u64,
-        goals_reevaluated: u32,
-        duration_ms: u64,
-    },
-
-    // SLA enforcement events
-    TaskSLAWarning {
-        task_id: Uuid,
-        deadline: String,
-        remaining_secs: i64,
-    },
-    TaskSLACritical {
-        task_id: Uuid,
-        deadline: String,
-        remaining_secs: i64,
-    },
-    TaskSLABreached {
-        task_id: Uuid,
-        deadline: String,
-        overdue_secs: i64,
-    },
-
-    // Stale task warning events
-    TaskRunningLong {
-        task_id: Uuid,
-        runtime_secs: u64,
-    },
-    TaskRunningCritical {
-        task_id: Uuid,
-        runtime_secs: u64,
-    },
-
-    // Memory-informed goal evaluation
-    MemoryInformedGoal {
-        goal_id: Uuid,
-        memory_id: Uuid,
-        memory_key: String,
-    },
-
-    // Description update events (for escalation path)
-    TaskDescriptionUpdated {
-        task_id: Uuid,
-        reason: String,
-    },
-    GoalDescriptionUpdated {
-        goal_id: Uuid,
-        reason: String,
-    },
-
-    // Convergence lifecycle events (task-level convergence integration)
-
+    // ========================================================================
+    // Convergence — iteration, attractor transitions, fresh starts, termination
+    // ========================================================================
     /// Emitted when convergence loop starts for a task.
     ConvergenceStarted {
         task_id: Uuid,
@@ -736,16 +841,7 @@ pub enum EventPayload {
     },
 
     /// Emitted after each convergence iteration.
-    ConvergenceIteration {
-        task_id: Uuid,
-        trajectory_id: Uuid,
-        iteration: u32,
-        strategy: String,
-        convergence_delta: f64,
-        convergence_level: f64,
-        attractor_type: String,
-        budget_remaining_fraction: f64,
-    },
+    ConvergenceIteration(ConvergenceIterationPayload),
 
     /// Emitted when attractor classification changes.
     ConvergenceAttractorTransition {
@@ -774,92 +870,11 @@ pub enum EventPayload {
     },
 
     /// Emitted when convergence completes (success or failure).
-    ConvergenceTerminated {
-        task_id: Uuid,
-        trajectory_id: Uuid,
-        outcome: String,
-        total_iterations: u32,
-        total_tokens: u64,
-        final_convergence_level: f64,
-    },
+    ConvergenceTerminated(ConvergenceTerminatedPayload),
 
-    /// Emitted on task completion for opportunistic convergence memory recording.
-    /// Captures lightweight execution metrics that feed the classification heuristic
-    /// dataset (Part 10.3 of convergence-task-integration spec). The actual memory
-    /// storage is handled by an event handler, not by TaskService.
-    TaskExecutionRecorded {
-        task_id: Uuid,
-        execution_mode: String,
-        complexity: String,
-        succeeded: bool,
-        tokens_used: u64,
-    },
-
-    /// Subtask branch merged into feature branch.
-    SubtaskMergedToFeature {
-        task_id: Uuid,
-        feature_branch: String,
-    },
-
-    // Adapter events
-
-    /// Adapter ingestion poll completed successfully.
-    AdapterIngestionCompleted {
-        adapter_name: String,
-        items_found: usize,
-        tasks_created: usize,
-    },
-
-    /// Adapter ingestion poll failed.
-    AdapterIngestionFailed {
-        adapter_name: String,
-        error: String,
-    },
-
-    /// Adapter egress action completed.
-    AdapterEgressCompleted {
-        adapter_name: String,
-        task_id: Uuid,
-        action: String,
-        success: bool,
-    },
-
-    /// Adapter egress action failed.
-    AdapterEgressFailed {
-        adapter_name: String,
-        task_id: Option<Uuid>,
-        error: String,
-    },
-
-    /// A task was successfully created from an adapter ingestion item.
-    AdapterTaskIngested {
-        task_id: Uuid,
-        adapter_name: String,
-    },
-
-    // Budget events
-
-    /// Emitted when the aggregate budget pressure level changes.
-    BudgetPressureChanged {
-        previous_level: BudgetPressureLevel,
-        new_level: BudgetPressureLevel,
-        /// Consumed percentage (0.0–1.0) that triggered the transition.
-        consumed_pct: f64,
-        /// ID of the window that caused the change (or "aggregate" for recompute).
-        window_id: String,
-    },
-
-    /// Emitted when a budget window has enough remaining tokens to schedule
-    /// additional work aggressively.
-    BudgetOpportunityDetected {
-        window_id: String,
-        remaining_tokens: u64,
-        time_to_reset_secs: u64,
-        opportunity_score: f64,
-    },
-
-    // Workflow state machine events
-
+    // ========================================================================
+    // Workflow — state machine phases, gates, retries
+    // ========================================================================
     /// Task enrolled in a workflow.
     WorkflowEnrolled {
         task_id: Uuid,
@@ -924,14 +939,7 @@ pub enum EventPayload {
     },
 
     /// Workflow phase verification completed — satisfied or failed.
-    WorkflowVerificationCompleted {
-        task_id: Uuid,
-        phase_index: usize,
-        phase_name: String,
-        satisfied: bool,
-        retry_count: u32,
-        summary: String,
-    },
+    WorkflowVerificationCompleted(WorkflowVerificationCompletedPayload),
 
     /// A workflow phase subtask was retried after failure.
     WorkflowPhaseRetried {
@@ -949,8 +957,69 @@ pub enum EventPayload {
         reason: String,
     },
 
-    // Federation events
+    // ========================================================================
+    // Adapter — adapter ingestion and egress
+    // ========================================================================
+    /// Adapter ingestion poll completed successfully.
+    AdapterIngestionCompleted {
+        adapter_name: String,
+        items_found: usize,
+        tasks_created: usize,
+    },
 
+    /// Adapter ingestion poll failed.
+    AdapterIngestionFailed {
+        adapter_name: String,
+        error: String,
+    },
+
+    /// Adapter egress action completed.
+    AdapterEgressCompleted {
+        adapter_name: String,
+        task_id: Uuid,
+        action: String,
+        success: bool,
+    },
+
+    /// Adapter egress action failed.
+    AdapterEgressFailed {
+        adapter_name: String,
+        task_id: Option<Uuid>,
+        error: String,
+    },
+
+    /// A task was successfully created from an adapter ingestion item.
+    AdapterTaskIngested {
+        task_id: Uuid,
+        adapter_name: String,
+    },
+
+    // ========================================================================
+    // Budget — budget pressure and opportunity
+    // ========================================================================
+    /// Emitted when the aggregate budget pressure level changes.
+    BudgetPressureChanged {
+        previous_level: BudgetPressureLevel,
+        new_level: BudgetPressureLevel,
+        /// Consumed percentage (0.0–1.0) that triggered the transition.
+        consumed_pct: f64,
+        /// ID of the window that caused the change (or "aggregate" for recompute).
+        window_id: String,
+    },
+
+    /// Emitted when a budget window has enough remaining tokens to schedule
+    /// additional work aggressively.
+    BudgetOpportunityDetected {
+        window_id: String,
+        remaining_tokens: u64,
+        time_to_reset_secs: u64,
+        opportunity_score: f64,
+    },
+
+    // ========================================================================
+    // Federation — cerebrate connectivity, task delegation, federated goals,
+    //              swarm DAGs
+    // ========================================================================
     /// A cerebrate connected to the federation.
     FederationCerebrateConnected {
         cerebrate_id: String,
@@ -1029,8 +1098,6 @@ pub enum EventPayload {
         task_id: Option<Uuid>,
     },
 
-    // Federation goal lifecycle events
-
     /// A federated goal was created and delegated to a child cerebrate.
     FederatedGoalCreated {
         local_goal_id: Uuid,
@@ -1066,8 +1133,6 @@ pub enum EventPayload {
         cerebrate_id: String,
         reason: String,
     },
-
-    // Swarm DAG lifecycle events
 
     /// A swarm DAG was created and execution started.
     SwarmDagCreated {
@@ -1105,28 +1170,6 @@ pub enum EventPayload {
         dag_name: String,
         converged_count: usize,
         failed_count: usize,
-    },
-
-    /// A subsystem encountered an error that was isolated (not propagated).
-    /// Emitted when the main loop catches a subsystem failure to ensure
-    /// graceful degradation — no single subsystem failure halts the swarm.
-    SubsystemError {
-        subsystem: String,
-        error: String,
-    },
-
-    // Quiet window (cost-control scheduling) events
-
-    /// Emitted when the swarm enters a quiet window — dispatch is suppressed.
-    QuietWindowEntered {
-        window_id: Uuid,
-        window_name: String,
-    },
-
-    /// Emitted when the swarm exits a quiet window — dispatch resumes.
-    QuietWindowExited {
-        window_id: Uuid,
-        window_name: String,
     },
 }
 
@@ -1172,7 +1215,7 @@ impl EventPayload {
             Self::SpawnLimitExceeded { .. } => "SpawnLimitExceeded",
             Self::GoalAlignmentEvaluated { .. } => "GoalAlignmentEvaluated",
             Self::IntentVerificationStarted { .. } => "IntentVerificationStarted",
-            Self::IntentVerificationCompleted { .. } => "IntentVerificationCompleted",
+            Self::IntentVerificationCompleted(_) => "IntentVerificationCompleted",
             Self::IntentVerificationRequested { .. } => "IntentVerificationRequested",
             Self::IntentVerificationResult { .. } => "IntentVerificationResult",
             Self::WaveVerificationRequested { .. } => "WaveVerificationRequested",
@@ -1206,8 +1249,8 @@ impl EventPayload {
             Self::MemoryConflictResolved { .. } => "MemoryConflictResolved",
             Self::TaskValidating { .. } => "TaskValidating",
             Self::ReconciliationCompleted { .. } => "ReconciliationCompleted",
-            Self::HumanEscalationRequired { .. } => "HumanEscalationRequired",
-            Self::HumanEscalationNeeded { .. } => "HumanEscalationNeeded",
+            Self::HumanEscalationRequired(_) => "HumanEscalationRequired",
+            Self::HumanEscalationNeeded(_) => "HumanEscalationNeeded",
             Self::HumanResponseReceived { .. } => "HumanResponseReceived",
             Self::TriggerRuleCreated { .. } => "TriggerRuleCreated",
             Self::TriggerRuleToggled { .. } => "TriggerRuleToggled",
@@ -1232,11 +1275,11 @@ impl EventPayload {
             Self::TaskDescriptionUpdated { .. } => "TaskDescriptionUpdated",
             Self::GoalDescriptionUpdated { .. } => "GoalDescriptionUpdated",
             Self::ConvergenceStarted { .. } => "ConvergenceStarted",
-            Self::ConvergenceIteration { .. } => "ConvergenceIteration",
+            Self::ConvergenceIteration(_) => "ConvergenceIteration",
             Self::ConvergenceAttractorTransition { .. } => "ConvergenceAttractorTransition",
             Self::ConvergenceBudgetExtension { .. } => "ConvergenceBudgetExtension",
             Self::ConvergenceFreshStart { .. } => "ConvergenceFreshStart",
-            Self::ConvergenceTerminated { .. } => "ConvergenceTerminated",
+            Self::ConvergenceTerminated(_) => "ConvergenceTerminated",
             Self::TaskExecutionRecorded { .. } => "TaskExecutionRecorded",
             Self::SubtaskMergedToFeature { .. } => "SubtaskMergedToFeature",
             Self::AdapterIngestionCompleted { .. } => "AdapterIngestionCompleted",
@@ -1255,7 +1298,7 @@ impl EventPayload {
             Self::WorkflowPhaseReady { .. } => "WorkflowPhaseReady",
             Self::WorkflowCompleted { .. } => "WorkflowCompleted",
             Self::WorkflowVerificationRequested { .. } => "WorkflowVerificationRequested",
-            Self::WorkflowVerificationCompleted { .. } => "WorkflowVerificationCompleted",
+            Self::WorkflowVerificationCompleted(_) => "WorkflowVerificationCompleted",
             Self::WorkflowPhaseRetried { .. } => "WorkflowPhaseRetried",
             Self::WorkflowPhaseFailed { .. } => "WorkflowPhaseFailed",
             Self::FederationCerebrateConnected { .. } => "FederationCerebrateConnected",
@@ -1359,7 +1402,7 @@ impl EventPayload {
             | Self::AgentInstanceFailed { .. } => Some(EventCategory::Agent),
 
             Self::IntentVerificationStarted { .. }
-            | Self::IntentVerificationCompleted { .. }
+            | Self::IntentVerificationCompleted(_)
             | Self::IntentVerificationRequested { .. }
             | Self::WaveVerificationRequested { .. }
             | Self::WaveVerificationResult { .. }
@@ -1371,8 +1414,8 @@ impl EventPayload {
             | Self::TaskVerified { .. }
             | Self::IntentVerificationResult { .. } => Some(EventCategory::Verification),
 
-            Self::HumanEscalationRequired { .. }
-            | Self::HumanEscalationNeeded { .. }
+            Self::HumanEscalationRequired(_)
+            | Self::HumanEscalationNeeded(_)
             | Self::HumanResponseReceived { .. }
             | Self::HumanEscalationExpired { .. } => Some(EventCategory::Escalation),
 
@@ -1393,11 +1436,11 @@ impl EventPayload {
             | Self::ScheduledEventCanceled { .. } => Some(EventCategory::Scheduler),
 
             Self::ConvergenceStarted { .. }
-            | Self::ConvergenceIteration { .. }
+            | Self::ConvergenceIteration(_)
             | Self::ConvergenceAttractorTransition { .. }
             | Self::ConvergenceBudgetExtension { .. }
             | Self::ConvergenceFreshStart { .. }
-            | Self::ConvergenceTerminated { .. } => Some(EventCategory::Convergence),
+            | Self::ConvergenceTerminated(_) => Some(EventCategory::Convergence),
 
             Self::TaskExecutionRecorded { .. } => Some(EventCategory::Task),
 
@@ -1410,7 +1453,7 @@ impl EventPayload {
             | Self::WorkflowPhaseReady { .. }
             | Self::WorkflowCompleted { .. }
             | Self::WorkflowVerificationRequested { .. }
-            | Self::WorkflowVerificationCompleted { .. }
+            | Self::WorkflowVerificationCompleted(_)
             | Self::WorkflowPhaseRetried { .. }
             | Self::WorkflowPhaseFailed { .. } => Some(EventCategory::Workflow),
 
@@ -1420,8 +1463,9 @@ impl EventPayload {
             | Self::AdapterEgressFailed { .. }
             | Self::AdapterTaskIngested { .. } => Some(EventCategory::Adapter),
 
-            Self::BudgetPressureChanged { .. }
-            | Self::BudgetOpportunityDetected { .. } => Some(EventCategory::Budget),
+            Self::BudgetPressureChanged { .. } | Self::BudgetOpportunityDetected { .. } => {
+                Some(EventCategory::Budget)
+            }
 
             Self::FederationCerebrateConnected { .. }
             | Self::FederationCerebrateDisconnected { .. }
@@ -1445,8 +1489,9 @@ impl EventPayload {
             | Self::SwarmDagCompleted { .. } => Some(EventCategory::Federation),
 
             Self::SubsystemError { .. } => Some(EventCategory::Orchestrator),
-            Self::QuietWindowEntered { .. }
-            | Self::QuietWindowExited { .. } => Some(EventCategory::Scheduler),
+            Self::QuietWindowEntered { .. } | Self::QuietWindowExited { .. } => {
+                Some(EventCategory::Scheduler)
+            }
         }
     }
 }
@@ -1500,7 +1545,11 @@ impl From<TaskResult> for TaskResultPayload {
             error: result.error,
             duration_secs: result.duration_secs,
             retry_count: result.retry_count,
-            tokens_used: result.session.as_ref().map(|s| s.total_tokens()).unwrap_or(0),
+            tokens_used: result
+                .session
+                .as_ref()
+                .map(|s| s.total_tokens())
+                .unwrap_or(0),
         }
     }
 }
@@ -1600,19 +1649,31 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 EventPayload::GoalStarted { goal_id, goal_name },
             ),
-            SwarmEvent::GoalDecomposed { goal_id, task_count } => (
+            SwarmEvent::GoalDecomposed {
+                goal_id,
+                task_count,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Goal,
                 Some(goal_id),
                 None,
-                EventPayload::GoalDecomposed { goal_id, task_count },
+                EventPayload::GoalDecomposed {
+                    goal_id,
+                    task_count,
+                },
             ),
-            SwarmEvent::GoalIterationCompleted { goal_id, tasks_completed } => (
+            SwarmEvent::GoalIterationCompleted {
+                goal_id,
+                tasks_completed,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Goal,
                 Some(goal_id),
                 None,
-                EventPayload::GoalIterationCompleted { goal_id, tasks_completed },
+                EventPayload::GoalIterationCompleted {
+                    goal_id,
+                    tasks_completed,
+                },
             ),
             SwarmEvent::GoalPaused { goal_id, reason } => (
                 EventSeverity::Warning,
@@ -1621,68 +1682,142 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 EventPayload::GoalPaused { goal_id, reason },
             ),
-            SwarmEvent::ConvergenceCompleted { goal_id, converged, iterations, final_satisfaction } => (
+            SwarmEvent::ConvergenceCompleted {
+                goal_id,
+                converged,
+                iterations,
+                final_satisfaction,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Goal,
                 Some(goal_id),
                 None,
-                EventPayload::ConvergenceCompleted { goal_id, converged, iterations, final_satisfaction },
+                EventPayload::ConvergenceCompleted {
+                    goal_id,
+                    converged,
+                    iterations,
+                    final_satisfaction,
+                },
             ),
-            SwarmEvent::SemanticDriftDetected { goal_id, recurring_gaps, iterations } => (
+            SwarmEvent::SemanticDriftDetected {
+                goal_id,
+                recurring_gaps,
+                iterations,
+            } => (
                 EventSeverity::Warning,
                 EventCategory::Goal,
                 Some(goal_id),
                 None,
-                EventPayload::SemanticDriftDetected { goal_id, recurring_gaps, iterations },
+                EventPayload::SemanticDriftDetected {
+                    goal_id,
+                    recurring_gaps,
+                    iterations,
+                },
             ),
-            SwarmEvent::TaskSubmitted { task_id, task_title, goal_id } => (
+            SwarmEvent::TaskSubmitted {
+                task_id,
+                task_title,
+                goal_id,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 goal_id,
                 Some(task_id),
-                EventPayload::TaskSubmitted { task_id, task_title, goal_id },
+                EventPayload::TaskSubmitted {
+                    task_id,
+                    task_title,
+                    goal_id,
+                },
             ),
-            SwarmEvent::TaskReady { task_id, task_title } => (
+            SwarmEvent::TaskReady {
+                task_id,
+                task_title,
+            } => (
                 EventSeverity::Debug,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskReady { task_id, task_title },
+                EventPayload::TaskReady {
+                    task_id,
+                    task_title,
+                },
             ),
-            SwarmEvent::TaskSpawned { task_id, task_title, agent_type } => (
+            SwarmEvent::TaskSpawned {
+                task_id,
+                task_title,
+                agent_type,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskSpawned { task_id, task_title, agent_type },
+                EventPayload::TaskSpawned {
+                    task_id,
+                    task_title,
+                    agent_type,
+                },
             ),
-            SwarmEvent::TaskCompleted { task_id, tokens_used } => (
+            SwarmEvent::TaskCompleted {
+                task_id,
+                tokens_used,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskCompleted { task_id, tokens_used },
+                EventPayload::TaskCompleted {
+                    task_id,
+                    tokens_used,
+                },
             ),
-            SwarmEvent::TaskFailed { task_id, error, retry_count } => (
+            SwarmEvent::TaskFailed {
+                task_id,
+                error,
+                retry_count,
+            } => (
                 EventSeverity::Error,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskFailed { task_id, error, retry_count },
+                EventPayload::TaskFailed {
+                    task_id,
+                    error,
+                    retry_count,
+                },
             ),
-            SwarmEvent::TaskRetrying { task_id, attempt, max_attempts } => (
+            SwarmEvent::TaskRetrying {
+                task_id,
+                attempt,
+                max_attempts,
+            } => (
                 EventSeverity::Warning,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskRetrying { task_id, attempt, max_attempts },
+                EventPayload::TaskRetrying {
+                    task_id,
+                    attempt,
+                    max_attempts,
+                },
             ),
-            SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total, failures_summary } => (
+            SwarmEvent::TaskVerified {
+                task_id,
+                passed,
+                checks_passed,
+                checks_total,
+                failures_summary,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 Some(task_id),
-                EventPayload::TaskVerified { task_id, passed, checks_passed, checks_total, failures_summary },
+                EventPayload::TaskVerified {
+                    task_id,
+                    passed,
+                    checks_passed,
+                    checks_total,
+                    failures_summary,
+                },
             ),
             SwarmEvent::TaskQueuedForMerge { task_id, stage } => (
                 EventSeverity::Info,
@@ -1691,19 +1826,33 @@ impl From<SwarmEvent> for UnifiedEvent {
                 Some(task_id),
                 EventPayload::TaskQueuedForMerge { task_id, stage },
             ),
-            SwarmEvent::PullRequestCreated { task_id, pr_url, branch } => (
+            SwarmEvent::PullRequestCreated {
+                task_id,
+                pr_url,
+                branch,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::PullRequestCreated { task_id, pr_url, branch },
+                EventPayload::PullRequestCreated {
+                    task_id,
+                    pr_url,
+                    branch,
+                },
             ),
-            SwarmEvent::TaskMerged { task_id, commit_sha } => (
+            SwarmEvent::TaskMerged {
+                task_id,
+                commit_sha,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskMerged { task_id, commit_sha },
+                EventPayload::TaskMerged {
+                    task_id,
+                    commit_sha,
+                },
             ),
             SwarmEvent::WorktreeCreated { task_id, path } => (
                 EventSeverity::Debug,
@@ -1712,19 +1861,33 @@ impl From<SwarmEvent> for UnifiedEvent {
                 Some(task_id),
                 EventPayload::WorktreeCreated { task_id, path },
             ),
-            SwarmEvent::TaskClaimed { task_id, agent_type } => (
+            SwarmEvent::TaskClaimed {
+                task_id,
+                agent_type,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskClaimed { task_id, agent_type },
+                EventPayload::TaskClaimed {
+                    task_id,
+                    agent_type,
+                },
             ),
-            SwarmEvent::AgentInstanceCompleted { instance_id, task_id, tokens_used } => (
+            SwarmEvent::AgentInstanceCompleted {
+                instance_id,
+                task_id,
+                tokens_used,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Agent,
                 None,
                 Some(task_id),
-                EventPayload::AgentInstanceCompleted { instance_id, task_id, tokens_used },
+                EventPayload::AgentInstanceCompleted {
+                    instance_id,
+                    task_id,
+                    tokens_used,
+                },
             ),
             SwarmEvent::ReconciliationCompleted { corrections_made } => (
                 EventSeverity::Debug,
@@ -1733,19 +1896,33 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 EventPayload::ReconciliationCompleted { corrections_made },
             ),
-            SwarmEvent::EvolutionTriggered { template_name, trigger } => (
+            SwarmEvent::EvolutionTriggered {
+                template_name,
+                trigger,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Agent,
                 None,
                 None,
-                EventPayload::EvolutionTriggered { template_name, trigger },
+                EventPayload::EvolutionTriggered {
+                    template_name,
+                    trigger,
+                },
             ),
-            SwarmEvent::SpecialistSpawned { specialist_type, trigger, task_id } => (
+            SwarmEvent::SpecialistSpawned {
+                specialist_type,
+                trigger,
+                task_id,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Agent,
                 None,
                 task_id,
-                EventPayload::SpecialistSpawned { specialist_type, trigger, task_id },
+                EventPayload::SpecialistSpawned {
+                    specialist_type,
+                    trigger,
+                    task_id,
+                },
             ),
             SwarmEvent::AgentCreated { agent_type, tier } => (
                 EventSeverity::Info,
@@ -1754,12 +1931,20 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 EventPayload::AgentCreated { agent_type, tier },
             ),
-            SwarmEvent::GoalAlignmentEvaluated { task_id, overall_score, passes } => (
+            SwarmEvent::GoalAlignmentEvaluated {
+                task_id,
+                overall_score,
+                passes,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 Some(task_id),
-                EventPayload::GoalAlignmentEvaluated { task_id, overall_score, passes },
+                EventPayload::GoalAlignmentEvaluated {
+                    task_id,
+                    overall_score,
+                    passes,
+                },
             ),
             SwarmEvent::RestructureTriggered { task_id, decision } => (
                 EventSeverity::Warning,
@@ -1768,12 +1953,22 @@ impl From<SwarmEvent> for UnifiedEvent {
                 Some(task_id),
                 EventPayload::RestructureTriggered { task_id, decision },
             ),
-            SwarmEvent::SpawnLimitExceeded { parent_task_id, limit_type, current_value, limit_value } => (
+            SwarmEvent::SpawnLimitExceeded {
+                parent_task_id,
+                limit_type,
+                current_value,
+                limit_value,
+            } => (
                 EventSeverity::Warning,
                 EventCategory::Agent,
                 None,
                 Some(parent_task_id),
-                EventPayload::SpawnLimitExceeded { parent_task_id, limit_type, current_value, limit_value },
+                EventPayload::SpawnLimitExceeded {
+                    parent_task_id,
+                    limit_type,
+                    current_value,
+                    limit_value,
+                },
             ),
             SwarmEvent::IntentVerificationStarted { goal_id, iteration } => (
                 EventSeverity::Info,
@@ -1782,125 +1977,271 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 EventPayload::IntentVerificationStarted { goal_id, iteration },
             ),
-            SwarmEvent::IntentVerificationCompleted { goal_id, satisfaction, confidence, gaps_count, iteration, will_retry } => (
+            SwarmEvent::IntentVerificationCompleted {
+                goal_id,
+                satisfaction,
+                confidence,
+                gaps_count,
+                iteration,
+                will_retry,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 Some(goal_id),
                 None,
-                EventPayload::IntentVerificationCompleted { goal_id, satisfaction, confidence, gaps_count, iteration, will_retry },
+                EventPayload::IntentVerificationCompleted(IntentVerificationCompletedPayload {
+                    goal_id,
+                    satisfaction,
+                    confidence,
+                    gaps_count,
+                    iteration,
+                    will_retry,
+                }),
             ),
-            SwarmEvent::BranchVerificationStarted { branch_task_ids, waiting_task_ids } => (
+            SwarmEvent::BranchVerificationStarted {
+                branch_task_ids,
+                waiting_task_ids,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 None,
-                EventPayload::BranchVerificationStarted { branch_task_ids, waiting_task_ids },
+                EventPayload::BranchVerificationStarted {
+                    branch_task_ids,
+                    waiting_task_ids,
+                },
             ),
-            SwarmEvent::BranchVerificationCompleted { branch_satisfied, dependents_can_proceed, gaps_count } => (
+            SwarmEvent::BranchVerificationCompleted {
+                branch_satisfied,
+                dependents_can_proceed,
+                gaps_count,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 None,
-                EventPayload::BranchVerificationCompleted { branch_satisfied, dependents_can_proceed, gaps_count },
+                EventPayload::BranchVerificationCompleted {
+                    branch_satisfied,
+                    dependents_can_proceed,
+                    gaps_count,
+                },
             ),
-            SwarmEvent::HumanEscalationRequired { goal_id, task_id, reason, urgency, questions, is_blocking } => (
-                if is_blocking { EventSeverity::Critical } else { EventSeverity::Warning },
+            SwarmEvent::HumanEscalationRequired {
+                goal_id,
+                task_id,
+                reason,
+                urgency,
+                questions,
+                is_blocking,
+            } => (
+                if is_blocking {
+                    EventSeverity::Critical
+                } else {
+                    EventSeverity::Warning
+                },
                 EventCategory::Escalation,
                 goal_id,
                 task_id,
-                EventPayload::HumanEscalationRequired { goal_id, task_id, reason, urgency, questions, is_blocking },
+                EventPayload::HumanEscalationRequired(HumanEscalationPayload {
+                    goal_id,
+                    task_id,
+                    reason,
+                    urgency,
+                    questions,
+                    is_blocking,
+                }),
             ),
-            SwarmEvent::HumanResponseReceived { escalation_id, decision, allows_continuation } => (
+            SwarmEvent::HumanResponseReceived {
+                escalation_id,
+                decision,
+                allows_continuation,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Escalation,
                 None,
                 None,
-                EventPayload::HumanResponseReceived { escalation_id, decision, allows_continuation },
+                EventPayload::HumanResponseReceived {
+                    escalation_id,
+                    decision,
+                    allows_continuation,
+                },
             ),
-            SwarmEvent::SubtaskMergedToFeature { task_id, feature_branch } => (
+            SwarmEvent::SubtaskMergedToFeature {
+                task_id,
+                feature_branch,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::SubtaskMergedToFeature { task_id, feature_branch },
+                EventPayload::SubtaskMergedToFeature {
+                    task_id,
+                    feature_branch,
+                },
             ),
             // Federation events
-            SwarmEvent::FederationCerebrateConnected { cerebrate_id, capabilities } => (
+            SwarmEvent::FederationCerebrateConnected {
+                cerebrate_id,
+                capabilities,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Federation,
                 None,
                 None,
-                EventPayload::FederationCerebrateConnected { cerebrate_id, capabilities },
+                EventPayload::FederationCerebrateConnected {
+                    cerebrate_id,
+                    capabilities,
+                },
             ),
-            SwarmEvent::FederationCerebrateDisconnected { cerebrate_id, reason } => (
+            SwarmEvent::FederationCerebrateDisconnected {
+                cerebrate_id,
+                reason,
+            } => (
                 EventSeverity::Warning,
                 EventCategory::Federation,
                 None,
                 None,
-                EventPayload::FederationCerebrateDisconnected { cerebrate_id, reason },
+                EventPayload::FederationCerebrateDisconnected {
+                    cerebrate_id,
+                    reason,
+                },
             ),
-            SwarmEvent::FederationTaskDelegated { task_id, cerebrate_id } => (
+            SwarmEvent::FederationTaskDelegated {
+                task_id,
+                cerebrate_id,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Federation,
                 None,
                 Some(task_id),
-                EventPayload::FederationTaskDelegated { task_id, cerebrate_id },
+                EventPayload::FederationTaskDelegated {
+                    task_id,
+                    cerebrate_id,
+                },
             ),
-            SwarmEvent::FederationTaskAccepted { task_id, cerebrate_id } => (
+            SwarmEvent::FederationTaskAccepted {
+                task_id,
+                cerebrate_id,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Federation,
                 None,
                 Some(task_id),
-                EventPayload::FederationTaskAccepted { task_id, cerebrate_id },
+                EventPayload::FederationTaskAccepted {
+                    task_id,
+                    cerebrate_id,
+                },
             ),
-            SwarmEvent::FederationTaskRejected { task_id, cerebrate_id, reason } => (
+            SwarmEvent::FederationTaskRejected {
+                task_id,
+                cerebrate_id,
+                reason,
+            } => (
                 EventSeverity::Warning,
                 EventCategory::Federation,
                 None,
                 Some(task_id),
-                EventPayload::FederationTaskRejected { task_id, cerebrate_id, reason },
+                EventPayload::FederationTaskRejected {
+                    task_id,
+                    cerebrate_id,
+                    reason,
+                },
             ),
-            SwarmEvent::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary } => (
+            SwarmEvent::FederationProgressReceived {
+                task_id,
+                cerebrate_id,
+                phase,
+                progress_pct,
+                summary,
+            } => (
                 EventSeverity::Debug,
                 EventCategory::Federation,
                 None,
                 Some(task_id),
-                EventPayload::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary },
+                EventPayload::FederationProgressReceived {
+                    task_id,
+                    cerebrate_id,
+                    phase,
+                    progress_pct,
+                    summary,
+                },
             ),
-            SwarmEvent::FederationResultReceived { task_id, cerebrate_id, status, summary, artifacts } => (
+            SwarmEvent::FederationResultReceived {
+                task_id,
+                cerebrate_id,
+                status,
+                summary,
+                artifacts,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Federation,
                 None,
                 Some(task_id),
-                EventPayload::FederationResultReceived { task_id, cerebrate_id, status, summary, artifacts },
+                EventPayload::FederationResultReceived {
+                    task_id,
+                    cerebrate_id,
+                    status,
+                    summary,
+                    artifacts,
+                },
             ),
-            SwarmEvent::FederationHeartbeatMissed { cerebrate_id, missed_count } => (
+            SwarmEvent::FederationHeartbeatMissed {
+                cerebrate_id,
+                missed_count,
+            } => (
                 EventSeverity::Warning,
                 EventCategory::Federation,
                 None,
                 None,
-                EventPayload::FederationHeartbeatMissed { cerebrate_id, missed_count },
+                EventPayload::FederationHeartbeatMissed {
+                    cerebrate_id,
+                    missed_count,
+                },
             ),
-            SwarmEvent::FederationCerebrateUnreachable { cerebrate_id, in_flight_tasks } => (
+            SwarmEvent::FederationCerebrateUnreachable {
+                cerebrate_id,
+                in_flight_tasks,
+            } => (
                 EventSeverity::Error,
                 EventCategory::Federation,
                 None,
                 None,
-                EventPayload::FederationCerebrateUnreachable { cerebrate_id, in_flight_tasks },
+                EventPayload::FederationCerebrateUnreachable {
+                    cerebrate_id,
+                    in_flight_tasks,
+                },
             ),
-            SwarmEvent::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs } => (
+            SwarmEvent::FederationStallDetected {
+                task_id,
+                cerebrate_id,
+                stall_duration_secs,
+            } => (
                 EventSeverity::Warning,
                 EventCategory::Federation,
                 None,
                 Some(task_id),
-                EventPayload::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs },
+                EventPayload::FederationStallDetected {
+                    task_id,
+                    cerebrate_id,
+                    stall_duration_secs,
+                },
             ),
-            SwarmEvent::FederationReactionEmitted { reaction_type, description, goal_id, task_id } => (
+            SwarmEvent::FederationReactionEmitted {
+                reaction_type,
+                description,
+                goal_id,
+                task_id,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Federation,
                 goal_id,
                 task_id,
-                EventPayload::FederationReactionEmitted { reaction_type, description, goal_id, task_id },
+                EventPayload::FederationReactionEmitted {
+                    reaction_type,
+                    description,
+                    goal_id,
+                    task_id,
+                },
             ),
         };
 
@@ -1923,15 +2264,25 @@ impl From<SwarmEvent> for UnifiedEvent {
 impl From<ExecutionEvent> for UnifiedEvent {
     fn from(event: ExecutionEvent) -> Self {
         let (severity, category, goal_id, task_id, payload) = match event {
-            ExecutionEvent::Started { total_tasks, wave_count } => (
+            ExecutionEvent::Started {
+                total_tasks,
+                wave_count,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Execution,
                 None,
                 None,
-                EventPayload::ExecutionStarted { total_tasks, wave_count },
+                EventPayload::ExecutionStarted {
+                    total_tasks,
+                    wave_count,
+                },
             ),
             ExecutionEvent::Completed { status, results } => (
-                if matches!(status, ExecutionStatus::Failed) { EventSeverity::Error } else { EventSeverity::Info },
+                if matches!(status, ExecutionStatus::Failed) {
+                    EventSeverity::Error
+                } else {
+                    EventSeverity::Info
+                },
                 EventCategory::Execution,
                 None,
                 None,
@@ -1940,47 +2291,90 @@ impl From<ExecutionEvent> for UnifiedEvent {
                     results: results.into(),
                 },
             ),
-            ExecutionEvent::WaveStarted { wave_number, task_count } => (
+            ExecutionEvent::WaveStarted {
+                wave_number,
+                task_count,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Execution,
                 None,
                 None,
-                EventPayload::WaveStarted { wave_number, task_count },
+                EventPayload::WaveStarted {
+                    wave_number,
+                    task_count,
+                },
             ),
-            ExecutionEvent::WaveCompleted { wave_number, succeeded, failed } => (
-                if failed > 0 { EventSeverity::Warning } else { EventSeverity::Info },
+            ExecutionEvent::WaveCompleted {
+                wave_number,
+                succeeded,
+                failed,
+            } => (
+                if failed > 0 {
+                    EventSeverity::Warning
+                } else {
+                    EventSeverity::Info
+                },
                 EventCategory::Execution,
                 None,
                 None,
-                EventPayload::WaveCompleted { wave_number, succeeded, failed },
+                EventPayload::WaveCompleted {
+                    wave_number,
+                    succeeded,
+                    failed,
+                },
             ),
-            ExecutionEvent::TaskStarted { task_id, task_title } => (
+            ExecutionEvent::TaskStarted {
+                task_id,
+                task_title,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskStarted { task_id, task_title },
+                EventPayload::TaskStarted {
+                    task_id,
+                    task_title,
+                },
             ),
             ExecutionEvent::TaskCompleted { task_id, result } => (
                 EventSeverity::Info,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskCompletedWithResult { task_id, result: result.into() },
+                EventPayload::TaskCompletedWithResult {
+                    task_id,
+                    result: result.into(),
+                },
             ),
-            ExecutionEvent::TaskFailed { task_id, error, retry_count } => (
+            ExecutionEvent::TaskFailed {
+                task_id,
+                error,
+                retry_count,
+            } => (
                 EventSeverity::Error,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskFailed { task_id, error, retry_count },
+                EventPayload::TaskFailed {
+                    task_id,
+                    error,
+                    retry_count,
+                },
             ),
-            ExecutionEvent::TaskRetrying { task_id, attempt, max_attempts } => (
+            ExecutionEvent::TaskRetrying {
+                task_id,
+                attempt,
+                max_attempts,
+            } => (
                 EventSeverity::Warning,
                 EventCategory::Task,
                 None,
                 Some(task_id),
-                EventPayload::TaskRetrying { task_id, attempt, max_attempts },
+                EventPayload::TaskRetrying {
+                    task_id,
+                    attempt,
+                    max_attempts,
+                },
             ),
             ExecutionEvent::RestructureDecision { task_id, decision } => (
                 EventSeverity::Warning,
@@ -1989,54 +2383,126 @@ impl From<ExecutionEvent> for UnifiedEvent {
                 Some(task_id),
                 EventPayload::RestructureDecision { task_id, decision },
             ),
-            ExecutionEvent::IntentVerificationRequested { goal_id, completed_task_ids } => (
+            ExecutionEvent::IntentVerificationRequested {
+                goal_id,
+                completed_task_ids,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 goal_id,
                 None,
-                EventPayload::IntentVerificationRequested { goal_id, completed_task_ids },
+                EventPayload::IntentVerificationRequested {
+                    goal_id,
+                    completed_task_ids,
+                },
             ),
-            ExecutionEvent::IntentVerificationResult { satisfaction, confidence, gaps_count, iteration, should_continue } => (
+            ExecutionEvent::IntentVerificationResult {
+                satisfaction,
+                confidence,
+                gaps_count,
+                iteration,
+                should_continue,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 None,
-                EventPayload::IntentVerificationResult { satisfaction, confidence, gaps_count, iteration, should_continue },
+                EventPayload::IntentVerificationResult {
+                    satisfaction,
+                    confidence,
+                    gaps_count,
+                    iteration,
+                    should_continue,
+                },
             ),
-            ExecutionEvent::WaveVerificationRequested { wave_number, completed_task_ids, goal_id } => (
+            ExecutionEvent::WaveVerificationRequested {
+                wave_number,
+                completed_task_ids,
+                goal_id,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 goal_id,
                 None,
-                EventPayload::WaveVerificationRequested { wave_number, completed_task_ids, goal_id },
+                EventPayload::WaveVerificationRequested {
+                    wave_number,
+                    completed_task_ids,
+                    goal_id,
+                },
             ),
-            ExecutionEvent::WaveVerificationResult { wave_number, satisfaction, confidence, gaps_count } => (
+            ExecutionEvent::WaveVerificationResult {
+                wave_number,
+                satisfaction,
+                confidence,
+                gaps_count,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 None,
-                EventPayload::WaveVerificationResult { wave_number, satisfaction, confidence, gaps_count },
+                EventPayload::WaveVerificationResult {
+                    wave_number,
+                    satisfaction,
+                    confidence,
+                    gaps_count,
+                },
             ),
-            ExecutionEvent::BranchVerificationRequested { branch_task_ids, waiting_task_ids, branch_objective } => (
+            ExecutionEvent::BranchVerificationRequested {
+                branch_task_ids,
+                waiting_task_ids,
+                branch_objective,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 None,
-                EventPayload::BranchVerificationRequested { branch_task_ids, waiting_task_ids, branch_objective },
+                EventPayload::BranchVerificationRequested {
+                    branch_task_ids,
+                    waiting_task_ids,
+                    branch_objective,
+                },
             ),
-            ExecutionEvent::BranchVerificationResult { branch_satisfied, confidence, gaps_count, dependents_can_proceed } => (
+            ExecutionEvent::BranchVerificationResult {
+                branch_satisfied,
+                confidence,
+                gaps_count,
+                dependents_can_proceed,
+            } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 None,
-                EventPayload::BranchVerificationResult { branch_satisfied, confidence, gaps_count, dependents_can_proceed },
+                EventPayload::BranchVerificationResult {
+                    branch_satisfied,
+                    confidence,
+                    gaps_count,
+                    dependents_can_proceed,
+                },
             ),
-            ExecutionEvent::HumanEscalationNeeded { goal_id, task_id, reason, urgency, questions, is_blocking } => (
-                if is_blocking { EventSeverity::Critical } else { EventSeverity::Warning },
+            ExecutionEvent::HumanEscalationNeeded {
+                goal_id,
+                task_id,
+                reason,
+                urgency,
+                questions,
+                is_blocking,
+            } => (
+                if is_blocking {
+                    EventSeverity::Critical
+                } else {
+                    EventSeverity::Warning
+                },
                 EventCategory::Escalation,
                 goal_id,
                 task_id,
-                EventPayload::HumanEscalationNeeded { goal_id, task_id, reason, urgency, questions, is_blocking },
+                EventPayload::HumanEscalationNeeded(HumanEscalationPayload {
+                    goal_id,
+                    task_id,
+                    reason,
+                    urgency,
+                    questions,
+                    is_blocking,
+                }),
             ),
         };
 
@@ -2132,9 +2598,12 @@ impl EventBus {
         #[cfg(debug_assertions)]
         if let Some(expected) = event.payload.expected_category() {
             debug_assert_eq!(
-                event.category, expected,
+                event.category,
+                expected,
                 "EventBus: category mismatch for payload {}: expected {:?}, got {:?}",
-                event.payload.variant_name(), expected, event.category
+                event.payload.variant_name(),
+                expected,
+                event.category
             );
         }
 
@@ -2143,7 +2612,9 @@ impl EventBus {
             if event.category != expected {
                 tracing::warn!(
                     "EventBus: category mismatch for payload {}: expected {:?}, got {:?}",
-                    event.payload.variant_name(), expected, event.category
+                    event.payload.variant_name(),
+                    expected,
+                    event.category
                 );
             }
         }
@@ -2151,41 +2622,39 @@ impl EventBus {
         // Determine whether to persist: always persist Task and Workflow category
         // events (state-bearing, loss causes correctness issues), otherwise honor config.
         let should_persist = self.config.persist_events
-            || matches!(event.category, EventCategory::Task | EventCategory::Workflow);
+            || matches!(
+                event.category,
+                EventCategory::Task | EventCategory::Workflow
+            );
 
         if should_persist
             && let Some(ref store) = self.store
-                && let Err(e) = store.append(&event).await {
-                    let err_msg = e.to_string();
-                    if err_msg.contains("UNIQUE constraint failed: events.sequence") {
-                        // Sequence collision with another process — re-sync counter and retry
-                        if let Ok(Some(latest)) = store.latest_sequence().await {
-                            let new_seq = latest.0 + 1;
-                            self.sequence.store(new_seq + 1, Ordering::SeqCst);
-                            event.sequence = SequenceNumber(new_seq);
-                            if let Err(e2) = store.append(&event).await {
-                                tracing::warn!("Failed to persist event after sequence re-sync: {}", e2);
-                            }
-                        }
-                    } else {
-                        tracing::warn!("Failed to persist event: {}", e);
+            && let Err(e) = store.append(&event).await
+        {
+            let err_msg = e.to_string();
+            if err_msg.contains("UNIQUE constraint failed: events.sequence") {
+                // Sequence collision with another process — re-sync counter and retry
+                if let Ok(Some(latest)) = store.latest_sequence().await {
+                    let new_seq = latest.0 + 1;
+                    self.sequence.store(new_seq + 1, Ordering::SeqCst);
+                    event.sequence = SequenceNumber(new_seq);
+                    if let Err(e2) = store.append(&event).await {
+                        tracing::warn!("Failed to persist event after sequence re-sync: {}", e2);
                     }
                 }
+            } else {
+                tracing::warn!("Failed to persist event: {}", e);
+            }
+        }
 
         // Broadcast to subscribers, tracking drops
         if let Err(e) = self.sender.send(event) {
             self.dropped_count.fetch_add(1, Ordering::Relaxed);
             if self.sender.receiver_count() == 0 {
                 // No receivers is normal in CLI mode — log at debug, not warn
-                tracing::debug!(
-                    "EventBus: dropped event (no receivers): {}",
-                    e
-                );
+                tracing::debug!("EventBus: dropped event (no receivers): {}", e);
             } else {
-                tracing::warn!(
-                    "EventBus: dropped event (receivers lagged): {}",
-                    e
-                );
+                tracing::warn!("EventBus: dropped event (receivers lagged): {}", e);
             }
         }
     }
@@ -2262,7 +2731,10 @@ impl EventBus {
             match store.latest_sequence().await {
                 Ok(Some(latest)) => {
                     self.sequence.store(latest.0 + 1, Ordering::SeqCst);
-                    tracing::info!("EventBus: initialized sequence from store at {}", latest.0 + 1);
+                    tracing::info!(
+                        "EventBus: initialized sequence from store at {}",
+                        latest.0 + 1
+                    );
                 }
                 Ok(None) => {
                     // Empty store, start from 0
@@ -2372,7 +2844,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_events_persist_regardless_of_config() {
-        use crate::services::event_store::{EventStoreError, EventQuery};
+        use crate::services::event_store::{EventQuery, EventStoreError};
 
         // Minimal in-memory event store that records whether append was called
         struct TrackingStore {
@@ -2381,7 +2853,9 @@ mod tests {
 
         impl TrackingStore {
             fn new() -> Self {
-                Self { appended: std::sync::Mutex::new(Vec::new()) }
+                Self {
+                    appended: std::sync::Mutex::new(Vec::new()),
+                }
             }
         }
 
@@ -2391,7 +2865,10 @@ mod tests {
                 self.appended.lock().unwrap().push(event.category);
                 Ok(())
             }
-            async fn query(&self, _query: EventQuery) -> Result<Vec<UnifiedEvent>, EventStoreError> {
+            async fn query(
+                &self,
+                _query: EventQuery,
+            ) -> Result<Vec<UnifiedEvent>, EventStoreError> {
                 Ok(vec![])
             }
             async fn latest_sequence(&self) -> Result<Option<SequenceNumber>, EventStoreError> {
@@ -2400,7 +2877,10 @@ mod tests {
             async fn count(&self) -> Result<u64, EventStoreError> {
                 Ok(0)
             }
-            async fn prune_older_than(&self, _duration: std::time::Duration) -> Result<u64, EventStoreError> {
+            async fn prune_older_than(
+                &self,
+                _duration: std::time::Duration,
+            ) -> Result<u64, EventStoreError> {
                 Ok(0)
             }
         }
@@ -2411,7 +2891,8 @@ mod tests {
         let bus = EventBus::new(EventBusConfig {
             channel_capacity: 16,
             persist_events: false,
-        }).with_store(store.clone());
+        })
+        .with_store(store.clone());
 
         let _rx = bus.subscribe(); // Need a subscriber so events don't get dropped
 
@@ -2457,7 +2938,10 @@ mod tests {
             subsystem: "drain_ready_tasks".into(),
             error: "connection lost".into(),
         };
-        assert_eq!(payload.expected_category(), Some(EventCategory::Orchestrator));
+        assert_eq!(
+            payload.expected_category(),
+            Some(EventCategory::Orchestrator)
+        );
     }
 
     #[tokio::test]

@@ -670,13 +670,19 @@ pub enum RootCauseCategory {
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryAction {
     /// Retry with a different approach.
-    RetryDifferentApproach { approach: String, agent_type: Option<String> },
+    RetryDifferentApproach {
+        approach: String,
+        agent_type: Option<String>,
+    },
     /// Decompose the task differently.
     Redecompose,
     /// Research the problem first.
     ResearchFirst { research_questions: Vec<String> },
     /// Wait for external condition.
-    WaitFor { condition: String, check_interval_mins: u32 },
+    WaitFor {
+        condition: String,
+        check_interval_mins: u32,
+    },
     /// Escalate to human.
     Escalate { reason: String },
     /// Accept failure and move on.

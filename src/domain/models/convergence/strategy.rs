@@ -41,6 +41,11 @@ pub const STRATEGY_SUCCESS_THRESHOLD: f64 = 0.1;
 /// contribution is negligible and rotation should be considered.
 pub const MINIMUM_USEFUL_PROGRESS: f64 = 0.05;
 
+// Compile-time consistency checks for the threshold constants.
+const _: () = assert!(STRATEGY_SUCCESS_THRESHOLD > 0.0);
+const _: () = assert!(MINIMUM_USEFUL_PROGRESS > 0.0);
+const _: () = assert!(STRATEGY_SUCCESS_THRESHOLD > MINIMUM_USEFUL_PROGRESS);
+
 // ---------------------------------------------------------------------------
 // StrategyKind
 // ---------------------------------------------------------------------------
@@ -423,12 +428,7 @@ impl StrategyBandit {
     ///
     /// Positive `delta` increases alpha (encourages); negative increases
     /// beta (discourages).
-    pub fn nudge(
-        &mut self,
-        attractor_name: &str,
-        strategy_name: &str,
-        delta: f64,
-    ) {
+    pub fn nudge(&mut self, attractor_name: &str, strategy_name: &str, delta: f64) {
         let dist = self
             .context_arms
             .entry(attractor_name.to_string())
@@ -498,8 +498,7 @@ pub fn eligible_strategies(
         AttractorType::LimitCycle { period, .. } => {
             let window = (*period as usize) * 2;
             let recent_start = strategy_log.len().saturating_sub(window);
-            let used_recently: std::collections::HashSet<&str> = strategy_log
-                [recent_start..]
+            let used_recently: std::collections::HashSet<&str> = strategy_log[recent_start..]
                 .iter()
                 .map(|e| e.strategy_kind.kind_name())
                 .collect();
@@ -516,9 +515,7 @@ pub fn eligible_strategies(
 
             if cands.is_empty() {
                 for fb in [StrategyKind::ArchitectReview, StrategyKind::Decompose] {
-                    if !used_recently.contains(fb.kind_name())
-                        && budget.allows_strategy_cost(&fb)
-                    {
+                    if !used_recently.contains(fb.kind_name()) && budget.allows_strategy_cost(&fb) {
                         cands.push(fb);
                     }
                 }
@@ -531,9 +528,7 @@ pub fn eligible_strategies(
         // Divergent: moving away from the target. Strategy depends on
         // the probable cause.
         // -----------------------------------------------------------
-        AttractorType::Divergent {
-            probable_cause, ..
-        } => match probable_cause {
+        AttractorType::Divergent { probable_cause, .. } => match probable_cause {
             DivergenceCause::SpecificationAmbiguity => {
                 vec![StrategyKind::ArchitectReview, StrategyKind::Reframe]
             }
@@ -545,7 +540,9 @@ pub fn eligible_strategies(
                 // The actual observation UUID is resolved by the convergence engine
                 // using the sequence number; we use a nil placeholder here.
                 let _best_seq = best_observation_sequence(strategy_log);
-                vec![StrategyKind::RevertAndBranch { target: Uuid::nil() }]
+                vec![StrategyKind::RevertAndBranch {
+                    target: Uuid::nil(),
+                }]
             }
             DivergenceCause::Unknown => {
                 vec![StrategyKind::Reframe, StrategyKind::AlternativeApproach]
@@ -874,13 +871,19 @@ mod tests {
         let before = names.len();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), before, "strategy kind_name values must be unique");
+        assert_eq!(
+            names.len(),
+            before,
+            "strategy kind_name values must be unique"
+        );
     }
 
     #[test]
     fn test_estimated_cost_ordering() {
         // FocusedRepair should be cheapest.
-        assert!(StrategyKind::FocusedRepair.estimated_cost() < StrategyKind::Decompose.estimated_cost());
+        assert!(
+            StrategyKind::FocusedRepair.estimated_cost() < StrategyKind::Decompose.estimated_cost()
+        );
     }
 
     #[test]
@@ -902,14 +905,6 @@ mod tests {
     fn test_beta_distribution_mean() {
         let d = BetaDistribution::new(3.0, 1.0);
         assert!((d.mean() - 0.75).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_strategy_outcome_thresholds() {
-        // Verify the threshold constants are consistent.
-        assert!(STRATEGY_SUCCESS_THRESHOLD > 0.0);
-        assert!(MINIMUM_USEFUL_PROGRESS > 0.0);
-        assert!(STRATEGY_SUCCESS_THRESHOLD > MINIMUM_USEFUL_PROGRESS);
     }
 
     #[test]
@@ -1057,9 +1052,7 @@ mod tests {
     fn test_limit_cycle_filters_recently_used() {
         let attractor = make_limit_cycle_attractor(2);
         // Window = period * 2 = 4. Put Reframe in the window.
-        let log = vec![
-            make_strategy_entry(StrategyKind::Reframe, 1),
-        ];
+        let log = vec![make_strategy_entry(StrategyKind::Reframe, 1)];
         let budget = generous_budget();
 
         let cands = eligible_strategies(&log, &attractor, &budget, 0, 3);
@@ -1213,7 +1206,11 @@ mod tests {
         assert!(has_kind(&cands, "incremental_refinement"));
         // No exploration strategies
         for s in &cands {
-            assert!(s.is_exploitation(), "near-convergence FixedPoint should only return exploitation, got: {}", s.kind_name());
+            assert!(
+                s.is_exploitation(),
+                "near-convergence FixedPoint should only return exploitation, got: {}",
+                s.kind_name()
+            );
         }
     }
 

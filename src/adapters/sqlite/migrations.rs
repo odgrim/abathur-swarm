@@ -6,7 +6,11 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum MigrationError {
     #[error("Failed to execute migration {version}: {source}")]
-    ExecutionError { version: i64, #[source] source: sqlx::Error },
+    ExecutionError {
+        version: i64,
+        #[source]
+        source: sqlx::Error,
+    },
     #[error("Failed to get schema version: {0}")]
     VersionCheckError(#[source] sqlx::Error),
 }
@@ -27,10 +31,16 @@ impl Migrator {
         Self { pool }
     }
 
-    pub async fn run_embedded_migrations(&self, migrations: Vec<Migration>) -> Result<usize, MigrationError> {
+    pub async fn run_embedded_migrations(
+        &self,
+        migrations: Vec<Migration>,
+    ) -> Result<usize, MigrationError> {
         self.ensure_migrations_table().await?;
         let current_version = self.get_current_version().await?;
-        let pending: Vec<_> = migrations.into_iter().filter(|m| m.version > current_version).collect();
+        let pending: Vec<_> = migrations
+            .into_iter()
+            .filter(|m| m.version > current_version)
+            .collect();
 
         if pending.is_empty() {
             return Ok(0);
@@ -49,19 +59,23 @@ impl Migrator {
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT (datetime('now')),
                 description TEXT
-            )"
+            )",
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| MigrationError::ExecutionError { version: 0, source: e })?;
+        .map_err(|e| MigrationError::ExecutionError {
+            version: 0,
+            source: e,
+        })?;
         Ok(())
     }
 
     pub async fn get_current_version(&self) -> Result<i64, MigrationError> {
-        let result: Option<(i64,)> = sqlx::query_as("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(MigrationError::VersionCheckError)?;
+        let result: Option<(i64,)> =
+            sqlx::query_as("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(MigrationError::VersionCheckError)?;
         Ok(result.map(|(v,)| v).unwrap_or(0))
     }
 
@@ -69,14 +83,20 @@ impl Migrator {
         sqlx::raw_sql(&migration.sql)
             .execute(&self.pool)
             .await
-            .map_err(|e| MigrationError::ExecutionError { version: migration.version, source: e })?;
+            .map_err(|e| MigrationError::ExecutionError {
+                version: migration.version,
+                source: e,
+            })?;
 
         sqlx::query("INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)")
             .bind(migration.version)
             .bind(&migration.description)
             .execute(&self.pool)
             .await
-            .map_err(|e| MigrationError::ExecutionError { version: migration.version, source: e })?;
+            .map_err(|e| MigrationError::ExecutionError {
+                version: migration.version,
+                source: e,
+            })?;
 
         Ok(())
     }

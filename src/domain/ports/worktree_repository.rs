@@ -37,5 +37,6 @@ pub trait WorktreeRepository: Send + Sync {
     async fn list_for_cleanup(&self) -> DomainResult<Vec<Worktree>>;
 
     /// Count worktrees by status.
-    async fn count_by_status(&self) -> DomainResult<std::collections::HashMap<WorktreeStatus, u64>>;
+    async fn count_by_status(&self)
+    -> DomainResult<std::collections::HashMap<WorktreeStatus, u64>>;
 }

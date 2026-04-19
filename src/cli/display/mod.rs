@@ -44,4 +44,3 @@ pub fn action_failure(message: &str) -> String {
     use colored::Colorize;
     format!("{} {}", "\u{2717}".red().bold(), message)
 }
-

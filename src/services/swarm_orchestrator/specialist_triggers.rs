@@ -9,16 +9,20 @@ use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{Task, TaskPriority, TaskSource, TaskStatus};
-use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{
+    AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
+};
 use crate::services::{
-    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
+    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, IntegrationVerifierService,
+    MergeQueue, MergeQueueConfig, VerifierConfig,
     command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
-    dag_restructure::{RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier},
+    dag_restructure::{
+        RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier,
+    },
 };
 
-use super::types::SwarmEvent;
 use super::SwarmOrchestrator;
+use super::types::SwarmEvent;
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
 where
@@ -34,7 +38,10 @@ where
     /// - DAG restructuring for recoverable failures -> New decomposition/alternative path
     /// - Merge conflicts -> Merge Conflict Specialist
     /// - Persistent failures (max retries exceeded, restructuring exhausted) -> Diagnostic Analyst
-    pub(super) async fn process_specialist_triggers(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+    pub(super) async fn process_specialist_triggers(
+        &self,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
         // Check for persistent failures that need restructuring or diagnostic analysis
         let failed_tasks = self.task_repo.list_by_status(TaskStatus::Failed).await?;
         let permanently_failed: Vec<_> = failed_tasks
@@ -55,16 +62,18 @@ where
                     // Restructuring not possible, fall through to diagnostic
                 }
                 Err(e) => {
-                    self.audit_log.log(
-                        AuditEntry::new(
-                            AuditLevel::Warning,
-                            AuditCategory::Task,
-                            AuditAction::TaskFailed,
-                            AuditActor::System,
-                            format!("Restructure attempt failed for task {}: {}", task.id, e),
+                    self.audit_log
+                        .log(
+                            AuditEntry::new(
+                                AuditLevel::Warning,
+                                AuditCategory::Task,
+                                AuditAction::TaskFailed,
+                                AuditActor::System,
+                                format!("Restructure attempt failed for task {}: {}", task.id, e),
+                            )
+                            .with_entity(task.id, "task"),
                         )
-                        .with_entity(task.id, "task"),
-                    ).await;
+                        .await;
                 }
             }
 
@@ -82,7 +91,8 @@ where
             ];
             let mut diagnostic_exists = false;
             for status in &statuses_to_check {
-                if self.task_repo
+                if self
+                    .task_repo
                     .list_by_status(*status)
                     .await?
                     .iter()
@@ -94,33 +104,40 @@ where
             }
 
             if !diagnostic_exists
-                && let Err(e) = self.spawn_specialist_for_failure(task, event_tx).await {
-                    self.audit_log.log(
+                && let Err(e) = self.spawn_specialist_for_failure(task, event_tx).await
+            {
+                self.audit_log
+                    .log(
                         AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::Agent,
                             AuditAction::AgentSpawned,
                             AuditActor::System,
-                            format!("Failed to spawn diagnostic specialist for task {}: {}", task.id, e),
+                            format!(
+                                "Failed to spawn diagnostic specialist for task {}: {}",
+                                task.id, e
+                            ),
                         )
                         .with_entity(task.id, "task"),
-                    ).await;
-                }
+                    )
+                    .await;
+            }
         }
 
         // Check for merge conflicts needing specialist resolution
         if self.config.use_merge_queue
-            && let Err(e) = self.process_merge_conflict_specialists(event_tx).await {
-                self.audit_log.log(
-                    AuditEntry::new(
-                        AuditLevel::Warning,
-                        AuditCategory::Agent,
-                        AuditAction::AgentSpawned,
-                        AuditActor::System,
-                        format!("Failed to process merge conflict specialists: {}", e),
-                    ),
-                ).await;
-            }
+            && let Err(e) = self.process_merge_conflict_specialists(event_tx).await
+        {
+            self.audit_log
+                .log(AuditEntry::new(
+                    AuditLevel::Warning,
+                    AuditCategory::Agent,
+                    AuditAction::AgentSpawned,
+                    AuditActor::System,
+                    format!("Failed to process merge conflict specialists: {}", e),
+                ))
+                .await;
+        }
 
         Ok(())
     }
@@ -167,31 +184,38 @@ where
         let decision = restructure_svc.analyze_and_decide(&context).await?;
 
         // Log the decision
-        self.audit_log.info(
-            AuditCategory::Task,
-            AuditAction::TaskCreated,
-            format!(
-                "DAG restructure decision for task {}: {:?}",
-                failed_task.id, decision
-            ),
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::Task,
+                AuditAction::TaskCreated,
+                format!(
+                    "DAG restructure decision for task {}: {:?}",
+                    failed_task.id, decision
+                ),
+            )
+            .await;
 
         // Emit event via EventBus (journaled)
-        self.event_bus.publish(crate::services::event_factory::make_event(
-            crate::services::event_bus::EventSeverity::Warning,
-            crate::services::event_bus::EventCategory::Execution,
-            None,
-            Some(failed_task.id),
-            crate::services::event_bus::EventPayload::RestructureTriggered {
-                task_id: failed_task.id,
-                decision: format!("{:?}", decision),
-            },
-        )).await;
+        self.event_bus
+            .publish(crate::services::event_factory::make_event(
+                crate::services::event_bus::EventSeverity::Warning,
+                crate::services::event_bus::EventCategory::Execution,
+                None,
+                Some(failed_task.id),
+                crate::services::event_bus::EventPayload::RestructureTriggered {
+                    task_id: failed_task.id,
+                    decision: format!("{:?}", decision),
+                },
+            ))
+            .await;
         // (Bridge forwards EventBus→event_tx automatically)
 
         // Apply the decision
         match decision {
-            RestructureDecision::RetryDifferentApproach { new_approach, new_agent_type } => {
+            RestructureDecision::RetryDifferentApproach {
+                new_approach,
+                new_agent_type,
+            } => {
                 // Update description directly (no command for description updates)
                 let mut updated_task = failed_task.clone();
                 updated_task.description = format!(
@@ -205,15 +229,20 @@ where
                 self.task_repo.update(&updated_task).await?;
 
                 // Emit description update event via EventBus
-                self.event_bus.publish(crate::services::event_factory::task_event(
-                    crate::services::event_bus::EventSeverity::Info,
-                    None,
-                    failed_task.id,
-                    crate::services::event_bus::EventPayload::TaskDescriptionUpdated {
-                        task_id: failed_task.id,
-                        reason: format!("DAG restructure: retry with different approach — {}", new_approach),
-                    },
-                )).await;
+                self.event_bus
+                    .publish(crate::services::event_factory::task_event(
+                        crate::services::event_bus::EventSeverity::Info,
+                        None,
+                        failed_task.id,
+                        crate::services::event_bus::EventPayload::TaskDescriptionUpdated {
+                            task_id: failed_task.id,
+                            reason: format!(
+                                "DAG restructure: retry with different approach — {}",
+                                new_approach
+                            ),
+                        },
+                    ))
+                    .await;
 
                 // Transition to Ready via CommandBus
                 if let Some(cb) = self.command_bus.read().await.as_ref() {
@@ -228,27 +257,48 @@ where
                 }
                 Ok(true)
             }
-            RestructureDecision::DecomposeDifferently { new_subtasks, remove_original } => {
-                self.create_restructure_subtasks(failed_task, &new_subtasks, remove_original, event_tx).await?;
+            RestructureDecision::DecomposeDifferently {
+                new_subtasks,
+                remove_original,
+            } => {
+                self.create_restructure_subtasks(
+                    failed_task,
+                    &new_subtasks,
+                    remove_original,
+                    event_tx,
+                )
+                .await?;
                 Ok(true)
             }
-            RestructureDecision::AlternativePath { description, new_tasks } => {
-                self.create_restructure_subtasks(failed_task, &new_tasks, false, event_tx).await?;
+            RestructureDecision::AlternativePath {
+                description,
+                new_tasks,
+            } => {
+                self.create_restructure_subtasks(failed_task, &new_tasks, false, event_tx)
+                    .await?;
 
-                self.audit_log.info(
-                    AuditCategory::Task,
-                    AuditAction::TaskCreated,
-                    format!("Created alternative path: {}", description),
-                ).await;
+                self.audit_log
+                    .info(
+                        AuditCategory::Task,
+                        AuditAction::TaskCreated,
+                        format!("Created alternative path: {}", description),
+                    )
+                    .await;
 
                 Ok(true)
             }
             RestructureDecision::WaitAndRetry { delay, reason } => {
-                self.audit_log.info(
-                    AuditCategory::Task,
-                    AuditAction::TaskFailed,
-                    format!("Restructure suggests waiting {} seconds: {}", delay.as_secs(), reason),
-                ).await;
+                self.audit_log
+                    .info(
+                        AuditCategory::Task,
+                        AuditAction::TaskFailed,
+                        format!(
+                            "Restructure suggests waiting {} seconds: {}",
+                            delay.as_secs(),
+                            reason
+                        ),
+                    )
+                    .await;
                 Ok(false)
             }
             RestructureDecision::Escalate { reason, context } => {
@@ -262,46 +312,59 @@ where
                         );
                         match federation.delegate_task(&peer.id, &task_desc).await {
                             Ok(a2a_task) => {
-                                self.audit_log.info(
-                                    AuditCategory::Task,
-                                    AuditAction::TaskCompleted,
-                                    format!(
-                                        "Task {} delegated to peer '{}' as A2A task {}",
-                                        failed_task.id, peer.name, a2a_task.id
-                                    ),
-                                ).await;
+                                self.audit_log
+                                    .info(
+                                        AuditCategory::Task,
+                                        AuditAction::TaskCompleted,
+                                        format!(
+                                            "Task {} delegated to peer '{}' as A2A task {}",
+                                            failed_task.id, peer.name, a2a_task.id
+                                        ),
+                                    )
+                                    .await;
                                 return Ok(true);
                             }
                             Err(e) => {
-                                tracing::warn!("Federation delegation to '{}' failed: {}", peer.name, e);
+                                tracing::warn!(
+                                    "Federation delegation to '{}' failed: {}",
+                                    peer.name,
+                                    e
+                                );
                             }
                         }
                     }
                 }
 
-                self.audit_log.log(
-                    AuditEntry::new(
-                        AuditLevel::Warning,
-                        AuditCategory::Task,
-                        AuditAction::TaskFailed,
-                        AuditActor::System,
-                        format!("Task {} escalated: {} - {}", failed_task.id, reason, context),
+                self.audit_log
+                    .log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Task,
+                            AuditAction::TaskFailed,
+                            AuditActor::System,
+                            format!(
+                                "Task {} escalated: {} - {}",
+                                failed_task.id, reason, context
+                            ),
+                        )
+                        .with_entity(failed_task.id, "task"),
                     )
-                    .with_entity(failed_task.id, "task"),
-                ).await;
+                    .await;
                 Ok(false)
             }
             RestructureDecision::AcceptFailure { reason } => {
-                self.audit_log.log(
-                    AuditEntry::new(
-                        AuditLevel::Error,
-                        AuditCategory::Task,
-                        AuditAction::TaskFailed,
-                        AuditActor::System,
-                        format!("Task {} failure accepted: {}", failed_task.id, reason),
+                self.audit_log
+                    .log(
+                        AuditEntry::new(
+                            AuditLevel::Error,
+                            AuditCategory::Task,
+                            AuditAction::TaskFailed,
+                            AuditActor::System,
+                            format!("Task {} failure accepted: {}", failed_task.id, reason),
+                        )
+                        .with_entity(failed_task.id, "task"),
                     )
-                    .with_entity(failed_task.id, "task"),
-                ).await;
+                    .await;
                 Ok(false)
             }
         }
@@ -359,15 +422,23 @@ where
                     Ok(other) => {
                         tracing::warn!(
                             "CommandBus returned unexpected result type for restructure subtask '{}': {:?}",
-                            spec.title, other
+                            spec.title,
+                            other
                         );
                     }
                     Err(e) => {
-                        tracing::warn!("CommandBus submit failed for restructure subtask '{}': {}", spec.title, e);
+                        tracing::warn!(
+                            "CommandBus submit failed for restructure subtask '{}': {}",
+                            spec.title,
+                            e
+                        );
                     }
                 }
             } else {
-                tracing::warn!("CommandBus not available — cannot create restructure subtask '{}'", spec.title);
+                tracing::warn!(
+                    "CommandBus not available — cannot create restructure subtask '{}'",
+                    spec.title
+                );
             }
         }
 
@@ -382,10 +453,17 @@ where
                     }),
                 );
                 if let Err(e) = cb.dispatch(envelope).await {
-                    tracing::warn!("CommandBus cancel failed for task {}: {}", failed_task.id, e);
+                    tracing::warn!(
+                        "CommandBus cancel failed for task {}: {}",
+                        failed_task.id,
+                        e
+                    );
                 }
             } else {
-                tracing::warn!("CommandBus not available — cannot cancel task {}", failed_task.id);
+                tracing::warn!(
+                    "CommandBus not available — cannot cancel task {}",
+                    failed_task.id
+                );
             }
         }
 
@@ -398,7 +476,10 @@ where
         failed_task: &Task,
         _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let title = format!("Diagnostic: Investigate failure of task {}", &failed_task.id.to_string()[..8]);
+        let title = format!(
+            "Diagnostic: Investigate failure of task {}",
+            &failed_task.id.to_string()[..8]
+        );
         let description = format!(
             "The following task has permanently failed after {} retries:\n\n\
             Title: {}\n\
@@ -409,9 +490,7 @@ where
             - Are there missing dependencies or prerequisites?\n\
             - Is the agent type appropriate for this task?\n\
             - Are there external blockers (permissions, resources, etc.)?",
-            failed_task.retry_count,
-            failed_task.title,
-            failed_task.description
+            failed_task.retry_count, failed_task.title, failed_task.description
         );
 
         // Submit diagnostic task via CommandBus (journals TaskSubmitted event)
@@ -436,7 +515,10 @@ where
             match cb.dispatch(envelope).await {
                 Ok(crate::services::command_bus::CommandResult::Task(task)) => task.id,
                 Ok(other) => {
-                    tracing::warn!("CommandBus returned unexpected result for diagnostic task: {:?}", other);
+                    tracing::warn!(
+                        "CommandBus returned unexpected result for diagnostic task: {:?}",
+                        other
+                    );
                     return Ok(());
                 }
                 Err(e) => {
@@ -445,30 +527,37 @@ where
                 }
             }
         } else {
-            tracing::warn!("CommandBus not available — cannot create diagnostic task for {}", failed_task.id);
+            tracing::warn!(
+                "CommandBus not available — cannot create diagnostic task for {}",
+                failed_task.id
+            );
             return Ok(());
         };
 
         // Publish specialist spawned event via EventBus
-        self.event_bus.publish(crate::services::event_factory::agent_event(
-            crate::services::event_bus::EventSeverity::Info,
-            Some(diagnostic_task_id),
-            crate::services::event_bus::EventPayload::SpecialistSpawned {
-                specialist_type: "diagnostic-analyst".to_string(),
-                trigger: format!("Task {} permanently failed", failed_task.id),
-                task_id: Some(diagnostic_task_id),
-            },
-        )).await;
+        self.event_bus
+            .publish(crate::services::event_factory::agent_event(
+                crate::services::event_bus::EventSeverity::Info,
+                Some(diagnostic_task_id),
+                crate::services::event_bus::EventPayload::SpecialistSpawned {
+                    specialist_type: "diagnostic-analyst".to_string(),
+                    trigger: format!("Task {} permanently failed", failed_task.id),
+                    task_id: Some(diagnostic_task_id),
+                },
+            ))
+            .await;
         // (Bridge forwards EventBus→event_tx automatically)
 
-        self.audit_log.info(
-            AuditCategory::Agent,
-            AuditAction::AgentSpawned,
-            format!(
-                "Spawned Diagnostic Analyst for permanently failed task {}",
-                failed_task.id
-            ),
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::Agent,
+                AuditAction::AgentSpawned,
+                format!(
+                    "Spawned Diagnostic Analyst for permanently failed task {}",
+                    failed_task.id
+                ),
+            )
+            .await;
 
         Ok(())
     }
@@ -505,12 +594,23 @@ where
         if depth >= spawn_limits.max_subtask_depth {
             if spawn_limits.allow_limit_extensions {
                 let id_prefix = &parent_task.id.to_string()[..8];
-                let specialist_exists = self.task_repo
+                let specialist_exists = self
+                    .task_repo
                     .list_by_status(TaskStatus::Ready)
                     .await?
                     .iter()
-                    .chain(self.task_repo.list_by_status(TaskStatus::Pending).await?.iter())
-                    .chain(self.task_repo.list_by_status(TaskStatus::Running).await?.iter())
+                    .chain(
+                        self.task_repo
+                            .list_by_status(TaskStatus::Pending)
+                            .await?
+                            .iter(),
+                    )
+                    .chain(
+                        self.task_repo
+                            .list_by_status(TaskStatus::Running)
+                            .await?
+                            .iter(),
+                    )
                     .any(|t| t.title.contains("Limit Evaluation:") && t.title.contains(id_prefix));
 
                 if !specialist_exists {
@@ -520,7 +620,8 @@ where
                         depth,
                         spawn_limits.max_subtask_depth,
                         event_tx,
-                    ).await?;
+                    )
+                    .await?;
                 }
             }
             return Ok(false);
@@ -532,12 +633,23 @@ where
         if direct_subtasks >= spawn_limits.max_subtasks_per_task {
             if spawn_limits.allow_limit_extensions {
                 let id_prefix = &parent_task.id.to_string()[..8];
-                let specialist_exists = self.task_repo
+                let specialist_exists = self
+                    .task_repo
                     .list_by_status(TaskStatus::Ready)
                     .await?
                     .iter()
-                    .chain(self.task_repo.list_by_status(TaskStatus::Pending).await?.iter())
-                    .chain(self.task_repo.list_by_status(TaskStatus::Running).await?.iter())
+                    .chain(
+                        self.task_repo
+                            .list_by_status(TaskStatus::Pending)
+                            .await?
+                            .iter(),
+                    )
+                    .chain(
+                        self.task_repo
+                            .list_by_status(TaskStatus::Running)
+                            .await?
+                            .iter(),
+                    )
                     .any(|t| t.title.contains("Limit Evaluation:") && t.title.contains(id_prefix));
 
                 if !specialist_exists {
@@ -547,7 +659,8 @@ where
                         direct_subtasks,
                         spawn_limits.max_subtasks_per_task,
                         event_tx,
-                    ).await?;
+                    )
+                    .await?;
                 }
             }
             return Ok(false);
@@ -565,7 +678,11 @@ where
         limit_value: u32,
         _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let title = format!("Limit Evaluation: {} exceeded for task {}", limit_type, &parent_task.id.to_string()[..8]);
+        let title = format!(
+            "Limit Evaluation: {} exceeded for task {}",
+            limit_type,
+            &parent_task.id.to_string()[..8]
+        );
         let description = format!(
             "Spawn limit exceeded while creating subtasks:\n\n\
             Parent Task: {}\n\
@@ -580,10 +697,7 @@ where
             - GRANT_EXTENSION: Allow additional subtasks with a new limit\n\
             - RESTRUCTURE: Recommend a different decomposition approach\n\
             - REJECT: Task tree is too complex, simplification required",
-            parent_task.title,
-            limit_type,
-            current_value,
-            limit_value
+            parent_task.title, limit_type, current_value, limit_value
         );
 
         // Submit evaluation task via CommandBus
@@ -608,7 +722,10 @@ where
             match cb.dispatch(envelope).await {
                 Ok(crate::services::command_bus::CommandResult::Task(task)) => task.id,
                 Ok(other) => {
-                    tracing::warn!("CommandBus returned unexpected result for limit evaluation task: {:?}", other);
+                    tracing::warn!(
+                        "CommandBus returned unexpected result for limit evaluation task: {:?}",
+                        other
+                    );
                     return Ok(());
                 }
                 Err(e) => {
@@ -617,42 +734,54 @@ where
                 }
             }
         } else {
-            tracing::warn!("CommandBus not available — cannot create limit evaluation task for {}", parent_task.id);
+            tracing::warn!(
+                "CommandBus not available — cannot create limit evaluation task for {}",
+                parent_task.id
+            );
             return Ok(());
         };
 
         // Publish events via EventBus
-        self.event_bus.publish(crate::services::event_factory::agent_event(
-            crate::services::event_bus::EventSeverity::Info,
-            Some(eval_task_id),
-            crate::services::event_bus::EventPayload::SpecialistSpawned {
-                specialist_type: "limit-evaluation-specialist".to_string(),
-                trigger: format!("{} limit exceeded ({}/{})", limit_type, current_value, limit_value),
-                task_id: Some(eval_task_id),
-            },
-        )).await;
+        self.event_bus
+            .publish(crate::services::event_factory::agent_event(
+                crate::services::event_bus::EventSeverity::Info,
+                Some(eval_task_id),
+                crate::services::event_bus::EventPayload::SpecialistSpawned {
+                    specialist_type: "limit-evaluation-specialist".to_string(),
+                    trigger: format!(
+                        "{} limit exceeded ({}/{})",
+                        limit_type, current_value, limit_value
+                    ),
+                    task_id: Some(eval_task_id),
+                },
+            ))
+            .await;
 
-        self.event_bus.publish(crate::services::event_factory::agent_event(
-            crate::services::event_bus::EventSeverity::Warning,
-            Some(parent_task.id),
-            crate::services::event_bus::EventPayload::SpawnLimitExceeded {
-                parent_task_id: parent_task.id,
-                limit_type: limit_type.to_string(),
-                current_value,
-                limit_value,
-            },
-        )).await;
+        self.event_bus
+            .publish(crate::services::event_factory::agent_event(
+                crate::services::event_bus::EventSeverity::Warning,
+                Some(parent_task.id),
+                crate::services::event_bus::EventPayload::SpawnLimitExceeded {
+                    parent_task_id: parent_task.id,
+                    limit_type: limit_type.to_string(),
+                    current_value,
+                    limit_value,
+                },
+            ))
+            .await;
 
         // (Bridge forwards EventBus→event_tx automatically)
 
-        self.audit_log.info(
-            AuditCategory::Agent,
-            AuditAction::AgentSpawned,
-            format!(
-                "Spawned Limit Evaluation Specialist for task {} ({} limit: {}/{})",
-                parent_task.id, limit_type, current_value, limit_value
-            ),
-        ).await;
+        self.audit_log
+            .info(
+                AuditCategory::Agent,
+                AuditAction::AgentSpawned,
+                format!(
+                    "Spawned Limit Evaluation Specialist for task {} ({} limit: {}/{})",
+                    parent_task.id, limit_type, current_value, limit_value
+                ),
+            )
+            .await;
 
         Ok(())
     }
@@ -665,7 +794,9 @@ where
         let mr_repo = match self.merge_request_repo.as_ref() {
             Some(repo) => repo.clone(),
             None => {
-                tracing::debug!("merge_request_repo not available, skipping conflict specialist check");
+                tracing::debug!(
+                    "merge_request_repo not available, skipping conflict specialist check"
+                );
                 return Ok(());
             }
         };
@@ -699,47 +830,55 @@ where
             // Skip stale conflicts: if the associated task is already terminal,
             // mark the merge request as Failed and move on.
             if let Ok(Some(conflict_task)) = self.task_repo.get(conflict.task_id).await
-                && conflict_task.status.is_terminal() && conflict_task.status != TaskStatus::Complete {
-                    tracing::debug!(
-                        task_id = %conflict.task_id,
-                        merge_request_id = %conflict.merge_request_id,
-                        "skipping stale conflict — associated task is terminal"
-                    );
-                    // Mark the merge request as failed so it's not picked up again
-                    if let Some(ref mr_repo) = self.merge_request_repo
-                        && let Ok(Some(mut mr)) = mr_repo.get(conflict.merge_request_id).await {
-                            mr.status = crate::services::merge_queue::MergeStatus::Failed;
-                            mr.error = Some("Associated task is terminal".to_string());
-                            mr.updated_at = chrono::Utc::now();
-                            let _ = mr_repo.update(&mr).await;
-                        }
-                    continue;
+                && conflict_task.status.is_terminal()
+                && conflict_task.status != TaskStatus::Complete
+            {
+                tracing::debug!(
+                    task_id = %conflict.task_id,
+                    merge_request_id = %conflict.merge_request_id,
+                    "skipping stale conflict — associated task is terminal"
+                );
+                // Mark the merge request as failed so it's not picked up again
+                if let Some(ref mr_repo) = self.merge_request_repo
+                    && let Ok(Some(mut mr)) = mr_repo.get(conflict.merge_request_id).await
+                {
+                    mr.status = crate::services::merge_queue::MergeStatus::Failed;
+                    mr.error = Some("Associated task is terminal".to_string());
+                    mr.updated_at = chrono::Utc::now();
+                    let _ = mr_repo.update(&mr).await;
                 }
+                continue;
+            }
 
             // Check if a resolution task already exists for this conflict.
             // Match on merge_request_id in task context (more reliable than branch name matching).
             let mr_id_str = conflict.merge_request_id.to_string();
             let has_existing_task = |tasks: Vec<Task>| -> bool {
                 tasks.iter().any(|t| {
-                    t.context.custom.get("merge_request_id")
+                    t.context
+                        .custom
+                        .get("merge_request_id")
                         .and_then(|v| v.as_str())
                         .map(|id| id == mr_id_str)
                         .unwrap_or(false)
-                    || (t.title.contains("Resolve merge conflict")
-                        && t.title.contains(&conflict.source_branch))
+                        || (t.title.contains("Resolve merge conflict")
+                            && t.title.contains(&conflict.source_branch))
                 })
             };
-            let resolution_exists = self.task_repo
+            let resolution_exists = self
+                .task_repo
                 .list_by_status(TaskStatus::Ready)
                 .await
                 .map(has_existing_task)
                 .unwrap_or(false)
-                || self.task_repo
+                || self
+                    .task_repo
                     .list_by_status(TaskStatus::Running)
                     .await
                     .map(has_existing_task)
                     .unwrap_or(false)
-                || self.task_repo
+                || self
+                    .task_repo
                     .list_by_status(TaskStatus::Pending)
                     .await
                     .map(has_existing_task)
@@ -756,34 +895,37 @@ where
                             // If the root ancestor is workflow-enrolled, don't parent
                             // the specialist task under it — that would be rejected by
                             // the workflow subtask guard. Create it as a top-level task.
-                            let root_is_workflow = self.task_repo.get(root_id).await
+                            let root_is_workflow = self
+                                .task_repo
+                                .get(root_id)
+                                .await
                                 .ok()
                                 .flatten()
-                                .map(|t| t.context.custom.contains_key("workflow_state"))
+                                .map(|t| t.has_workflow_state())
                                 .unwrap_or(false);
                             if root_is_workflow {
                                 (None, None)
                             } else {
-                            let mut custom = std::collections::HashMap::new();
-                            custom.insert(
-                                "feature_branch_conflict".to_string(),
-                                serde_json::json!(true),
-                            );
-                            custom.insert(
-                                "original_subtask_id".to_string(),
-                                serde_json::json!(conflict.task_id.to_string()),
-                            );
-                            custom.insert(
-                                "merge_request_id".to_string(),
-                                serde_json::json!(conflict.merge_request_id.to_string()),
-                            );
-                            let ctx = crate::domain::models::TaskContext {
-                                input: String::new(),
-                                hints: vec![],
-                                relevant_files: conflict.conflict_files.clone(),
-                                custom,
-                            };
-                            (Some(root_id), Some(ctx))
+                                let mut custom = std::collections::HashMap::new();
+                                custom.insert(
+                                    "feature_branch_conflict".to_string(),
+                                    serde_json::json!(true),
+                                );
+                                custom.insert(
+                                    "original_subtask_id".to_string(),
+                                    serde_json::json!(conflict.task_id.to_string()),
+                                );
+                                custom.insert(
+                                    "merge_request_id".to_string(),
+                                    serde_json::json!(conflict.merge_request_id.to_string()),
+                                );
+                                let ctx = crate::domain::models::TaskContext {
+                                    input: String::new(),
+                                    hints: vec![],
+                                    relevant_files: conflict.conflict_files.clone(),
+                                    custom,
+                                };
+                                (Some(root_id), Some(ctx))
                             }
                         } else {
                             (None, None)
@@ -793,7 +935,10 @@ where
                     }
                 };
 
-                let title = format!("Resolve merge conflict: {} → {}", conflict.source_branch, conflict.target_branch);
+                let title = format!(
+                    "Resolve merge conflict: {} → {}",
+                    conflict.source_branch, conflict.target_branch
+                );
                 let description = format!(
                     "A merge conflict was detected when trying to merge branch '{}' into '{}'.\n\n\
                     Conflicting files:\n{}\n\n\
@@ -806,7 +951,9 @@ where
                     5. Completing the merge commit",
                     conflict.source_branch,
                     conflict.target_branch,
-                    conflict.conflict_files.iter()
+                    conflict
+                        .conflict_files
+                        .iter()
                         .map(|f| format!("  - {}", f))
                         .collect::<Vec<_>>()
                         .join("\n"),
@@ -833,42 +980,59 @@ where
                         }),
                     );
                     match cb.dispatch(envelope).await {
-                        Ok(crate::services::command_bus::CommandResult::Task(task)) => Some(task.id),
+                        Ok(crate::services::command_bus::CommandResult::Task(task)) => {
+                            Some(task.id)
+                        }
                         Ok(other) => {
-                            tracing::warn!("CommandBus returned unexpected result for merge conflict task: {:?}", other);
+                            tracing::warn!(
+                                "CommandBus returned unexpected result for merge conflict task: {:?}",
+                                other
+                            );
                             None
                         }
                         Err(e) => {
-                            tracing::warn!("CommandBus submit failed for merge conflict task: {}", e);
+                            tracing::warn!(
+                                "CommandBus submit failed for merge conflict task: {}",
+                                e
+                            );
                             None
                         }
                     }
                 } else {
-                    tracing::warn!("CommandBus not available — cannot create merge conflict specialist task");
+                    tracing::warn!(
+                        "CommandBus not available — cannot create merge conflict specialist task"
+                    );
                     None
                 };
 
                 if let Some(task_id) = task_id {
                     // Publish via EventBus
-                    self.event_bus.publish(crate::services::event_factory::agent_event(
-                        crate::services::event_bus::EventSeverity::Info,
-                        Some(task_id),
-                        crate::services::event_bus::EventPayload::SpecialistSpawned {
-                            specialist_type: "merge-conflict-specialist".to_string(),
-                            trigger: format!("Merge conflict in {} files", conflict.conflict_files.len()),
-                            task_id: Some(task_id),
-                        },
-                    )).await;
+                    self.event_bus
+                        .publish(crate::services::event_factory::agent_event(
+                            crate::services::event_bus::EventSeverity::Info,
+                            Some(task_id),
+                            crate::services::event_bus::EventPayload::SpecialistSpawned {
+                                specialist_type: "merge-conflict-specialist".to_string(),
+                                trigger: format!(
+                                    "Merge conflict in {} files",
+                                    conflict.conflict_files.len()
+                                ),
+                                task_id: Some(task_id),
+                            },
+                        ))
+                        .await;
                     // (Bridge forwards EventBus→event_tx automatically)
 
-                    self.audit_log.info(
-                        AuditCategory::Agent,
-                        AuditAction::AgentSpawned,
-                        format!(
-                            "Spawned Merge Conflict Specialist for {} → {}",
-                            conflict.source_branch, conflict.target_branch
-                        ),
-                    ).await;
+                    self.audit_log
+                        .info(
+                            AuditCategory::Agent,
+                            AuditAction::AgentSpawned,
+                            format!(
+                                "Spawned Merge Conflict Specialist for {} → {}",
+                                conflict.source_branch, conflict.target_branch
+                            ),
+                        )
+                        .await;
                 }
             }
         }
@@ -886,7 +1050,7 @@ where
         context: &str,
     ) -> DomainResult<crate::domain::models::overmind::ConflictResolutionDecision> {
         use crate::domain::models::overmind::{
-            ConflictResolutionRequest, ConflictResolutionDecision, ConflictResolutionApproach,
+            ConflictResolutionApproach, ConflictResolutionDecision, ConflictResolutionRequest,
             DecisionMetadata,
         };
 
@@ -941,8 +1105,8 @@ where
         trigger: crate::domain::models::overmind::EscalationTrigger,
     ) -> DomainResult<crate::domain::models::overmind::OvermindEscalationDecision> {
         use crate::domain::models::overmind::{
-            EscalationRequest, OvermindEscalationDecision, EscalationPreferences, OvermindEscalationUrgency,
-            DecisionMetadata,
+            DecisionMetadata, EscalationPreferences, EscalationRequest, OvermindEscalationDecision,
+            OvermindEscalationUrgency,
         };
 
         if let Some(ref overmind) = self.overmind {
@@ -966,7 +1130,10 @@ where
                     return Ok(decision);
                 }
                 Err(e) => {
-                    tracing::warn!("Overmind escalation evaluation failed, using fallback: {}", e);
+                    tracing::warn!(
+                        "Overmind escalation evaluation failed, using fallback: {}",
+                        e
+                    );
                 }
             }
         }

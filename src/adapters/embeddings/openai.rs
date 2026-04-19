@@ -46,11 +46,10 @@ impl OpenAiEmbeddingConfig {
         self.api_key
             .clone()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-            .ok_or_else(|| {
-                DomainError::ExecutionFailed(
-                    "OpenAI API key not set. Set OPENAI_API_KEY env var or configure api_key."
-                        .to_string(),
-                )
+            .ok_or_else(|| DomainError::ConfigError {
+                key: "OPENAI_API_KEY".to_string(),
+                reason: "OpenAI API key not set. Set OPENAI_API_KEY env var or configure api_key."
+                    .to_string(),
             })
     }
 }
@@ -90,7 +89,10 @@ impl OpenAiEmbeddingProvider {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| DomainError::ExecutionFailed(format!("Embedding API request failed: {}", e)))?;
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "openai".to_string(),
+                reason: format!("Embedding API request failed: {}", e),
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -98,16 +100,15 @@ impl OpenAiEmbeddingProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unable to read response body".to_string());
-            return Err(DomainError::ExecutionFailed(format!(
-                "Embedding API returned {}: {}",
-                status, body
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "openai".to_string(),
+                reason: format!("Embedding API returned {}: {}", status, body),
+            });
         }
 
-        let result: EmbeddingsResponse = response
-            .json()
-            .await
-            .map_err(|e| DomainError::SerializationError(format!("Failed to parse embedding response: {}", e)))?;
+        let result: EmbeddingsResponse = response.json().await.map_err(|e| {
+            DomainError::SerializationError(format!("Failed to parse embedding response: {}", e))
+        })?;
 
         // Sort by index to maintain input order
         let mut data = result.data;
@@ -132,7 +133,10 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
         results
             .into_iter()
             .next()
-            .ok_or_else(|| DomainError::ExecutionFailed("Empty embedding response".to_string()))
+            .ok_or_else(|| DomainError::ExternalServiceError {
+                service: "openai".to_string(),
+                reason: "Empty embedding response".to_string(),
+            })
     }
 
     async fn embed_batch(&self, inputs: &[EmbeddingInput]) -> DomainResult<Vec<EmbeddingOutput>> {

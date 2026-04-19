@@ -216,13 +216,12 @@ mod tests {
         assert_eq!(unpublished.len(), 1);
         assert_eq!(unpublished[0].id, event.id);
 
-        let task_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?)",
-        )
-        .bind(task.id.to_string())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let task_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?)")
+                .bind(task.id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(task_exists, "task should be visible after commit");
     }
 
@@ -259,15 +258,17 @@ mod tests {
 
         // Neither the task nor the outbox event should exist
         let unpublished = repo.fetch_unpublished(10).await.unwrap();
-        assert!(unpublished.is_empty(), "outbox should be empty after rollback");
+        assert!(
+            unpublished.is_empty(),
+            "outbox should be empty after rollback"
+        );
 
-        let task_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?)",
-        )
-        .bind(task.id.to_string())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let task_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?)")
+                .bind(task.id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(!task_exists, "task should not exist after rollback");
     }
 }

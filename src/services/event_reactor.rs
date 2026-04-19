@@ -8,16 +8,19 @@
 //! circuit breakers, rate limiting, and dedup.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use super::event_bus::{EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent};
+use super::event_bus::{
+    EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
+};
 use super::event_store::EventStore;
+use super::supervise_with_handle;
 
 /// Unique identifier for a registered handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,21 +87,24 @@ impl EventFilter {
 
         // Severity filter
         if let Some(min_sev) = self.min_severity
-            && severity_order(event.severity) < severity_order(min_sev) {
-                return false;
-            }
+            && severity_order(event.severity) < severity_order(min_sev)
+        {
+            return false;
+        }
 
         // Goal filter
         if let Some(gid) = self.goal_id
-            && event.goal_id != Some(gid) {
-                return false;
-            }
+            && event.goal_id != Some(gid)
+        {
+            return false;
+        }
 
         // Task filter
         if let Some(tid) = self.task_id
-            && event.task_id != Some(tid) {
-                return false;
-            }
+            && event.task_id != Some(tid)
+        {
+            return false;
+        }
 
         // Payload type filter
         if !self.payload_types.is_empty() {
@@ -110,9 +116,10 @@ impl EventFilter {
 
         // Custom predicate
         if let Some(ref pred) = self.custom_predicate
-            && !pred(event) {
-                return false;
-            }
+            && !pred(event)
+        {
+            return false;
+        }
 
         true
     }
@@ -227,9 +234,10 @@ impl CircuitBreakerState {
         let now = Instant::now();
         // Reset if outside the window
         if let Some(last) = self.last_failure
-            && now.duration_since(last) > window {
-                self.failure_count = 0;
-            }
+            && now.duration_since(last) > window
+        {
+            self.failure_count = 0;
+        }
         self.failure_count += 1;
         self.last_failure = Some(now);
 
@@ -248,16 +256,23 @@ impl CircuitBreakerState {
         self.is_tripped_with_config(cooldown, 1, 16)
     }
 
-    fn is_tripped_with_config(&self, cooldown: Duration, critical_initial_secs: u64, critical_max_secs: u64) -> bool {
+    fn is_tripped_with_config(
+        &self,
+        cooldown: Duration,
+        critical_initial_secs: u64,
+        critical_max_secs: u64,
+    ) -> bool {
         if !self.tripped {
             return false;
         }
-        let effective_cooldown = self.effective_cooldown_with_config(cooldown, critical_initial_secs, critical_max_secs);
+        let effective_cooldown =
+            self.effective_cooldown_with_config(cooldown, critical_initial_secs, critical_max_secs);
         // Auto-reset after cooldown
         if let Some(tripped_at) = self.tripped_at
-            && Instant::now().duration_since(tripped_at) > effective_cooldown {
-                return false;
-            }
+            && Instant::now().duration_since(tripped_at) > effective_cooldown
+        {
+            return false;
+        }
         true
     }
 
@@ -266,20 +281,30 @@ impl CircuitBreakerState {
         self.reset_if_cooled_with_config(cooldown, 1, 16);
     }
 
-    fn reset_if_cooled_with_config(&mut self, cooldown: Duration, critical_initial_secs: u64, critical_max_secs: u64) {
+    fn reset_if_cooled_with_config(
+        &mut self,
+        cooldown: Duration,
+        critical_initial_secs: u64,
+        critical_max_secs: u64,
+    ) {
         if self.tripped
-            && let Some(tripped_at) = self.tripped_at {
-                let effective_cooldown = self.effective_cooldown_with_config(cooldown, critical_initial_secs, critical_max_secs);
-                if Instant::now().duration_since(tripped_at) > effective_cooldown {
-                    self.tripped = false;
-                    self.failure_count = 0;
-                    self.tripped_at = None;
-                    if self.critical {
-                        // Increment backoff for next potential trip
-                        self.backoff_attempt = self.backoff_attempt.saturating_add(1);
-                    }
+            && let Some(tripped_at) = self.tripped_at
+        {
+            let effective_cooldown = self.effective_cooldown_with_config(
+                cooldown,
+                critical_initial_secs,
+                critical_max_secs,
+            );
+            if Instant::now().duration_since(tripped_at) > effective_cooldown {
+                self.tripped = false;
+                self.failure_count = 0;
+                self.tripped_at = None;
+                if self.critical {
+                    // Increment backoff for next potential trip
+                    self.backoff_attempt = self.backoff_attempt.saturating_add(1);
                 }
             }
+        }
     }
 
     /// Reset backoff on successful execution (critical handlers only).
@@ -302,15 +327,25 @@ impl CircuitBreakerState {
     }
 
     /// Calculate effective cooldown using explicit config values.
-    fn effective_cooldown_with_config(&self, default_cooldown: Duration, critical_initial_secs: u64, critical_max_secs: u64) -> Duration {
+    fn effective_cooldown_with_config(
+        &self,
+        default_cooldown: Duration,
+        critical_initial_secs: u64,
+        critical_max_secs: u64,
+    ) -> Duration {
         if !self.critical {
             return default_cooldown;
         }
-        Self::compute_critical_cooldown(critical_initial_secs, critical_max_secs, self.backoff_attempt)
+        Self::compute_critical_cooldown(
+            critical_initial_secs,
+            critical_max_secs,
+            self.backoff_attempt,
+        )
     }
 
     fn compute_critical_cooldown(initial_secs: u64, max_secs: u64, attempt: u32) -> Duration {
-        let backoff_secs = initial_secs.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
+        let backoff_secs =
+            initial_secs.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
         Duration::from_secs(backoff_secs.min(max_secs))
     }
 }
@@ -431,7 +466,7 @@ impl EventReactor {
         let last_watermark_flush = self.last_watermark_flush.clone();
         let watermark_event_count = self.watermark_event_count.clone();
 
-        tokio::spawn(async move {
+        supervise_with_handle("event_reactor_dispatch", async move {
             let mut receiver = event_bus.subscribe();
             // Rate limiting state
             let mut rate_window_start = Instant::now();
@@ -444,18 +479,26 @@ impl EventReactor {
             let mut last_processed_sequence: u64 = 0;
 
             while running.load(Ordering::SeqCst) {
-                let event = match tokio::time::timeout(
-                    Duration::from_secs(1),
-                    receiver.recv(),
-                ).await {
+                let event = match tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await
+                {
                     Ok(Ok(event)) => event,
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                        tracing::warn!("EventReactor lagged, missed {} events - triggering catchup", n);
+                        tracing::warn!(
+                            "EventReactor lagged, missed {} events - triggering catchup",
+                            n
+                        );
                         // Recover missed events from the journal
                         if let Some(ref store) = event_store {
-                            match store.replay_since(SequenceNumber(last_processed_sequence)).await {
+                            match store
+                                .replay_since(SequenceNumber(last_processed_sequence))
+                                .await
+                            {
                                 Ok(missed) => {
-                                    tracing::info!("EventReactor: recovering {} events from journal", missed.len());
+                                    tracing::info!(
+                                        "EventReactor: recovering {} events from journal",
+                                        missed.len()
+                                    );
                                     let hs = handlers.read().await;
                                     for missed_event in &missed {
                                         if dedup.contains(&missed_event.sequence.0) {
@@ -473,13 +516,17 @@ impl EventReactor {
                                             let _ = tokio::time::timeout(
                                                 Duration::from_millis(config.handler_timeout_ms),
                                                 handler.handle(missed_event, &ctx),
-                                            ).await;
+                                            )
+                                            .await;
                                         }
                                         // Advance watermarks for all handlers (processed or filter-skipped)
                                         {
                                             let mut wm_buf = watermark_buffer.write().await;
                                             for handler in hs.iter() {
-                                                wm_buf.insert(handler.metadata().name.clone(), missed_event.sequence);
+                                                wm_buf.insert(
+                                                    handler.metadata().name.clone(),
+                                                    missed_event.sequence,
+                                                );
                                             }
                                         }
                                         if missed_event.sequence.0 > last_processed_sequence {
@@ -492,7 +539,10 @@ impl EventReactor {
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::error!("EventReactor: failed to recover from lag: {}", e);
+                                    tracing::error!(
+                                        "EventReactor: failed to recover from lag: {}",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -548,7 +598,9 @@ impl EventReactor {
                 if suppress_reactions {
                     tracing::warn!(
                         "EventReactor: chain depth {} exceeds max {} for correlation {:?}, suppressing reactions",
-                        chain_depth, config.max_chain_depth, event.correlation_id
+                        chain_depth,
+                        config.max_chain_depth,
+                        event.correlation_id
                     );
                 }
 
@@ -598,7 +650,8 @@ impl EventReactor {
                     let result = tokio::time::timeout(
                         Duration::from_millis(config.handler_timeout_ms),
                         handler.handle(&event, &ctx),
-                    ).await;
+                    )
+                    .await;
 
                     match result {
                         Ok(Ok(Reaction::EmitEvents(events))) if !suppress_reactions => {
@@ -627,15 +680,21 @@ impl EventReactor {
                             tracing::warn!("EventReactor: handler '{}' error: {}", meta.name, e);
                             // Write to dead letter queue
                             if let Some(ref store) = event_store
-                                && let Err(dlq_err) = store.append_dead_letter(
-                                    &event.id.0.to_string(),
-                                    event.sequence.0,
-                                    &meta.name,
-                                    &e,
-                                    3,
-                                ).await {
-                                    tracing::warn!("EventReactor: failed to write DLQ entry: {}", dlq_err);
-                                }
+                                && let Err(dlq_err) = store
+                                    .append_dead_letter(
+                                        &event.id.0.to_string(),
+                                        event.sequence.0,
+                                        &meta.name,
+                                        &e,
+                                        3,
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(
+                                    "EventReactor: failed to write DLQ entry: {}",
+                                    dlq_err
+                                );
+                            }
                             let mut tripped = false;
                             let mut backoff_attempt = 0u32;
                             if meta.error_strategy == ErrorStrategy::CircuitBreak {
@@ -658,7 +717,11 @@ impl EventReactor {
                                 id: EventId::new(),
                                 sequence: SequenceNumber(0),
                                 timestamp: chrono::Utc::now(),
-                                severity: if tripped { EventSeverity::Error } else { EventSeverity::Warning },
+                                severity: if tripped {
+                                    EventSeverity::Error
+                                } else {
+                                    EventSeverity::Warning
+                                },
                                 category: EventCategory::Orchestrator,
                                 goal_id: None,
                                 task_id: None,
@@ -675,7 +738,8 @@ impl EventReactor {
                             if tripped && meta.critical {
                                 tracing::error!(
                                     "EventReactor: CRITICAL handler '{}' circuit breaker tripped (backoff attempt {})",
-                                    meta.name, backoff_attempt
+                                    meta.name,
+                                    backoff_attempt
                                 );
                                 reactions.push(UnifiedEvent {
                                     id: EventId::new(),
@@ -698,22 +762,26 @@ impl EventReactor {
                             // Do NOT advance watermark for failed handlers
                         }
                         Err(_) => {
-                            let timeout_msg = format!("handler timed out after {}ms", config.handler_timeout_ms);
-                            tracing::warn!(
-                                "EventReactor: handler '{}' {}",
-                                meta.name, timeout_msg
-                            );
+                            let timeout_msg =
+                                format!("handler timed out after {}ms", config.handler_timeout_ms);
+                            tracing::warn!("EventReactor: handler '{}' {}", meta.name, timeout_msg);
                             // Write to dead letter queue
                             if let Some(ref store) = event_store
-                                && let Err(dlq_err) = store.append_dead_letter(
-                                    &event.id.0.to_string(),
-                                    event.sequence.0,
-                                    &meta.name,
-                                    &timeout_msg,
-                                    3,
-                                ).await {
-                                    tracing::warn!("EventReactor: failed to write DLQ entry: {}", dlq_err);
-                                }
+                                && let Err(dlq_err) = store
+                                    .append_dead_letter(
+                                        &event.id.0.to_string(),
+                                        event.sequence.0,
+                                        &meta.name,
+                                        &timeout_msg,
+                                        3,
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(
+                                    "EventReactor: failed to write DLQ entry: {}",
+                                    dlq_err
+                                );
+                            }
                             let mut cbs = circuit_breakers.write().await;
                             if let Some(cb) = cbs.get_mut(&meta.id) {
                                 cb.record_failure(
@@ -750,7 +818,8 @@ impl EventReactor {
 
                     if should_flush {
                         if let Some(ref store) = event_store {
-                            let to_flush: HashMap<String, SequenceNumber> = wm_buf.drain().collect();
+                            let to_flush: HashMap<String, SequenceNumber> =
+                                wm_buf.drain().collect();
                             drop(wm_buf);
                             for (name, seq) in &to_flush {
                                 if let Err(e) = store.set_watermark(name, *seq).await {
@@ -764,19 +833,28 @@ impl EventReactor {
                             for handler in hs.iter() {
                                 let meta = handler.metadata();
                                 if let Some(cb) = cbs.get(&meta.id)
-                                    && (cb.failure_count > 0 || cb.tripped) {
-                                        let tripped_at = cb.tripped_at.map(|_| chrono::Utc::now());
-                                        let last_failure_at = cb.last_failure.map(|_| chrono::Utc::now());
-                                        if let Err(e) = store.save_circuit_breaker_state(
+                                    && (cb.failure_count > 0 || cb.tripped)
+                                {
+                                    let tripped_at = cb.tripped_at.map(|_| chrono::Utc::now());
+                                    let last_failure_at =
+                                        cb.last_failure.map(|_| chrono::Utc::now());
+                                    if let Err(e) = store
+                                        .save_circuit_breaker_state(
                                             &meta.name,
                                             cb.failure_count,
                                             cb.tripped,
                                             tripped_at,
                                             last_failure_at,
-                                        ).await {
-                                            tracing::warn!("Failed to flush CB state for {}: {}", meta.name, e);
-                                        }
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to flush CB state for {}: {}",
+                                            meta.name,
+                                            e
+                                        );
                                     }
+                                }
                             }
                         } else {
                             drop(wm_buf);
@@ -835,7 +913,10 @@ impl EventReactor {
                 let mut cbs = self.circuit_breakers.write().await;
                 for record in records {
                     // Find the handler by name to get its HandlerId
-                    if let Some(handler) = handlers.iter().find(|h| h.metadata().name == record.handler_name) {
+                    if let Some(handler) = handlers
+                        .iter()
+                        .find(|h| h.metadata().name == record.handler_name)
+                    {
                         let id = handler.metadata().id;
                         let cb = cbs.entry(id).or_insert_with(CircuitBreakerState::new);
                         cb.failure_count = record.failure_count;
@@ -848,7 +929,10 @@ impl EventReactor {
                         }
                     }
                 }
-                tracing::info!("Loaded circuit breaker states for {} handlers", handlers.len());
+                tracing::info!(
+                    "Loaded circuit breaker states for {} handlers",
+                    handlers.len()
+                );
             }
             Err(e) => {
                 tracing::warn!("Failed to load circuit breaker states: {}", e);
@@ -883,11 +967,18 @@ impl EventReactor {
 
         for (name, seq) in &to_flush {
             if let Err(e) = store.set_watermark(name, *seq).await {
-                tracing::warn!("Failed to flush watermark for {} during shutdown: {}", name, e);
+                tracing::warn!(
+                    "Failed to flush watermark for {} during shutdown: {}",
+                    name,
+                    e
+                );
             }
         }
 
-        tracing::info!("Flushed {} handler watermarks during shutdown", to_flush.len());
+        tracing::info!(
+            "Flushed {} handler watermarks during shutdown",
+            to_flush.len()
+        );
     }
 
     pub async fn replay_missed_events(&self) -> Result<u64, String> {
@@ -907,7 +998,9 @@ impl EventReactor {
 
         for handler in handlers.iter() {
             let meta = handler.metadata();
-            let wm = store.get_watermark(&meta.name).await
+            let wm = store
+                .get_watermark(&meta.name)
+                .await
                 .map_err(|e| format!("Failed to get watermark for {}: {}", meta.name, e))?;
 
             let seq = wm.unwrap_or(SequenceNumber(0));
@@ -926,18 +1019,22 @@ impl EventReactor {
         };
 
         // Query events since the minimum watermark
-        let mut events = store.replay_since(min_seq).await
+        let mut events = store
+            .replay_since(min_seq)
+            .await
             .map_err(|e| format!("Failed to replay events: {}", e))?;
 
         // Apply max replay limit from config
         if let Some(max) = self.config.startup_max_replay_events
-            && events.len() > max {
-                tracing::warn!(
-                    "Truncating replay from {} to {} events (startup_max_replay_events)",
-                    events.len(), max
-                );
-                events.truncate(max);
-            }
+            && events.len() > max
+        {
+            tracing::warn!(
+                "Truncating replay from {} to {} events (startup_max_replay_events)",
+                events.len(),
+                max
+            );
+            events.truncate(max);
+        }
 
         let mut replayed_count: u64 = 0;
 
@@ -946,7 +1043,8 @@ impl EventReactor {
                 let meta = handler.metadata();
 
                 // Only dispatch to handlers whose watermark is below this event's sequence
-                let handler_wm = handler_watermarks.get(&meta.name)
+                let handler_wm = handler_watermarks
+                    .get(&meta.name)
                     .copied()
                     .unwrap_or(SequenceNumber(0));
 
@@ -969,16 +1067,27 @@ impl EventReactor {
                 match tokio::time::timeout(
                     Duration::from_millis(self.config.handler_timeout_ms),
                     handler.handle(event, &ctx),
-                ).await {
+                )
+                .await
+                {
                     Ok(Ok(_)) => {
                         // Update handler watermark in our local map
                         handler_watermarks.insert(meta.name.clone(), event.sequence);
                     }
                     Ok(Err(e)) => {
-                        tracing::warn!("Replay: handler '{}' error on seq {}: {}", meta.name, event.sequence, e);
+                        tracing::warn!(
+                            "Replay: handler '{}' error on seq {}: {}",
+                            meta.name,
+                            event.sequence,
+                            e
+                        );
                     }
                     Err(_) => {
-                        tracing::warn!("Replay: handler '{}' timed out on seq {}", meta.name, event.sequence);
+                        tracing::warn!(
+                            "Replay: handler '{}' timed out on seq {}",
+                            meta.name,
+                            event.sequence
+                        );
                     }
                 }
             }
@@ -1030,7 +1139,11 @@ mod tests {
             }
         }
 
-        async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        async fn handle(
+            &self,
+            _event: &UnifiedEvent,
+            _ctx: &HandlerContext,
+        ) -> Result<Reaction, String> {
             self.call_count.fetch_add(1, Ordering::Relaxed);
             if self.should_fail {
                 Err("test failure".to_string())
@@ -1163,7 +1276,11 @@ mod tests {
                     critical: false,
                 }
             }
-            async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+            async fn handle(
+                &self,
+                event: &UnifiedEvent,
+                _ctx: &HandlerContext,
+            ) -> Result<Reaction, String> {
                 self.call_count.fetch_add(1, Ordering::Relaxed);
                 // Emit a chain event with same correlation
                 let mut new_event = UnifiedEvent {
@@ -1183,7 +1300,9 @@ mod tests {
             }
         }
 
-        let handler = Arc::new(ChainHandler { call_count: call_count.clone() });
+        let handler = Arc::new(ChainHandler {
+            call_count: call_count.clone(),
+        });
         reactor.register(handler).await;
         let handle = reactor.start();
 
@@ -1240,7 +1359,11 @@ mod tests {
             }
         }
 
-        async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        async fn handle(
+            &self,
+            _event: &UnifiedEvent,
+            _ctx: &HandlerContext,
+        ) -> Result<Reaction, String> {
             self.call_count.fetch_add(1, Ordering::Relaxed);
             if self.should_fail {
                 Err("test failure".to_string())
@@ -1278,7 +1401,11 @@ mod tests {
             }
         }
 
-        async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        async fn handle(
+            &self,
+            _event: &UnifiedEvent,
+            _ctx: &HandlerContext,
+        ) -> Result<Reaction, String> {
             let mut order = self.execution_order.lock().await;
             order.push(self.name.clone());
             Ok(Reaction::None)
@@ -1313,13 +1440,18 @@ mod tests {
 
         // Publish 3 events with unique sequence numbers
         for i in 1..=3 {
-            bus.publish(make_sequenced_event(EventCategory::Task, 100 + i)).await;
+            bus.publish(make_sequenced_event(EventCategory::Task, 100 + i))
+                .await;
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
 
         // After 2 failures the CB trips; the 3rd event should be skipped
         let count = call_count.load(Ordering::Relaxed);
-        assert_eq!(count, 2, "Handler should be called exactly 2 times before CB trips, got {}", count);
+        assert_eq!(
+            count, 2,
+            "Handler should be called exactly 2 times before CB trips, got {}",
+            count
+        );
 
         reactor.stop();
         handle.abort();
@@ -1352,22 +1484,33 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // First event: handler fails → CB trips (threshold=1)
-        bus.publish(make_sequenced_event(EventCategory::Task, 200)).await;
+        bus.publish(make_sequenced_event(EventCategory::Task, 200))
+            .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert_eq!(call_count.load(Ordering::Relaxed), 1);
 
         // Second event while CB is tripped: handler should NOT be called
-        bus.publish(make_sequenced_event(EventCategory::Task, 201)).await;
+        bus.publish(make_sequenced_event(EventCategory::Task, 201))
+            .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(call_count.load(Ordering::Relaxed), 1, "Handler should not be called while CB is tripped");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            1,
+            "Handler should not be called while CB is tripped"
+        );
 
         // Wait for cooldown to expire (1s cooldown + margin)
         tokio::time::sleep(Duration::from_millis(1200)).await;
 
         // Third event after cooldown: CB auto-resets → handler called again
-        bus.publish(make_sequenced_event(EventCategory::Task, 202)).await;
+        bus.publish(make_sequenced_event(EventCategory::Task, 202))
+            .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(call_count.load(Ordering::Relaxed), 2, "Handler should be called again after CB cooldown");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            2,
+            "Handler should be called again after CB cooldown"
+        );
 
         reactor.stop();
         handle.abort();
@@ -1410,7 +1553,10 @@ mod tests {
         store.append(&stored_event).await.unwrap();
 
         // Set watermark to 0 so replay would try to replay seq=10
-        store.set_watermark("dedup-test", SequenceNumber(0)).await.unwrap();
+        store
+            .set_watermark("dedup-test", SequenceNumber(0))
+            .await
+            .unwrap();
 
         let handle = reactor.start();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1418,7 +1564,11 @@ mod tests {
         // Publish an event normally — EventBus assigns it seq=0
         bus.publish(make_test_event(EventCategory::Task)).await;
         tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(call_count.load(Ordering::Relaxed), 1, "First event should be processed");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            1,
+            "First event should be processed"
+        );
 
         // Now call replay_missed_events — it replays seq=10 from store
         // The handler should be called because seq=10 is not in the dedup set
@@ -1429,7 +1579,11 @@ mod tests {
 
         // Handler should have been called twice: once from publish, once from replay
         let count = call_count.load(Ordering::Relaxed);
-        assert_eq!(count, 2, "Handler should be called for both published and replayed events, got {}", count);
+        assert_eq!(
+            count, 2,
+            "Handler should be called for both published and replayed events, got {}",
+            count
+        );
 
         reactor.stop();
         handle.abort();
@@ -1470,11 +1624,17 @@ mod tests {
         let handle = reactor.start();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        bus.publish(make_sequenced_event(EventCategory::Task, 300)).await;
+        bus.publish(make_sequenced_event(EventCategory::Task, 300))
+            .await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let order = execution_order.lock().await;
-        assert_eq!(order.len(), 3, "All 3 handlers should have been called, got {}", order.len());
+        assert_eq!(
+            order.len(),
+            3,
+            "All 3 handlers should have been called, got {}",
+            order.len()
+        );
         assert_eq!(order[0], "system", "SYSTEM priority should execute first");
         assert_eq!(order[1], "normal", "NORMAL priority should execute second");
         assert_eq!(order[2], "low", "LOW priority should execute last");
@@ -1517,12 +1677,17 @@ mod tests {
         // Publish 3 events — all should reach the handler despite failures
         // because LogAndContinue doesn't trip the circuit breaker
         for i in 1..=3 {
-            bus.publish(make_sequenced_event(EventCategory::Task, 400 + i)).await;
+            bus.publish(make_sequenced_event(EventCategory::Task, 400 + i))
+                .await;
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
 
         let count = call_count.load(Ordering::Relaxed);
-        assert_eq!(count, 3, "LogAndContinue handler should be called all 3 times, got {}", count);
+        assert_eq!(
+            count, 3,
+            "LogAndContinue handler should be called all 3 times, got {}",
+            count
+        );
 
         reactor.stop();
         handle.abort();
@@ -1556,7 +1721,11 @@ mod tests {
             }
         }
 
-        async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        async fn handle(
+            &self,
+            _event: &UnifiedEvent,
+            _ctx: &HandlerContext,
+        ) -> Result<Reaction, String> {
             self.call_count.fetch_add(1, Ordering::Relaxed);
             if self.should_fail.load(Ordering::Relaxed) {
                 Err("critical test failure".to_string())
@@ -1576,15 +1745,22 @@ mod tests {
 
         let default_cooldown = Duration::from_secs(60);
         let effective = cb.effective_cooldown(default_cooldown);
-        assert_eq!(effective, Duration::from_secs(1),
-            "Critical handler initial cooldown should be 1s, got {:?}", effective);
+        assert_eq!(
+            effective,
+            Duration::from_secs(1),
+            "Critical handler initial cooldown should be 1s, got {:?}",
+            effective
+        );
 
         // Non-critical should use the default 60s
         let mut cb_normal = CircuitBreakerState::new();
         cb_normal.critical = false;
         let effective_normal = cb_normal.effective_cooldown(default_cooldown);
-        assert_eq!(effective_normal, Duration::from_secs(60),
-            "Non-critical handler should use default 60s cooldown");
+        assert_eq!(
+            effective_normal,
+            Duration::from_secs(60),
+            "Non-critical handler should use default 60s cooldown"
+        );
     }
 
     #[test]
@@ -1598,8 +1774,14 @@ mod tests {
         for (attempt, &expected_secs) in expected.iter().enumerate() {
             cb.backoff_attempt = attempt as u32;
             let effective = cb.effective_cooldown(default_cooldown);
-            assert_eq!(effective, Duration::from_secs(expected_secs),
-                "Attempt {} should have {}s cooldown, got {:?}", attempt, expected_secs, effective);
+            assert_eq!(
+                effective,
+                Duration::from_secs(expected_secs),
+                "Attempt {} should have {}s cooldown, got {:?}",
+                attempt,
+                expected_secs,
+                effective
+            );
         }
     }
 
@@ -1611,8 +1793,10 @@ mod tests {
         assert_eq!(cb.backoff_attempt, 3);
 
         cb.reset_backoff();
-        assert_eq!(cb.backoff_attempt, 0,
-            "Backoff attempt should reset to 0 after reset_backoff()");
+        assert_eq!(
+            cb.backoff_attempt, 0,
+            "Backoff attempt should reset to 0 after reset_backoff()"
+        );
 
         // After reset, effective cooldown should be back to initial (1s)
         let effective = cb.effective_cooldown(Duration::from_secs(60));
@@ -1628,17 +1812,25 @@ mod tests {
         // Custom config: initial=2s, max=10s
         // Expected sequence: 2, 4, 8, 10 (capped), 10
         cb.backoff_attempt = 0;
-        assert_eq!(cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
-            Duration::from_secs(2));
+        assert_eq!(
+            cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
+            Duration::from_secs(2)
+        );
         cb.backoff_attempt = 1;
-        assert_eq!(cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
-            Duration::from_secs(4));
+        assert_eq!(
+            cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
+            Duration::from_secs(4)
+        );
         cb.backoff_attempt = 2;
-        assert_eq!(cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
-            Duration::from_secs(8));
+        assert_eq!(
+            cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
+            Duration::from_secs(8)
+        );
         cb.backoff_attempt = 3;
-        assert_eq!(cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
-            Duration::from_secs(10)); // capped
+        assert_eq!(
+            cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
+            Duration::from_secs(10)
+        ); // capped
     }
 
     #[tokio::test]
@@ -1673,7 +1865,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Publish event that will cause critical handler to fail and trip CB
-        bus.publish(make_sequenced_event(EventCategory::Task, 500)).await;
+        bus.publish(make_sequenced_event(EventCategory::Task, 500))
+            .await;
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Collect events from the bus to find CriticalHandlerDegraded
@@ -1682,7 +1875,12 @@ mod tests {
         while Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_millis(100), monitor.recv()).await {
                 Ok(Ok(event)) => {
-                    if let EventPayload::CriticalHandlerDegraded { handler_name, failure_count, .. } = &event.payload {
+                    if let EventPayload::CriticalHandlerDegraded {
+                        handler_name,
+                        failure_count,
+                        ..
+                    } = &event.payload
+                    {
                         assert_eq!(handler_name, "critical-degraded-test");
                         assert_eq!(*failure_count, 1); // threshold is 1
                         assert_eq!(event.severity, EventSeverity::Critical);
@@ -1693,7 +1891,10 @@ mod tests {
                 _ => continue,
             }
         }
-        assert!(found_degraded, "Should have received a CriticalHandlerDegraded event");
+        assert!(
+            found_degraded,
+            "Should have received a CriticalHandlerDegraded event"
+        );
 
         reactor.stop();
         handle.abort();
@@ -1731,7 +1932,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Fail once to trip CB
-        bus.publish(make_sequenced_event(EventCategory::Task, 600)).await;
+        bus.publish(make_sequenced_event(EventCategory::Task, 600))
+            .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert_eq!(call_count.load(Ordering::Relaxed), 1);
 
@@ -1740,14 +1942,22 @@ mod tests {
 
         // Now succeed
         should_fail.store(false, Ordering::Relaxed);
-        bus.publish(make_sequenced_event(EventCategory::Task, 601)).await;
+        bus.publish(make_sequenced_event(EventCategory::Task, 601))
+            .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(call_count.load(Ordering::Relaxed), 2, "Handler should be called after CB cooldown");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            2,
+            "Handler should be called after CB cooldown"
+        );
 
         // Check that backoff was reset
         let cbs = reactor.circuit_breakers.read().await;
         let cb = cbs.get(&handler_id).expect("CB state should exist");
-        assert_eq!(cb.backoff_attempt, 0, "Backoff should reset to 0 after successful execution");
+        assert_eq!(
+            cb.backoff_attempt, 0,
+            "Backoff should reset to 0 after successful execution"
+        );
 
         reactor.stop();
         handle.abort();

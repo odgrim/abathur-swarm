@@ -101,9 +101,7 @@ fn trigger_to_str(t: &EvolutionTrigger) -> &'static str {
     }
 }
 
-fn trigger_from_str(
-    s: &str,
-) -> Result<EvolutionTrigger, Box<dyn std::error::Error + Send + Sync>> {
+fn trigger_from_str(s: &str) -> Result<EvolutionTrigger, Box<dyn std::error::Error + Send + Sync>> {
     match s {
         "LowSuccessRate" => Ok(EvolutionTrigger::LowSuccessRate),
         "VeryLowSuccessRate" => Ok(EvolutionTrigger::VeryLowSuccessRate),
@@ -124,9 +122,7 @@ fn status_to_str(s: &RefinementStatus) -> &'static str {
     }
 }
 
-fn status_from_str(
-    s: &str,
-) -> Result<RefinementStatus, Box<dyn std::error::Error + Send + Sync>> {
+fn status_from_str(s: &str) -> Result<RefinementStatus, Box<dyn std::error::Error + Send + Sync>> {
     match s {
         "Pending" => Ok(RefinementStatus::Pending),
         "InProgress" => Ok(RefinementStatus::InProgress),
@@ -257,9 +253,7 @@ fn outcome_to_str(o: &TaskOutcome) -> &'static str {
     }
 }
 
-fn outcome_from_str(
-    s: &str,
-) -> Result<TaskOutcome, Box<dyn std::error::Error + Send + Sync>> {
+fn outcome_from_str(s: &str) -> Result<TaskOutcome, Box<dyn std::error::Error + Send + Sync>> {
     match s {
         "Success" => Ok(TaskOutcome::Success),
         "Failure" => Ok(TaskOutcome::Failure),
@@ -311,9 +305,7 @@ impl RefinementRepository for SqliteRefinementRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter()
-            .map(RefinementRequest::try_from)
-            .collect()
+        rows.into_iter().map(RefinementRequest::try_from).collect()
     }
 
     async fn update_status(
@@ -322,14 +314,12 @@ impl RefinementRepository for SqliteRefinementRepository {
         status: RefinementStatus,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE refinement_requests SET status = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(status_to_str(&status))
-        .bind(&now)
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE refinement_requests SET status = ?, updated_at = ? WHERE id = ?")
+            .bind(status_to_str(&status))
+            .bind(&now)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -338,11 +328,10 @@ impl RefinementRepository for SqliteRefinementRepository {
         &self,
     ) -> Result<Vec<RefinementRequest>, Box<dyn std::error::Error + Send + Sync>> {
         // Fetch all InProgress rows before updating so we know which ones were recovered
-        let rows: Vec<RefinementRequestRow> = sqlx::query_as(
-            "SELECT * FROM refinement_requests WHERE status = 'InProgress'",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<RefinementRequestRow> =
+            sqlx::query_as("SELECT * FROM refinement_requests WHERE status = 'InProgress'")
+                .fetch_all(&self.pool)
+                .await?;
 
         if !rows.is_empty() {
             let now = Utc::now().to_rfc3339();
@@ -412,10 +401,9 @@ impl RefinementRepository for SqliteRefinementRepository {
     async fn load_all_stats(
         &self,
     ) -> Result<Vec<TemplateStats>, Box<dyn std::error::Error + Send + Sync>> {
-        let rows: Vec<TemplateStatsRow> =
-            sqlx::query_as("SELECT * FROM template_stats")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<TemplateStatsRow> = sqlx::query_as("SELECT * FROM template_stats")
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows.into_iter().map(TemplateStats::from).collect())
     }
@@ -459,9 +447,7 @@ impl RefinementRepository for SqliteRefinementRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter()
-            .map(TaskExecution::try_from)
-            .collect()
+        rows.into_iter().map(TaskExecution::try_from).collect()
     }
 
     async fn save_version_change(
@@ -493,11 +479,10 @@ impl RefinementRepository for SqliteRefinementRepository {
     async fn load_version_changes(
         &self,
     ) -> Result<Vec<VersionChangeRecord>, Box<dyn std::error::Error + Send + Sync>> {
-        let rows: Vec<VersionChangeRow> = sqlx::query_as(
-            "SELECT * FROM template_version_changes ORDER BY changed_at DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<VersionChangeRow> =
+            sqlx::query_as("SELECT * FROM template_version_changes ORDER BY changed_at DESC")
+                .fetch_all(&self.pool)
+                .await?;
 
         rows.into_iter()
             .map(VersionChangeRecord::try_from)
@@ -596,7 +581,11 @@ mod tests {
 
         // Reset InProgress back to Pending; should return only the recovered one
         let recovered = repo.reset_in_progress_to_pending().await.unwrap();
-        assert_eq!(recovered.len(), 1, "only the InProgress request should be recovered");
+        assert_eq!(
+            recovered.len(),
+            1,
+            "only the InProgress request should be recovered"
+        );
         assert_eq!(
             recovered[0].id, req1.id,
             "req1 (previously InProgress) should be in recovered list"

@@ -6,12 +6,12 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::adapters::sqlite::{initialize_default_database, SqliteAgentRepository};
-use crate::cli::id_resolver::resolve_task_id;
+use crate::adapters::sqlite::{SqliteAgentRepository, initialize_default_database};
 use crate::cli::display::{
-    action_success, colorize_status, colorize_tier, list_table, output, render_list,
-    truncate_ellipsis, CommandOutput, DetailView,
+    CommandOutput, DetailView, action_success, colorize_status, colorize_tier, list_table, output,
+    render_list, truncate_ellipsis,
 };
+use crate::cli::id_resolver::resolve_task_id;
 use crate::domain::models::a2a::{A2AAgentCard, A2AMessage, MessageType};
 use crate::domain::models::{AgentTemplate, AgentTier, ToolCapability};
 use crate::domain::ports::AgentFilter;
@@ -242,11 +242,11 @@ impl CommandOutput for AgentDetailOutput {
             .field("Read Only", if self.read_only { "yes" } else { "no" });
 
         if !self.description.is_empty() {
-            view = view.section("Description")
-                .item(&self.description);
+            view = view.section("Description").item(&self.description);
         }
 
-        view = view.section("System Prompt (preview)")
+        view = view
+            .section("System Prompt (preview)")
             .item(&self.prompt_preview);
 
         if !self.tools.is_empty() {
@@ -264,7 +264,8 @@ impl CommandOutput for AgentDetailOutput {
         }
 
         if !self.handoff_targets.is_empty() {
-            view = view.section("Handoff Targets")
+            view = view
+                .section("Handoff Targets")
                 .item(&self.handoff_targets.join(", "));
         }
 
@@ -347,8 +348,14 @@ impl CommandOutput for StatsOutput {
     fn to_human(&self) -> String {
         use colored::Colorize;
         DetailView::new("Agent Statistics")
-            .field(&colorize_tier("Architects").to_string(), &self.architect_count.to_string())
-            .field(&colorize_tier("Specialists").to_string(), &self.specialist_count.to_string())
+            .field(
+                &colorize_tier("Architects").to_string(),
+                &self.architect_count.to_string(),
+            )
+            .field(
+                &colorize_tier("Specialists").to_string(),
+                &self.specialist_count.to_string(),
+            )
             .field("Workers", &self.worker_count.to_string())
             .field("Total", &self.total.to_string().bold().to_string())
             .section("Runtime")
@@ -493,8 +500,7 @@ impl CommandOutput for CardDetailOutput {
             .field("Available", &avail);
 
         if !self.card.description.is_empty() {
-            view = view.section("Description")
-                .item(&self.card.description);
+            view = view.section("Description").item(&self.card.description);
         }
 
         if !self.card.capabilities.is_empty() {
@@ -543,7 +549,14 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
     let service = AgentService::new(repo.clone(), event_bus);
 
     match args.command {
-        AgentCommands::Create { name, description, tier, prompt, tool, max_turns } => {
+        AgentCommands::Create {
+            name,
+            description,
+            tier,
+            prompt,
+            tool,
+            max_turns,
+        } => {
             let tier = AgentTier::parse_str(&tier)
                 .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", tier))?;
 
@@ -559,17 +572,19 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
                 })
                 .collect();
 
-            let agent = service.register_template(
-                name,
-                description.unwrap_or_default(),
-                tier,
-                prompt,
-                tools,
-                vec![],
-                max_turns,
-                false,
-                None,
-            ).await?;
+            let agent = service
+                .register_template(
+                    name,
+                    description.unwrap_or_default(),
+                    tier,
+                    prompt,
+                    tools,
+                    vec![],
+                    max_turns,
+                    false,
+                    None,
+                )
+                .await?;
 
             let out = AgentActionOutput {
                 success: true,
@@ -612,11 +627,19 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
                         agent: AgentOutput::from(&a),
                         description: a.description.clone(),
                         prompt_preview: truncate_ellipsis(&a.system_prompt, 500),
-                        tools: a.tools.iter().map(|t| {
-                            let req = if t.required { " [required]" } else { "" };
-                            format!("{}: {}{}", t.name, t.description, req)
-                        }).collect(),
-                        constraints: a.constraints.iter().map(|c| format!("{}: {}", c.name, c.description)).collect(),
+                        tools: a
+                            .tools
+                            .iter()
+                            .map(|t| {
+                                let req = if t.required { " [required]" } else { "" };
+                                format!("{}: {}{}", t.name, t.description, req)
+                            })
+                            .collect(),
+                        constraints: a
+                            .constraints
+                            .iter()
+                            .map(|c| format!("{}: {}", c.name, c.description))
+                            .collect(),
                         handoff_targets: a.agent_card.handoff_targets.clone(),
                         read_only: a.read_only,
                     };
@@ -634,7 +657,9 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
         }
 
         AgentCommands::Disable { name } => {
-            let agent = service.set_template_status(&name, crate::domain::models::AgentStatus::Disabled).await?;
+            let agent = service
+                .set_template_status(&name, crate::domain::models::AgentStatus::Disabled)
+                .await?;
 
             let out = AgentActionOutput {
                 success: true,
@@ -645,7 +670,9 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
         }
 
         AgentCommands::Enable { name } => {
-            let agent = service.set_template_status(&name, crate::domain::models::AgentStatus::Active).await?;
+            let agent = service
+                .set_template_status(&name, crate::domain::models::AgentStatus::Active)
+                .await?;
 
             let out = AgentActionOutput {
                 success: true,
@@ -689,9 +716,18 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
             let counts = service.get_instance_counts().await?;
             let running: u32 = counts.values().sum();
 
-            let architects = templates.iter().filter(|t| t.tier == AgentTier::Architect).count();
-            let specialists = templates.iter().filter(|t| t.tier == AgentTier::Specialist).count();
-            let workers = templates.iter().filter(|t| t.tier == AgentTier::Worker).count();
+            let architects = templates
+                .iter()
+                .filter(|t| t.tier == AgentTier::Architect)
+                .count();
+            let specialists = templates
+                .iter()
+                .filter(|t| t.tier == AgentTier::Specialist)
+                .count();
+            let workers = templates
+                .iter()
+                .filter(|t| t.tier == AgentTier::Worker)
+                .count();
 
             let out = StatsOutput {
                 architect_count: architects,
@@ -712,20 +748,40 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
             task_id,
             gateway,
         } => {
-            send_a2a_message(&pool, to, message_type, subject, body, from, task_id, gateway, json_mode).await?;
+            send_a2a_message(
+                &pool,
+                to,
+                message_type,
+                subject,
+                body,
+                from,
+                task_id,
+                gateway,
+                json_mode,
+            )
+            .await?;
         }
 
         AgentCommands::GatewayStatus { gateway } => {
             check_gateway_status(gateway, json_mode).await?;
         }
 
-        AgentCommands::Update { name, description, tier, prompt, max_turns } => {
+        AgentCommands::Update {
+            name,
+            description,
+            tier,
+            prompt,
+            max_turns,
+        } => {
             let tier = tier
-                .map(|t| AgentTier::parse_str(&t)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", t)))
+                .map(|t| {
+                    AgentTier::parse_str(&t).ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", t))
+                })
                 .transpose()?;
 
-            let agent = service.update_template(&name, description, prompt, tier, max_turns).await?;
+            let agent = service
+                .update_template(&name, description, prompt, tier, max_turns)
+                .await?;
 
             let out = AgentActionOutput {
                 success: true,
@@ -873,12 +929,11 @@ async fn check_gateway_status(gateway: String, json_mode: bool) -> Result<()> {
             // Gateway is running, get agent count
             let agents_response = client.get(&agents_url).send().await;
             let agent_count = match agents_response {
-                Ok(r) if r.status().is_success() => {
-                    r.json::<Vec<serde_json::Value>>()
-                        .await
-                        .map(|v| v.len())
-                        .unwrap_or(0)
-                }
+                Ok(r) if r.status().is_success() => r
+                    .json::<Vec<serde_json::Value>>()
+                    .await
+                    .map(|v| v.len())
+                    .unwrap_or(0),
                 _ => 0,
             };
 
@@ -963,10 +1018,8 @@ async fn handle_cards_command(command: CardsCommands, json_mode: bool) -> Result
                         "yaml" | "yml" => {
                             serde_yaml::to_string(&cards).context("Failed to serialize to YAML")?
                         }
-                        _ => {
-                            serde_json::to_string_pretty(&cards)
-                                .context("Failed to serialize to JSON")?
-                        }
+                        _ => serde_json::to_string_pretty(&cards)
+                            .context("Failed to serialize to JSON")?,
                     };
 
                     if let Some(path) = output_file {
@@ -1011,7 +1064,8 @@ async fn handle_cards_command(command: CardsCommands, json_mode: bool) -> Result
 
             match response {
                 Ok(resp) if resp.status().is_success() => {
-                    let card: A2AAgentCard = resp.json().await.context("Failed to parse agent card")?;
+                    let card: A2AAgentCard =
+                        resp.json().await.context("Failed to parse agent card")?;
                     let out = CardDetailOutput {
                         card: AgentCardOutput::from(&card),
                     };
@@ -1047,4 +1101,3 @@ async fn handle_cards_command(command: CardsCommands, json_mode: bool) -> Result
 
     Ok(())
 }
-

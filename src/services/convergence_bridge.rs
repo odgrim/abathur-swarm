@@ -12,9 +12,9 @@ use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::convergence::{
-    ArtifactReference, AttractorType, ConvergenceEngineConfig, ConvergencePolicy,
-    OverseerSignals, PriorityHint, Reference, ReferenceType, StrategyEntry,
-    StrategyKind, TaskSubmission, Trajectory,
+    ArtifactReference, AttractorType, ConvergenceEngineConfig, ConvergencePolicy, OverseerSignals,
+    PriorityHint, Reference, ReferenceType, StrategyEntry, StrategyKind, TaskSubmission,
+    Trajectory,
 };
 use crate::domain::models::intent_verification::IntentVerificationResult;
 use crate::domain::models::task::{Complexity, ExecutionMode, Task, TaskPriority};
@@ -29,9 +29,7 @@ use crate::services::swarm_orchestrator::types::SwarmConfig;
 pub fn task_to_submission(task: &Task, goal_id: Option<Uuid>) -> TaskSubmission {
     // If a previous attempt stored intent verification gaps, append them
     // to the description so the convergence loop addresses them.
-    let description = if let Some(gap_ctx) = task.context.custom.get("intent_gap_context")
-        .and_then(|v| v.as_str())
-    {
+    let description = if let Some(gap_ctx) = task.intent_gap_context() {
         format!("{}\n\n{}", task.description, gap_ctx)
     } else {
         task.description.clone()
@@ -86,10 +84,7 @@ pub fn task_to_submission(task: &Task, goal_id: Option<Uuid>) -> TaskSubmission 
 ///
 /// In the worktree model, the artifact is the state of the worktree after the agent runs.
 /// Overseers run commands (cargo build, cargo test, etc.) against this path.
-pub fn collect_artifact(
-    worktree_path: &str,
-    content_hash: &str,
-) -> ArtifactReference {
+pub fn collect_artifact(worktree_path: &str, content_hash: &str) -> ArtifactReference {
     ArtifactReference::new(worktree_path, content_hash)
 }
 
@@ -114,10 +109,7 @@ pub fn build_convergent_prompt(
             if let Some(obs) = trajectory.observations.last() {
                 let summary = format_overseer_summary(&obs.overseer_signals);
                 if !summary.is_empty() {
-                    sections.push(format!(
-                        "Previous attempt feedback:\n{}",
-                        summary
-                    ));
+                    sections.push(format!("Previous attempt feedback:\n{}", summary));
                 }
             }
         }
@@ -134,7 +126,9 @@ pub fn build_convergent_prompt(
             sections.push(format!(
                 "Start fresh. Key learnings from previous attempts:\n{}\n\nRemaining gaps:\n{}",
                 carry_forward.failure_summary,
-                carry_forward.remaining_gaps.iter()
+                carry_forward
+                    .remaining_gaps
+                    .iter()
                     .map(|g| format!("- {}", g.description))
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -144,17 +138,21 @@ pub fn build_convergent_prompt(
             sections.push(
                 "The current implementation is partially correct. \
                  Make minimal, targeted changes to address remaining failures \
-                 without breaking what already works.".to_string()
+                 without breaking what already works."
+                    .to_string(),
             );
         }
         StrategyKind::Reframe => {
             sections.push(
                 "Reconsider the approach from scratch. The previous approach \
-                 has diverged from the goal. Think about the problem differently.".to_string()
+                 has diverged from the goal. Think about the problem differently."
+                    .to_string(),
             );
         }
         StrategyKind::AlternativeApproach => {
-            let tried: Vec<String> = trajectory.strategy_log.iter()
+            let tried: Vec<String> = trajectory
+                .strategy_log
+                .iter()
                 .map(|e| format!("- {}", e.strategy_kind.kind_name()))
                 .collect();
             if !tried.is_empty() {
@@ -168,25 +166,29 @@ pub fn build_convergent_prompt(
         StrategyKind::Decompose => {
             sections.push(
                 "This task is too complex to solve in one pass. Break it into \
-                 smaller, independently verifiable subtasks.".to_string()
+                 smaller, independently verifiable subtasks."
+                    .to_string(),
             );
         }
         StrategyKind::ArchitectReview => {
             sections.push(
                 "Review the overall architecture and identify structural issues \
-                 preventing convergence. Suggest a revised approach.".to_string()
+                 preventing convergence. Suggest a revised approach."
+                    .to_string(),
             );
         }
         StrategyKind::RevertAndBranch { .. } => {
             sections.push(
                 "The current changes have accumulated regressions. Revert to \
-                 the last known-good state and try a different approach.".to_string()
+                 the last known-good state and try a different approach."
+                    .to_string(),
             );
         }
         StrategyKind::RetryAugmented => {
             sections.push(
                 "Retry with additional context. Pay close attention to the \
-                 failing tests and build errors below.".to_string()
+                 failing tests and build errors below."
+                    .to_string(),
             );
         }
     }
@@ -194,22 +196,26 @@ pub fn build_convergent_prompt(
     // Acceptance criteria from overseers (latest observation)
     if let Some(obs) = trajectory.observations.last() {
         if let Some(ref test_results) = obs.overseer_signals.test_results
-            && !test_results.failing_test_names.is_empty() {
-                sections.push(format!(
-                    "Failing tests that must pass:\n{}",
-                    test_results.failing_test_names.iter()
-                        .map(|f| format!("- {}", f))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ));
-            }
+            && !test_results.failing_test_names.is_empty()
+        {
+            sections.push(format!(
+                "Failing tests that must pass:\n{}",
+                test_results
+                    .failing_test_names
+                    .iter()
+                    .map(|f| format!("- {}", f))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
         if let Some(ref build_result) = obs.overseer_signals.build_result
-            && !build_result.success {
-                sections.push(format!(
-                    "Build errors that must be fixed:\n{}",
-                    build_result.errors.join("\n")
-                ));
-            }
+            && !build_result.success
+        {
+            sections.push(format!(
+                "Build errors that must be fixed:\n{}",
+                build_result.errors.join("\n")
+            ));
+        }
     }
 
     // Intent verification feedback from previous LLM-based verification
@@ -223,10 +229,8 @@ pub fn build_convergent_prompt(
         ));
 
         if !ivr.accomplishment_summary.is_empty() {
-            verification_section.push_str(&format!(
-                "**Assessment**: {}\n",
-                ivr.accomplishment_summary,
-            ));
+            verification_section
+                .push_str(&format!("**Assessment**: {}\n", ivr.accomplishment_summary,));
         }
 
         if !ivr.gaps.is_empty() {
@@ -243,9 +247,13 @@ pub fn build_convergent_prompt(
         }
 
         if !ivr.implicit_gaps.is_empty() {
-            verification_section.push_str("\n**Implicit Gaps** (unstated but expected requirements):\n");
+            verification_section
+                .push_str("\n**Implicit Gaps** (unstated but expected requirements):\n");
             for gap in &ivr.implicit_gaps {
-                let rationale = gap.implicit_rationale.as_deref().unwrap_or("expected by convention");
+                let rationale = gap
+                    .implicit_rationale
+                    .as_deref()
+                    .unwrap_or("expected by convention");
                 verification_section.push_str(&format!(
                     "- [{}] {}: {}\n",
                     gap.severity.as_str(),
@@ -256,12 +264,13 @@ pub fn build_convergent_prompt(
         }
 
         if let Some(ref guidance) = ivr.reprompt_guidance
-            && !guidance.focus_areas.is_empty() {
-                verification_section.push_str("\n**Focus Areas** (prioritize these):\n");
-                for area in &guidance.focus_areas {
-                    verification_section.push_str(&format!("- {}\n", area));
-                }
+            && !guidance.focus_areas.is_empty()
+        {
+            verification_section.push_str("\n**Focus Areas** (prioritize these):\n");
+            for area in &guidance.focus_areas {
+                verification_section.push_str(&format!("- {}\n", area));
             }
+        }
 
         sections.push(verification_section);
     }
@@ -350,7 +359,9 @@ impl TrajectoryRepository for DynTrajectoryRepository {
         attractor_type: &AttractorType,
         limit: usize,
     ) -> DomainResult<Vec<StrategyEntry>> {
-        self.0.get_successful_strategies(attractor_type, limit).await
+        self.0
+            .get_successful_strategies(attractor_type, limit)
+            .await
     }
 
     async fn delete(&self, trajectory_id: &str) -> DomainResult<()> {
@@ -382,7 +393,9 @@ impl TrajectoryRepository for DynTrajectoryRepository {
         tags: &[String],
         limit: usize,
     ) -> DomainResult<Vec<Trajectory>> {
-        self.0.get_similar_trajectories(description, tags, limit).await
+        self.0
+            .get_similar_trajectories(description, tags, limit)
+            .await
     }
 }
 
@@ -395,7 +408,8 @@ fn format_overseer_summary(signals: &OverseerSignals) -> String {
     if let Some(ref test_results) = signals.test_results {
         parts.push(format!(
             "Tests: {}/{} passed, {} failures",
-            test_results.passed, test_results.total,
+            test_results.passed,
+            test_results.total,
             test_results.failing_test_names.len()
         ));
     }
@@ -403,7 +417,10 @@ fn format_overseer_summary(signals: &OverseerSignals) -> String {
         if build_result.success {
             parts.push("Build: SUCCESS".to_string());
         } else {
-            parts.push(format!("Build: FAILED - {}", build_result.errors.join("; ")));
+            parts.push(format!(
+                "Build: FAILED - {}",
+                build_result.errors.join("; ")
+            ));
         }
     }
     if let Some(ref type_check) = signals.type_check {
@@ -442,11 +459,12 @@ fn persistent_gaps(trajectory: &Trajectory) -> Vec<String> {
             }
         }
         if let Some(ref build_result) = obs.overseer_signals.build_result
-            && !build_result.success {
-                for error in &build_result.errors {
-                    result.push(format!("- Build error: {}", error));
-                }
+            && !build_result.success
+        {
+            for error in &build_result.errors {
+                result.push(format!("- Build error: {}", error));
             }
+        }
     }
 
     result
@@ -455,7 +473,7 @@ fn persistent_gaps(trajectory: &Trajectory) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::task::{Task, ExecutionMode, TaskPriority};
+    use crate::domain::models::task::{ExecutionMode, Task, TaskPriority};
 
     #[test]
     fn test_task_to_submission_basic() {
@@ -475,21 +493,20 @@ mod tests {
 
     #[test]
     fn test_task_to_submission_priority_mapping() {
-        let task = Task::new("High priority task")
-            .with_priority(TaskPriority::Critical);
+        let task = Task::new("High priority task").with_priority(TaskPriority::Critical);
         let submission = task_to_submission(&task, None);
         assert_eq!(submission.priority_hint, Some(PriorityHint::Thorough));
 
-        let task = Task::new("Low priority task")
-            .with_priority(TaskPriority::Low);
+        let task = Task::new("Low priority task").with_priority(TaskPriority::Low);
         let submission = task_to_submission(&task, None);
         assert_eq!(submission.priority_hint, Some(PriorityHint::Fast));
     }
 
     #[test]
     fn test_task_to_submission_convergent_parallel() {
-        let task = Task::new("Complex task")
-            .with_execution_mode(ExecutionMode::Convergent { parallel_samples: Some(3) });
+        let task = Task::new("Complex task").with_execution_mode(ExecutionMode::Convergent {
+            parallel_samples: Some(3),
+        });
         let submission = task_to_submission(&task, None);
         assert_eq!(submission.parallel_samples, Some(3));
     }
@@ -497,8 +514,12 @@ mod tests {
     #[test]
     fn test_task_to_submission_constraints() {
         let mut task = Task::new("Task with constraints");
-        task.context.hints.push("constraint: must use async".to_string());
-        task.context.hints.push("anti-pattern: no unwrap()".to_string());
+        task.context
+            .hints
+            .push("constraint: must use async".to_string());
+        task.context
+            .hints
+            .push("anti-pattern: no unwrap()".to_string());
         let submission = task_to_submission(&task, None);
         assert_eq!(submission.constraints.len(), 1);
         assert_eq!(submission.anti_patterns.len(), 1);

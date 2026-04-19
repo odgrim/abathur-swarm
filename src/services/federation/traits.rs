@@ -8,8 +8,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::domain::models::a2a::{
-    Artifact, CerebrateStatus, FederationResult, FederationTaskEnvelope,
-    MessagePriority,
+    Artifact, CerebrateStatus, FederationResult, FederationTaskEnvelope, MessagePriority,
 };
 
 // ============================================================================
@@ -59,7 +58,9 @@ pub struct DefaultDelegationStrategy;
 impl DefaultDelegationStrategy {
     /// Check whether a cerebrate's capabilities satisfy all required capabilities.
     fn has_required_capabilities(cerebrate: &CerebrateStatus, required: &[String]) -> bool {
-        required.iter().all(|req| cerebrate.capabilities.iter().any(|c| c == req))
+        required
+            .iter()
+            .all(|req| cerebrate.capabilities.iter().any(|c| c == req))
     }
 }
 
@@ -73,7 +74,11 @@ impl FederationDelegationStrategy for DefaultDelegationStrategy {
             .iter()
             .filter(|c| c.can_accept_task())
             .filter(|c| Self::has_required_capabilities(c, &task.required_capabilities))
-            .min_by(|a, b| a.load.partial_cmp(&b.load).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| {
+                a.load
+                    .partial_cmp(&b.load)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|c| c.id.clone())
     }
 
@@ -118,19 +123,14 @@ pub enum FederationReaction {
         preferred_cerebrate: Option<String>,
     },
     /// Emit an event through the EventBus.
-    EmitEvent {
-        description: String,
-    },
+    EmitEvent { description: String },
     /// Escalate to the overmind / human.
     Escalate {
         reason: String,
         goal_id: Option<Uuid>,
     },
     /// Update goal progress.
-    UpdateGoalProgress {
-        goal_id: Uuid,
-        summary: String,
-    },
+    UpdateGoalProgress { goal_id: Uuid, summary: String },
     /// No action needed.
     None,
 }
@@ -242,8 +242,8 @@ impl FederationTaskTransformer for DefaultTaskTransformer {
         goal_id: Option<Uuid>,
         priority: MessagePriority,
     ) -> FederationTaskEnvelope {
-        let mut envelope = FederationTaskEnvelope::new(task_id, title, description)
-            .with_priority(priority);
+        let mut envelope =
+            FederationTaskEnvelope::new(task_id, title, description).with_priority(priority);
         if let Some(gid) = goal_id {
             envelope = envelope.with_parent_goal(gid);
         }
@@ -423,18 +423,16 @@ mod tests {
 
         let reactions = processor.process_result(&result, &ctx);
         assert_eq!(reactions.len(), 1);
-        assert!(matches!(reactions[0], FederationReaction::UpdateGoalProgress { .. }));
+        assert!(matches!(
+            reactions[0],
+            FederationReaction::UpdateGoalProgress { .. }
+        ));
     }
 
     #[test]
     fn test_default_result_processor_failure() {
         let processor = DefaultResultProcessor;
-        let result = FederationResult::failed(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            "Failed",
-            "CI broke",
-        );
+        let result = FederationResult::failed(Uuid::new_v4(), Uuid::new_v4(), "Failed", "CI broke");
         let ctx = ParentContext {
             goal_id: Some(Uuid::new_v4()),
             ..Default::default()

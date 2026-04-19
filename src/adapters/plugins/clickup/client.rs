@@ -12,9 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::domain::errors::{DomainError, DomainResult};
 
-use super::models::{
-    ClickUpCommentRequest, ClickUpTaskResponse, ClickUpTasksResponse,
-};
+use super::models::{ClickUpCommentRequest, ClickUpTaskResponse, ClickUpTasksResponse};
 
 /// Base URL for the ClickUp API v2.
 const CLICKUP_API_BASE: &str = "https://api.clickup.com/api/v2";
@@ -80,7 +78,7 @@ impl RateLimiter {
 /// HTTP client for the ClickUp REST API v2.
 ///
 /// All methods return [`DomainResult`] and map HTTP / network errors
-/// to [`DomainError::ExecutionFailed`].
+/// to [`DomainError::ExternalServiceError`].
 #[derive(Debug, Clone)]
 pub struct ClickUpClient {
     /// The underlying HTTP client.
@@ -143,33 +141,35 @@ impl ClickUpClient {
             ),
             None => format!("{}/list/{}/task", CLICKUP_API_BASE, list_id),
         };
-        let req = self
-            .rate_limited_request(reqwest::Method::GET, &url)
-            .await;
+        let req = self.rate_limited_request(reqwest::Method::GET, &url).await;
 
-        let resp = req.send().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("ClickUp get_tasks request failed: {e}"))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("get_tasks request failed: {e}"),
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "ClickUp get_tasks returned {status}: {body}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("get_tasks returned {status}: {body}"),
+            });
         }
 
-        resp.json::<ClickUpTasksResponse>().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("ClickUp get_tasks parse failed: {e}"))
-        })
+        resp.json::<ClickUpTasksResponse>()
+            .await
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("get_tasks parse failed: {e}"),
+            })
     }
 
     /// Update the status of a ClickUp task.
-    pub async fn update_task_status(
-        &self,
-        task_id: &str,
-        status: &str,
-    ) -> DomainResult<()> {
+    pub async fn update_task_status(&self, task_id: &str, status: &str) -> DomainResult<()> {
         let url = format!("{}/task/{}", CLICKUP_API_BASE, task_id);
         let body = serde_json::json!({ "status": status });
 
@@ -179,29 +179,25 @@ impl ClickUpClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!(
-                    "ClickUp update_task_status request failed: {e}"
-                ))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("update_task_status request failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status_code = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "ClickUp update_task_status returned {status_code}: {body}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("update_task_status returned {status_code}: {body}"),
+            });
         }
 
         Ok(())
     }
 
     /// Post a comment on a ClickUp task.
-    pub async fn post_comment(
-        &self,
-        task_id: &str,
-        comment: &str,
-    ) -> DomainResult<()> {
+    pub async fn post_comment(&self, task_id: &str, comment: &str) -> DomainResult<()> {
         let url = format!("{}/task/{}/comment", CLICKUP_API_BASE, task_id);
         let body = ClickUpCommentRequest {
             comment_text: comment.to_string(),
@@ -213,18 +209,18 @@ impl ClickUpClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!(
-                    "ClickUp post_comment request failed: {e}"
-                ))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("post_comment request failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "ClickUp post_comment returned {status}: {body}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("post_comment returned {status}: {body}"),
+            });
         }
 
         Ok(())
@@ -251,23 +247,26 @@ impl ClickUpClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                DomainError::ExecutionFailed(format!(
-                    "ClickUp create_task request failed: {e}"
-                ))
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("create_task request failed: {e}"),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "ClickUp create_task returned {status}: {body}"
-            )));
+            return Err(DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("create_task returned {status}: {body}"),
+            });
         }
 
-        resp.json::<ClickUpTaskResponse>().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("ClickUp create_task parse failed: {e}"))
-        })
+        resp.json::<ClickUpTaskResponse>()
+            .await
+            .map_err(|e| DomainError::ExternalServiceError {
+                service: "clickup".to_string(),
+                reason: format!("create_task parse failed: {e}"),
+            })
     }
 }
 

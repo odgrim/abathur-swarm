@@ -5,11 +5,11 @@
 //! create specialized agents as needed.
 
 use axum::{
+    Router,
     extract::{Path, State},
     http::StatusCode,
     response::Json,
     routing::{delete, get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -152,8 +152,13 @@ impl<A: AgentRepository + Clone + Send + Sync + 'static> AgentsHttpServer<A> {
             .with_state(state);
 
         if self.config.enable_cors {
-            app.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-                .layer(TraceLayer::new_for_http())
+            app.layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            )
+            .layer(TraceLayer::new_for_http())
         } else {
             app.layer(TraceLayer::new_for_http())
         }
@@ -204,29 +209,39 @@ async fn create_agent<A: AgentRepository + Clone + Send + Sync + 'static>(
 ) -> Result<(StatusCode, Json<AgentResponse>), (StatusCode, Json<ErrorResponse>)> {
     let tier = AgentTier::parse_str(&req.tier).unwrap_or(AgentTier::Worker);
 
-    let tools: Vec<ToolCapability> = req.tools.into_iter().map(|t| {
-        let mut tool = ToolCapability::new(t.name, t.description);
-        if t.required {
-            tool = tool.required();
-        }
-        tool
-    }).collect();
+    let tools: Vec<ToolCapability> = req
+        .tools
+        .into_iter()
+        .map(|t| {
+            let mut tool = ToolCapability::new(t.name, t.description);
+            if t.required {
+                tool = tool.required();
+            }
+            tool
+        })
+        .collect();
 
-    let constraints: Vec<AgentConstraint> = req.constraints.into_iter().map(|c| {
-        AgentConstraint::new(c.name, c.description)
-    }).collect();
+    let constraints: Vec<AgentConstraint> = req
+        .constraints
+        .into_iter()
+        .map(|c| AgentConstraint::new(c.name, c.description))
+        .collect();
 
-    match state.service.register_template(
-        req.name,
-        req.description,
-        tier,
-        req.system_prompt,
-        tools,
-        constraints,
-        req.max_turns,
-        req.read_only,
-        None,
-    ).await {
+    match state
+        .service
+        .register_template(
+            req.name,
+            req.description,
+            tier,
+            req.system_prompt,
+            tools,
+            constraints,
+            req.max_turns,
+            req.read_only,
+            None,
+        )
+        .await
+    {
         Ok(template) => Ok((StatusCode::CREATED, Json(to_response(&template)))),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
@@ -285,7 +300,11 @@ async fn disable_agent<A: AgentRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<A>>>,
     Path(name): Path<String>,
 ) -> Result<Json<AgentResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.set_template_status(&name, crate::domain::models::agent::AgentStatus::Disabled).await {
+    match state
+        .service
+        .set_template_status(&name, crate::domain::models::agent::AgentStatus::Disabled)
+        .await
+    {
         Ok(template) => Ok(Json(to_response(&template))),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
@@ -304,15 +323,23 @@ fn to_response(template: &crate::domain::models::agent::AgentTemplate) -> AgentR
         description: template.description.clone(),
         tier: template.tier.as_str().to_string(),
         version: template.version,
-        tools: template.tools.iter().map(|t| ToolResponseItem {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            required: t.required,
-        }).collect(),
-        constraints: template.constraints.iter().map(|c| ConstraintResponseItem {
-            name: c.name.clone(),
-            description: c.description.clone(),
-        }).collect(),
+        tools: template
+            .tools
+            .iter()
+            .map(|t| ToolResponseItem {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                required: t.required,
+            })
+            .collect(),
+        constraints: template
+            .constraints
+            .iter()
+            .map(|c| ConstraintResponseItem {
+                name: c.name.clone(),
+                description: c.description.clone(),
+            })
+            .collect(),
         capabilities: template.agent_card.capabilities.clone(),
         status: template.status.as_str().to_string(),
         max_turns: template.max_turns,

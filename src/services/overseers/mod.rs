@@ -61,5 +61,5 @@ pub use compilation::CompilationOverseer;
 pub use lint::LintOverseer;
 pub use security_scan::SecurityScanOverseer;
 pub use test_suite::TestSuiteOverseer;
-pub use traits::{apply_signal_update, has_blocking_failures, OverseerMeasurement};
+pub use traits::{OverseerMeasurement, apply_signal_update, has_blocking_failures};
 pub use type_check::TypeCheckOverseer;

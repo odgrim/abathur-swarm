@@ -8,10 +8,10 @@ use async_trait::async_trait;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Goal, GoalConstraint, GoalPriority, GoalStatus};
 use crate::domain::ports::{GoalFilter, GoalRepository};
-use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, GoalCommand, GoalCommandHandler};
-use crate::services::event_bus::{
-    EventCategory, EventPayload, EventSeverity, UnifiedEvent,
+use crate::services::command_bus::{
+    CommandError, CommandOutcome, CommandResult, GoalCommand, GoalCommandHandler,
 };
+use crate::services::event_bus::{EventCategory, EventPayload, EventSeverity, UnifiedEvent};
 use crate::services::event_factory;
 
 pub struct GoalService<R: GoalRepository> {
@@ -20,9 +20,7 @@ pub struct GoalService<R: GoalRepository> {
 
 impl<R: GoalRepository> GoalService<R> {
     pub fn new(repository: Arc<R>) -> Self {
-        Self {
-            repository,
-        }
+        Self { repository }
     }
 
     /// Helper to build a UnifiedEvent with standard fields.
@@ -94,16 +92,24 @@ impl<R: GoalRepository> GoalService<R> {
     }
 
     /// Transition a goal to a new status. Returns the goal and events to be journaled.
-    pub async fn transition_status(&self, id: Uuid, new_status: GoalStatus) -> DomainResult<(Goal, Vec<UnifiedEvent>)> {
-        let mut goal = self.repository.get(id).await?
+    pub async fn transition_status(
+        &self,
+        id: Uuid,
+        new_status: GoalStatus,
+    ) -> DomainResult<(Goal, Vec<UnifiedEvent>)> {
+        let mut goal = self
+            .repository
+            .get(id)
+            .await?
             .ok_or(DomainError::GoalNotFound(id))?;
 
         let from_status = goal.status;
-        goal.transition_to(new_status).map_err(|e| DomainError::InvalidStateTransition {
-            from: from_status.as_str().to_string(),
-            to: new_status.as_str().to_string(),
-            reason: e,
-        })?;
+        goal.transition_to(new_status)
+            .map_err(|e| DomainError::InvalidStateTransition {
+                from: from_status.as_str().to_string(),
+                to: new_status.as_str().to_string(),
+                reason: e,
+            })?;
 
         self.repository.update(&goal).await?;
 
@@ -127,7 +133,10 @@ impl<R: GoalRepository> GoalService<R> {
         let mut current_id = Some(id);
 
         while let Some(gid) = current_id {
-            let goal = self.repository.get(gid).await?
+            let goal = self
+                .repository
+                .get(gid)
+                .await?
                 .ok_or(DomainError::GoalNotFound(gid))?;
 
             // Add constraints (ancestors first, so child constraints can override)
@@ -148,7 +157,10 @@ impl<R: GoalRepository> GoalService<R> {
         constraints: Vec<GoalConstraint>,
         domains: Option<Vec<String>>,
     ) -> DomainResult<(Goal, Vec<UnifiedEvent>)> {
-        let mut goal = self.repository.get(id).await?
+        let mut goal = self
+            .repository
+            .get(id)
+            .await?
             .ok_or(DomainError::GoalNotFound(id))?;
 
         if let Some(n) = name {
@@ -189,8 +201,15 @@ impl<R: GoalRepository> GoalService<R> {
     }
 
     /// Update the applicability domains of a goal. Returns the goal and events to be journaled.
-    pub async fn update_domains(&self, id: Uuid, domains: Vec<String>) -> DomainResult<(Goal, Vec<UnifiedEvent>)> {
-        let mut goal = self.repository.get(id).await?
+    pub async fn update_domains(
+        &self,
+        id: Uuid,
+        domains: Vec<String>,
+    ) -> DomainResult<(Goal, Vec<UnifiedEvent>)> {
+        let mut goal = self
+            .repository
+            .get(id)
+            .await?
             .ok_or(DomainError::GoalNotFound(id))?;
 
         let old_domains = goal.applicability_domains.clone();
@@ -225,11 +244,14 @@ impl<R: GoalRepository> GoalService<R> {
         let children = self.repository.get_children(id).await?;
         if !children.is_empty() {
             return Err(DomainError::ValidationFailed(
-                "Cannot delete goal with children. Delete children first.".to_string()
+                "Cannot delete goal with children. Delete children first.".to_string(),
             ));
         }
 
-        let goal = self.repository.get(id).await?
+        let goal = self
+            .repository
+            .get(id)
+            .await?
             .ok_or(DomainError::GoalNotFound(id))?;
         let goal_name = goal.name.clone();
 
@@ -264,7 +286,10 @@ impl<R: GoalRepository + 'static> GoalCommandHandler for GoalService<R> {
                 let (goal, events) = self
                     .create_goal(name, description, priority, parent_id, constraints, domains)
                     .await?;
-                Ok(CommandOutcome { result: CommandResult::Goal(goal), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Goal(goal),
+                    events,
+                })
             }
             GoalCommand::Update {
                 goal_id,
@@ -277,22 +302,34 @@ impl<R: GoalRepository + 'static> GoalCommandHandler for GoalService<R> {
                 let (goal, events) = self
                     .update_goal(goal_id, name, description, priority, constraints, domains)
                     .await?;
-                Ok(CommandOutcome { result: CommandResult::Goal(goal), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Goal(goal),
+                    events,
+                })
             }
             GoalCommand::TransitionStatus {
                 goal_id,
                 new_status,
             } => {
                 let (goal, events) = self.transition_status(goal_id, new_status).await?;
-                Ok(CommandOutcome { result: CommandResult::Goal(goal), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Goal(goal),
+                    events,
+                })
             }
             GoalCommand::UpdateDomains { goal_id, domains } => {
                 let (goal, events) = self.update_domains(goal_id, domains).await?;
-                Ok(CommandOutcome { result: CommandResult::Goal(goal), events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Goal(goal),
+                    events,
+                })
             }
             GoalCommand::Delete { goal_id } => {
                 let events = self.delete_goal(goal_id).await?;
-                Ok(CommandOutcome { result: CommandResult::Unit, events })
+                Ok(CommandOutcome {
+                    result: CommandResult::Unit,
+                    events,
+                })
             }
         }
     }
@@ -301,7 +338,9 @@ impl<R: GoalRepository + 'static> GoalCommandHandler for GoalService<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_migrated_test_pool, goal_repository::SqliteGoalRepository};
+    use crate::adapters::sqlite::{
+        create_migrated_test_pool, goal_repository::SqliteGoalRepository,
+    };
 
     async fn setup_service() -> GoalService<SqliteGoalRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
@@ -312,14 +351,17 @@ mod tests {
     #[tokio::test]
     async fn test_create_goal() {
         let service = setup_service().await;
-        let (goal, events) = service.create_goal(
-            "Test".to_string(),
-            "Description".to_string(),
-            GoalPriority::High,
-            None,
-            vec![],
-            vec![],
-        ).await.unwrap();
+        let (goal, events) = service
+            .create_goal(
+                "Test".to_string(),
+                "Description".to_string(),
+                GoalPriority::High,
+                None,
+                vec![],
+                vec![],
+            )
+            .await
+            .unwrap();
 
         assert_eq!(goal.name, "Test");
         assert_eq!(goal.priority, GoalPriority::High);
@@ -329,16 +371,22 @@ mod tests {
     #[tokio::test]
     async fn test_transition_status() {
         let service = setup_service().await;
-        let (goal, _) = service.create_goal(
-            "Test".to_string(),
-            "Desc".to_string(),
-            GoalPriority::Normal,
-            None,
-            vec![],
-            vec![],
-        ).await.unwrap();
+        let (goal, _) = service
+            .create_goal(
+                "Test".to_string(),
+                "Desc".to_string(),
+                GoalPriority::Normal,
+                None,
+                vec![],
+                vec![],
+            )
+            .await
+            .unwrap();
 
-        let (updated, _) = service.transition_status(goal.id, GoalStatus::Paused).await.unwrap();
+        let (updated, _) = service
+            .transition_status(goal.id, GoalStatus::Paused)
+            .await
+            .unwrap();
         assert_eq!(updated.status, GoalStatus::Paused);
     }
 
@@ -346,23 +394,29 @@ mod tests {
     async fn test_effective_constraints() {
         let service = setup_service().await;
 
-        let (parent, _) = service.create_goal(
-            "Parent".to_string(),
-            "Desc".to_string(),
-            GoalPriority::Normal,
-            None,
-            vec![GoalConstraint::invariant("ParentConstraint", "From parent")],
-            vec!["testing".to_string()],
-        ).await.unwrap();
+        let (parent, _) = service
+            .create_goal(
+                "Parent".to_string(),
+                "Desc".to_string(),
+                GoalPriority::Normal,
+                None,
+                vec![GoalConstraint::invariant("ParentConstraint", "From parent")],
+                vec!["testing".to_string()],
+            )
+            .await
+            .unwrap();
 
-        let (child, _) = service.create_goal(
-            "Child".to_string(),
-            "Desc".to_string(),
-            GoalPriority::Normal,
-            Some(parent.id),
-            vec![GoalConstraint::preference("ChildConstraint", "From child")],
-            vec![],
-        ).await.unwrap();
+        let (child, _) = service
+            .create_goal(
+                "Child".to_string(),
+                "Desc".to_string(),
+                GoalPriority::Normal,
+                Some(parent.id),
+                vec![GoalConstraint::preference("ChildConstraint", "From child")],
+                vec![],
+            )
+            .await
+            .unwrap();
 
         let constraints = service.get_effective_constraints(child.id).await.unwrap();
         assert_eq!(constraints.len(), 2);

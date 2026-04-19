@@ -8,9 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::adapter::{
-    AdapterManifest, EgressAction, EgressResult,
-};
+use crate::domain::models::adapter::{AdapterManifest, EgressAction, EgressResult};
 use crate::domain::ports::adapter::EgressAdapter;
 
 use super::client::ClickUpClient;
@@ -35,10 +33,7 @@ impl ClickUpEgressAdapter {
 
     /// Read the `list_id` from the manifest config.
     fn list_id(&self) -> Option<&str> {
-        self.manifest
-            .config
-            .get("list_id")
-            .and_then(|v| v.as_str())
+        self.manifest.config.get("list_id").and_then(|v| v.as_str())
     }
 }
 
@@ -85,11 +80,10 @@ impl EgressAdapter for ClickUpEgressAdapter {
                     .get("list_id")
                     .and_then(|v| v.as_str())
                     .or_else(|| self.list_id())
-                    .ok_or_else(|| {
-                        DomainError::ValidationFailed(
-                            "ClickUp CreateItem requires 'list_id' in fields or adapter config"
-                                .to_string(),
-                        )
+                    .ok_or_else(|| DomainError::ConfigError {
+                        key: "clickup.list_id".to_string(),
+                        reason: "ClickUp CreateItem requires 'list_id' in fields or adapter config"
+                            .to_string(),
                     })?;
 
                 tracing::info!(
@@ -112,16 +106,13 @@ impl EgressAdapter for ClickUpEgressAdapter {
                     task_id = %external_id,
                     "ClickUp adapter does not support AttachArtifact"
                 );
-                Err(DomainError::ValidationFailed(
+                Err(DomainError::NotImplemented(
                     "Unsupported operation: AttachArtifact is not supported by the ClickUp adapter. \
                      Use PostComment to share artifact details instead.".to_string(),
                 ))
             }
 
-            EgressAction::Custom {
-                action_name,
-                ..
-            } => {
+            EgressAction::Custom { action_name, .. } => {
                 tracing::warn!(
                     action = %action_name,
                     "ClickUp: unknown custom action"
@@ -137,17 +128,19 @@ impl EgressAdapter for ClickUpEgressAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::adapter::{
-        AdapterCapability, AdapterDirection, AdapterType,
-    };
+    use crate::domain::models::adapter::{AdapterCapability, AdapterDirection, AdapterType};
 
     fn test_manifest() -> AdapterManifest {
-        AdapterManifest::new("clickup", AdapterType::Native, AdapterDirection::Bidirectional)
-            .with_capability(AdapterCapability::PollItems)
-            .with_capability(AdapterCapability::UpdateStatus)
-            .with_capability(AdapterCapability::PostComment)
-            .with_capability(AdapterCapability::CreateItem)
-            .with_config("list_id", serde_json::json!("99999"))
+        AdapterManifest::new(
+            "clickup",
+            AdapterType::Native,
+            AdapterDirection::Bidirectional,
+        )
+        .with_capability(AdapterCapability::PollItems)
+        .with_capability(AdapterCapability::UpdateStatus)
+        .with_capability(AdapterCapability::PostComment)
+        .with_capability(AdapterCapability::CreateItem)
+        .with_config("list_id", serde_json::json!("99999"))
     }
 
     #[test]
@@ -157,7 +150,11 @@ mod tests {
         let adapter = ClickUpEgressAdapter::new(manifest.clone(), client);
 
         assert_eq!(adapter.manifest().name, "clickup");
-        assert!(adapter.manifest().has_capability(AdapterCapability::UpdateStatus));
+        assert!(
+            adapter
+                .manifest()
+                .has_capability(AdapterCapability::UpdateStatus)
+        );
     }
 
     #[test]

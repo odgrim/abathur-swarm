@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::helpers::remove_transient_artifacts;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::convergence::*;
 use crate::domain::models::intent_verification::{
@@ -40,9 +41,11 @@ use crate::domain::models::task::Task;
 use crate::domain::models::{SubstrateConfig, SubstrateRequest};
 use crate::domain::ports::{MemoryRepository, Substrate, TaskRepository, TrajectoryRepository};
 use crate::services::convergence_bridge;
-use super::helpers::remove_transient_artifacts;
 use crate::services::convergence_engine::{ConvergenceEngine, OverseerMeasurer};
-use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
+use crate::services::event_bus::{
+    ConvergenceIterationPayload, ConvergenceTerminatedPayload, EventBus, EventPayload,
+    EventSeverity, HumanEscalationPayload,
+};
 use crate::services::event_factory;
 
 // ---------------------------------------------------------------------------
@@ -203,19 +206,21 @@ where
 
     // Emit ConvergenceStarted event
     let estimated_iterations = trajectory.budget.max_iterations;
-    event_bus.publish(event_factory::make_event(
-        EventSeverity::Info,
-        crate::services::event_bus::EventCategory::Convergence,
-        goal_id,
-        Some(task.id),
-        EventPayload::ConvergenceStarted {
-            task_id: task.id,
-            trajectory_id: trajectory.id,
-            estimated_iterations,
-            basin_width: "standard".to_string(),
-            convergence_mode: "sequential".to_string(),
-        },
-    )).await;
+    event_bus
+        .publish(event_factory::make_event(
+            EventSeverity::Info,
+            crate::services::event_bus::EventCategory::Convergence,
+            goal_id,
+            Some(task.id),
+            EventPayload::ConvergenceStarted {
+                task_id: task.id,
+                trajectory_id: trajectory.id,
+                estimated_iterations,
+                basin_width: "standard".to_string(),
+                convergence_mode: "sequential".to_string(),
+            },
+        ))
+        .await;
 
     // -----------------------------------------------------------------------
     // 1c. ALREADY-DONE DETECTION -- Skip convergence if prior work satisfies
@@ -223,13 +228,8 @@ where
     //     execution; parallel mode creates fresh worktrees.
     // -----------------------------------------------------------------------
     if let Some(wt) = worktree_path
-        && let Some(outcome) = check_work_already_done(
-            wt,
-            task,
-            goal_id,
-            &intent_verifier,
-            event_bus,
-        ).await
+        && let Some(outcome) =
+            check_work_already_done(wt, task, goal_id, &intent_verifier, event_bus).await
     {
         return Ok(outcome);
     }
@@ -327,25 +327,28 @@ where
 
     // Link trajectory to task
     if task.trajectory_id.is_none()
-        && let Ok(Some(mut t)) = task_repo.get(task.id).await {
-            t.trajectory_id = Some(base_trajectory.id);
-            let _ = task_repo.update(&t).await;
-        }
+        && let Ok(Some(mut t)) = task_repo.get(task.id).await
+    {
+        t.trajectory_id = Some(base_trajectory.id);
+        let _ = task_repo.update(&t).await;
+    }
 
     // Emit ConvergenceStarted event
-    event_bus.publish(event_factory::make_event(
-        EventSeverity::Info,
-        crate::services::event_bus::EventCategory::Convergence,
-        goal_id,
-        Some(task.id),
-        EventPayload::ConvergenceStarted {
-            task_id: task.id,
-            trajectory_id: base_trajectory.id,
-            estimated_iterations: base_trajectory.budget.max_iterations,
-            basin_width: "standard".to_string(),
-            convergence_mode: format!("parallel({})", n),
-        },
-    )).await;
+    event_bus
+        .publish(event_factory::make_event(
+            EventSeverity::Info,
+            crate::services::event_bus::EventCategory::Convergence,
+            goal_id,
+            Some(task.id),
+            EventPayload::ConvergenceStarted {
+                task_id: task.id,
+                trajectory_id: base_trajectory.id,
+                estimated_iterations: base_trajectory.budget.max_iterations,
+                basin_width: "standard".to_string(),
+                convergence_mode: format!("parallel({})", n),
+            },
+        ))
+        .await;
 
     // -----------------------------------------------------------------------
     // 2. PHASE 1 -- Create N worktrees and spawn N concurrent invocations
@@ -414,6 +417,8 @@ where
 
         let strategy_clone = strategy.clone();
 
+        // Per-sample worker: one spawn per parallel sample, joined below via
+        // handles.into_iter(). Not a long-lived daemon.
         handles.push(tokio::spawn(async move {
             if cancellation_token.is_cancelled() {
                 return Err(DomainError::ExecutionFailed("cancelled".to_string()));
@@ -422,12 +427,8 @@ where
             let config = SubstrateConfig::default()
                 .with_max_turns(max_turns)
                 .with_working_dir(&wt_path);
-            let request = SubstrateRequest::new(
-                task_id,
-                &agent_type,
-                &system_prompt,
-                &prompt,
-            ).with_config(config);
+            let request = SubstrateRequest::new(task_id, &agent_type, &system_prompt, &prompt)
+                .with_config(config);
 
             let iteration_start = Instant::now();
             let session = substrate.execute(request).await?;
@@ -527,7 +528,9 @@ where
                 .and_then(|o| o.metrics.as_ref())
                 .map(|m| m.intent_blended_level.unwrap_or(m.convergence_level))
                 .unwrap_or(0.0);
-            a_level.partial_cmp(&b_level).unwrap_or(std::cmp::Ordering::Equal)
+            a_level
+                .partial_cmp(&b_level)
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(idx, _)| idx);
 
@@ -542,10 +545,17 @@ where
                 trajectory_id: base_trajectory.id.to_string(),
                 best_observation_sequence: None,
             };
-            engine.finalize(&mut base_trajectory, &outcome, sample_bandits.first().unwrap_or(&StrategyBandit::with_default_priors())).await?;
-            emit_convergence_terminated(
-                event_bus, task, goal_id, &base_trajectory, "exhausted",
-            ).await;
+            engine
+                .finalize(
+                    &mut base_trajectory,
+                    &outcome,
+                    sample_bandits
+                        .first()
+                        .unwrap_or(&StrategyBandit::with_default_priors()),
+                )
+                .await?;
+            emit_convergence_terminated(event_bus, task, goal_id, &base_trajectory, "exhausted")
+                .await;
             return Ok(ConvergentOutcome::Failed(
                 "all parallel samples failed".to_string(),
             ));
@@ -572,14 +582,18 @@ where
     // Phase 1 consumed. Phase 1 used N iterations' worth of budget,
     // so Phase 2 gets the rest.
     let phase1_tokens: u64 = trajectory.budget.tokens_used;
-    let remaining_token_budget = base_trajectory.budget.max_tokens.saturating_sub(phase1_tokens);
+    let remaining_token_budget = base_trajectory
+        .budget
+        .max_tokens
+        .saturating_sub(phase1_tokens);
     let remaining_iterations = base_trajectory
         .budget
         .max_iterations
         .saturating_sub(n as u32);
 
     trajectory.budget.max_tokens = trajectory.budget.tokens_used + remaining_token_budget;
-    trajectory.budget.max_iterations = trajectory.budget.iterations_used + remaining_iterations.max(1);
+    trajectory.budget.max_iterations =
+        trajectory.budget.iterations_used + remaining_iterations.max(1);
     trajectory.budget.max_wall_time = base_trajectory.budget.max_wall_time;
 
     // -----------------------------------------------------------------------
@@ -660,20 +674,20 @@ where
     // don't permanently block convergence via `all_passing()`.
     // Initialize from existing observations if resuming a trajectory.
     if trajectory.lint_baseline == 0
-        && let Some(baseline) = trajectory.observations.first()
+        && let Some(baseline) = trajectory
+            .observations
+            .first()
             .and_then(|o| o.overseer_signals.lint_results.as_ref())
             .map(|l| l.error_count)
-        {
-            trajectory.lint_baseline = baseline;
-        }
+    {
+        trajectory.lint_baseline = baseline;
+    }
 
     loop {
         // Check cancellation
         if cancellation_token.is_cancelled() {
             trajectory_store.save(&trajectory).await?;
-            emit_convergence_terminated(
-                event_bus, task, goal_id, &trajectory, "cancelled",
-            ).await;
+            emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "cancelled").await;
             return Ok(ConvergentOutcome::Cancelled);
         }
 
@@ -699,9 +713,7 @@ where
                     attractor_type: trajectory.attractor_state.classification.clone(),
                 };
                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "trapped",
-                ).await;
+                emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "trapped").await;
                 return Ok(ConvergentOutcome::Failed(format!(
                     "trapped in {:?} attractor -- no eligible escape strategies",
                     trajectory.attractor_state.classification
@@ -715,24 +727,30 @@ where
         };
 
         // Part 7.1: Strategy escalation check
-        if matches!(&strategy, StrategyKind::ArchitectReview | StrategyKind::Decompose) {
-            event_bus.publish(event_factory::make_event(
-                EventSeverity::Warning,
-                crate::services::event_bus::EventCategory::Escalation,
-                goal_id,
-                Some(task.id),
-                EventPayload::HumanEscalationNeeded {
+        if matches!(
+            &strategy,
+            StrategyKind::ArchitectReview | StrategyKind::Decompose
+        ) {
+            event_bus
+                .publish(event_factory::make_event(
+                    EventSeverity::Warning,
+                    crate::services::event_bus::EventCategory::Escalation,
                     goal_id,
-                    task_id: Some(task.id),
-                    reason: format!(
-                        "Convergence engine selected {} strategy for task {}",
-                        strategy.kind_name(), task.id
-                    ),
-                    urgency: "medium".to_string(),
-                    questions: vec![],
-                    is_blocking: false,
-                },
-            )).await;
+                    Some(task.id),
+                    EventPayload::HumanEscalationNeeded(HumanEscalationPayload {
+                        goal_id,
+                        task_id: Some(task.id),
+                        reason: format!(
+                            "Convergence engine selected {} strategy for task {}",
+                            strategy.kind_name(),
+                            task.id
+                        ),
+                        urgency: "medium".to_string(),
+                        questions: vec![],
+                        is_blocking: false,
+                    }),
+                ))
+                .await;
         }
 
         // FreshStart worktree reset (Part 3.7)
@@ -741,18 +759,20 @@ where
             if let Some(wt) = worktree_path {
                 reset_worktree(wt).await?;
             }
-            event_bus.publish(event_factory::make_event(
-                EventSeverity::Info,
-                crate::services::event_bus::EventCategory::Convergence,
-                goal_id,
-                Some(task.id),
-                EventPayload::ConvergenceFreshStart {
-                    task_id: task.id,
-                    trajectory_id: trajectory.id,
-                    fresh_start_number: trajectory.total_fresh_starts,
-                    reason: "FreshStart strategy selected".to_string(),
-                },
-            )).await;
+            event_bus
+                .publish(event_factory::make_event(
+                    EventSeverity::Info,
+                    crate::services::event_bus::EventCategory::Convergence,
+                    goal_id,
+                    Some(task.id),
+                    EventPayload::ConvergenceFreshStart {
+                        task_id: task.id,
+                        trajectory_id: trajectory.id,
+                        fresh_start_number: trajectory.total_fresh_starts,
+                        reason: "FreshStart strategy selected".to_string(),
+                    },
+                ))
+                .await;
         }
 
         // Build prompt with optional intent verification feedback
@@ -767,21 +787,14 @@ where
         if let Some(wt) = worktree_path {
             config = config.with_working_dir(wt);
         }
-        let request = SubstrateRequest::new(
-            task.id,
-            agent_type,
-            system_prompt,
-            &prompt,
-        ).with_config(config);
+        let request =
+            SubstrateRequest::new(task.id, agent_type, system_prompt, &prompt).with_config(config);
 
         let iteration_start = Instant::now();
         let session = substrate.execute(request).await?;
         let wall_time_ms = iteration_start.elapsed().as_millis() as u64;
 
-        let artifact = convergence_bridge::collect_artifact(
-            worktree_path.unwrap_or("."),
-            "",
-        );
+        let artifact = convergence_bridge::collect_artifact(worktree_path.unwrap_or("."), "");
 
         // Measure with overseers (Part 5)
         let overseer_signals = engine
@@ -799,7 +812,9 @@ where
         // Set lint baseline from the first iteration's measurement if not already set
         // (i.e. when this is the very first observation and no prior observations existed).
         if trajectory.observations.is_empty() && trajectory.lint_baseline == 0 {
-            trajectory.lint_baseline = overseer_signals.lint_results.as_ref()
+            trajectory.lint_baseline = overseer_signals
+                .lint_results
+                .as_ref()
                 .map(|l| l.error_count)
                 .unwrap_or(0);
         }
@@ -823,19 +838,21 @@ where
         // Part 7.1: Attractor transition detection
         let current_attractor = &trajectory.attractor_state.classification;
         if attractor_type_label(current_attractor) != attractor_type_label(&prev_attractor) {
-            event_bus.publish(event_factory::make_event(
-                EventSeverity::Info,
-                crate::services::event_bus::EventCategory::Convergence,
-                goal_id,
-                Some(task.id),
-                EventPayload::ConvergenceAttractorTransition {
-                    task_id: task.id,
-                    trajectory_id: trajectory.id,
-                    from: attractor_type_label(&prev_attractor).to_string(),
-                    to: attractor_type_label(current_attractor).to_string(),
-                    confidence: trajectory.attractor_state.confidence,
-                },
-            )).await;
+            event_bus
+                .publish(event_factory::make_event(
+                    EventSeverity::Info,
+                    crate::services::event_bus::EventCategory::Convergence,
+                    goal_id,
+                    Some(task.id),
+                    EventPayload::ConvergenceAttractorTransition {
+                        task_id: task.id,
+                        trajectory_id: trajectory.id,
+                        from: attractor_type_label(&prev_attractor).to_string(),
+                        to: attractor_type_label(current_attractor).to_string(),
+                        confidence: trajectory.attractor_state.confidence,
+                    },
+                ))
+                .await;
             prev_attractor = current_attractor.clone();
         }
 
@@ -847,24 +864,27 @@ where
             .map(|m| (m.convergence_delta, m.convergence_level))
             .unwrap_or((0.0, 0.0));
 
-        event_bus.publish(event_factory::make_event(
-            EventSeverity::Info,
-            crate::services::event_bus::EventCategory::Convergence,
-            goal_id,
-            Some(task.id),
-            EventPayload::ConvergenceIteration {
-                task_id: task.id,
-                trajectory_id: trajectory.id,
-                iteration: sequence,
-                strategy: strategy.kind_name().to_string(),
-                convergence_delta: delta,
-                convergence_level: level,
-                attractor_type: attractor_type_label(
-                    &trajectory.attractor_state.classification,
-                ).to_string(),
-                budget_remaining_fraction: trajectory.budget.remaining_fraction(),
-            },
-        )).await;
+        event_bus
+            .publish(event_factory::make_event(
+                EventSeverity::Info,
+                crate::services::event_bus::EventCategory::Convergence,
+                goal_id,
+                Some(task.id),
+                EventPayload::ConvergenceIteration(ConvergenceIterationPayload {
+                    task_id: task.id,
+                    trajectory_id: trajectory.id,
+                    iteration: sequence,
+                    strategy: strategy.kind_name().to_string(),
+                    convergence_delta: delta,
+                    convergence_level: level,
+                    attractor_type: attractor_type_label(
+                        &trajectory.attractor_state.classification,
+                    )
+                    .to_string(),
+                    budget_remaining_fraction: trajectory.budget.remaining_fraction(),
+                }),
+            ))
+            .await;
 
         // Act on loop control
         match loop_control {
@@ -874,12 +894,13 @@ where
                 // -----------------------------------------------------------
                 // Skip for verification tasks (defense-in-depth recursion guard).
                 if !task.task_type.is_verification() && engine.should_verify(&trajectory) {
-                    let overseer_signals = trajectory
-                        .observations
-                        .last()
-                        .map(|o| &o.overseer_signals);
+                    let overseer_signals =
+                        trajectory.observations.last().map(|o| &o.overseer_signals);
 
-                    match intent_verifier.verify_convergent_intent(task, goal_id, sequence, overseer_signals).await {
+                    match intent_verifier
+                        .verify_convergent_intent(task, goal_id, sequence, overseer_signals)
+                        .await
+                    {
                         Ok(Some(ivr)) => {
                             tracing::info!(
                                 task_id = %task.id,
@@ -892,18 +913,21 @@ where
 
                             apply_verification_amendments(&ivr, &mut trajectory);
 
-                            emit_intent_verification_event(
-                                event_bus, task, goal_id, &ivr,
-                            ).await;
+                            emit_intent_verification_event(event_bus, task, goal_id, &ivr).await;
 
                             if let Some(ref escalation) = ivr.escalation {
                                 emit_escalation_from_verification(
                                     event_bus, task, goal_id, escalation,
-                                ).await;
+                                )
+                                .await;
                             } else if let Some(auto_escalation) = ivr.should_escalate() {
                                 emit_escalation_from_verification(
-                                    event_bus, task, goal_id, &auto_escalation,
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &auto_escalation,
+                                )
+                                .await;
                             }
 
                             trajectory.prev_intent_confidence = trajectory.last_intent_confidence;
@@ -948,11 +972,10 @@ where
                         best_observation_sequence: best_seq,
                     };
                     engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                    emit_convergence_terminated(
-                        event_bus, task, goal_id, &trajectory, "exhausted",
-                    ).await;
+                    emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "exhausted")
+                        .await;
                     return Ok(ConvergentOutcome::Failed(
-                        "total intent check cap (10) exceeded".into()
+                        "total intent check cap (10) exceeded".into(),
                     ));
                 }
 
@@ -966,14 +989,12 @@ where
                     return Ok(ConvergentOutcome::Converged);
                 }
 
-                let overseer_signals = trajectory
-                    .observations
-                    .last()
-                    .map(|o| &o.overseer_signals);
+                let overseer_signals = trajectory.observations.last().map(|o| &o.overseer_signals);
 
-                match intent_verifier.verify_convergent_intent(
-                    task, goal_id, sequence, overseer_signals,
-                ).await {
+                match intent_verifier
+                    .verify_convergent_intent(task, goal_id, sequence, overseer_signals)
+                    .await
+                {
                     Ok(Some(ivr)) => {
                         tracing::info!(
                             task_id = %task.id,
@@ -983,9 +1004,7 @@ where
                             "IntentCheck finality verification",
                         );
 
-                        emit_intent_verification_event(
-                            event_bus, task, goal_id, &ivr,
-                        ).await;
+                        emit_intent_verification_event(event_bus, task, goal_id, &ivr).await;
 
                         trajectory.prev_intent_confidence = trajectory.last_intent_confidence;
                         trajectory.last_intent_confidence = Some(ivr.confidence);
@@ -1011,11 +1030,16 @@ where
                                 if let Some(ref escalation) = ivr.escalation {
                                     emit_escalation_from_verification(
                                         event_bus, task, goal_id, escalation,
-                                    ).await;
+                                    )
+                                    .await;
                                 } else if let Some(auto_escalation) = ivr.should_escalate() {
                                     emit_escalation_from_verification(
-                                        event_bus, task, goal_id, &auto_escalation,
-                                    ).await;
+                                        event_bus,
+                                        task,
+                                        goal_id,
+                                        &auto_escalation,
+                                    )
+                                    .await;
                                 }
 
                                 last_intent_verification = Some(ivr);
@@ -1037,15 +1061,19 @@ where
                                          Human judgment required.",
                                     );
                                     emit_escalation_from_verification(
-                                        event_bus, task, goal_id, &escalation,
-                                    ).await;
+                                        event_bus,
+                                        task,
+                                        goal_id,
+                                        &escalation,
+                                    )
+                                    .await;
                                 }
 
                                 // Hard cap: after 3 consecutive indeterminates, fall back
                                 // to overseer verdict to avoid infinite loops.
                                 if consecutive_indeterminate >= 3 {
-                                    let signals = trajectory.observations.last()
-                                        .map(|o| &o.overseer_signals);
+                                    let signals =
+                                        trajectory.observations.last().map(|o| &o.overseer_signals);
                                     let overseers_clean = signals
                                         .map(|s| {
                                             s.all_passing_relative(trajectory.lint_baseline)
@@ -1069,23 +1097,34 @@ where
                                         };
                                         engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                         emit_convergence_terminated(
-                                            event_bus, task, goal_id, &trajectory, "indeterminate_accepted",
-                                        ).await;
+                                            event_bus,
+                                            task,
+                                            goal_id,
+                                            &trajectory,
+                                            "indeterminate_accepted",
+                                        )
+                                        .await;
                                         return Ok(ConvergentOutcome::IndeterminateAccepted);
                                     } else {
                                         tracing::warn!(
                                             task_id = %task.id,
                                             "Intent verification indeterminate 3x; overseers NOT passing — failing task"
                                         );
-                                        let best_seq = trajectory.best_observation().map(|o| o.sequence);
+                                        let best_seq =
+                                            trajectory.best_observation().map(|o| o.sequence);
                                         let outcome = ConvergenceOutcome::Exhausted {
                                             trajectory_id: trajectory.id.to_string(),
                                             best_observation_sequence: best_seq,
                                         };
                                         engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                         emit_convergence_terminated(
-                                            event_bus, task, goal_id, &trajectory, "exhausted",
-                                        ).await;
+                                            event_bus,
+                                            task,
+                                            goal_id,
+                                            &trajectory,
+                                            "exhausted",
+                                        )
+                                        .await;
                                         return Ok(ConvergentOutcome::Failed(
                                             "intent verification indeterminate 3x with failing overseers".into()
                                         ));
@@ -1105,19 +1144,19 @@ where
                             consecutive = consecutive_indeterminate,
                             "IntentCheck: no intent extractable from task or goal"
                         );
-                        let escalation = crate::domain::models::HumanEscalation::ambiguous_requirements(
-                            "Cannot extract intent from task or goal description. \
+                        let escalation =
+                            crate::domain::models::HumanEscalation::ambiguous_requirements(
+                                "Cannot extract intent from task or goal description. \
                              Intent verification is required for finality but no intent \
                              could be derived. Human input needed to clarify the task.",
-                        );
-                        emit_escalation_from_verification(
-                            event_bus, task, goal_id, &escalation,
-                        ).await;
+                            );
+                        emit_escalation_from_verification(event_bus, task, goal_id, &escalation)
+                            .await;
 
                         // Apply same hard cap as Indeterminate
                         if consecutive_indeterminate >= 3 {
-                            let signals = trajectory.observations.last()
-                                .map(|o| &o.overseer_signals);
+                            let signals =
+                                trajectory.observations.last().map(|o| &o.overseer_signals);
                             let overseers_clean = signals
                                 .map(|s| {
                                     s.all_passing_relative(trajectory.lint_baseline)
@@ -1141,8 +1180,13 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "indeterminate_accepted",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "indeterminate_accepted",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::IndeterminateAccepted);
                             } else {
                                 tracing::warn!(
@@ -1156,10 +1200,15 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "exhausted",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "exhausted",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::Failed(
-                                    "intent extraction failed 3x with failing overseers".into()
+                                    "intent extraction failed 3x with failing overseers".into(),
                                 ));
                             }
                         } else {
@@ -1178,8 +1227,8 @@ where
 
                         // Apply same hard cap as Indeterminate
                         if consecutive_indeterminate >= 3 {
-                            let signals = trajectory.observations.last()
-                                .map(|o| &o.overseer_signals);
+                            let signals =
+                                trajectory.observations.last().map(|o| &o.overseer_signals);
                             let overseers_clean = signals
                                 .map(|s| {
                                     s.all_passing_relative(trajectory.lint_baseline)
@@ -1203,8 +1252,13 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "indeterminate_accepted",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "indeterminate_accepted",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::IndeterminateAccepted);
                             } else {
                                 tracing::warn!(
@@ -1218,8 +1272,13 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "exhausted",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "exhausted",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::Failed(
                                     "intent verification infrastructure failure 3x with failing overseers".into()
                                 ));
@@ -1241,9 +1300,8 @@ where
                     final_observation_sequence: final_seq,
                 };
                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "converged",
-                ).await;
+                emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "converged")
+                    .await;
                 return Ok(ConvergentOutcome::Converged);
             }
             LoopControl::Exhausted => {
@@ -1257,24 +1315,19 @@ where
                         task_id = %task.id,
                         "Pre-exhaustion intent check skipped for verification task (recursion guard)"
                     );
-                    emit_convergence_terminated(
-                        event_bus, task, goal_id, &trajectory, "exhausted",
-                    ).await;
+                    emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "exhausted")
+                        .await;
                     return Ok(ConvergentOutcome::Failed("budget exhausted".to_string()));
                 }
 
-                let overseer_signals = trajectory
-                    .observations
-                    .last()
-                    .map(|o| &o.overseer_signals);
+                let overseer_signals = trajectory.observations.last().map(|o| &o.overseer_signals);
 
-                match intent_verifier.verify_convergent_intent(
-                    task, goal_id, sequence, overseer_signals,
-                ).await {
+                match intent_verifier
+                    .verify_convergent_intent(task, goal_id, sequence, overseer_signals)
+                    .await
+                {
                     Ok(Some(ivr)) => {
-                        emit_intent_verification_event(
-                            event_bus, task, goal_id, &ivr,
-                        ).await;
+                        emit_intent_verification_event(event_bus, task, goal_id, &ivr).await;
 
                         match ivr.satisfaction {
                             IntentSatisfaction::Satisfied => {
@@ -1293,8 +1346,13 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "converged",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "converged",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::Converged);
                             }
                             IntentSatisfaction::Partial if ivr.confidence >= 0.8 => {
@@ -1314,8 +1372,13 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "converged",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "converged",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::PartialAccepted);
                             }
                             _ => {
@@ -1344,12 +1407,10 @@ where
                     best_observation_sequence: best_seq,
                 };
                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "exhausted",
-                ).await;
+                emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "exhausted")
+                    .await;
                 return Ok(ConvergentOutcome::Failed(
-                    "convergence budget exhausted without intent satisfaction"
-                        .to_string(),
+                    "convergence budget exhausted without intent satisfaction".to_string(),
                 ));
             }
             LoopControl::Trapped => {
@@ -1358,18 +1419,15 @@ where
                     attractor_type: trajectory.attractor_state.classification.clone(),
                 };
                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "trapped",
-                ).await;
+                emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "trapped").await;
                 return Ok(ConvergentOutcome::Failed(format!(
                     "trapped in {} attractor",
                     attractor_type_label(&trajectory.attractor_state.classification),
                 )));
             }
             LoopControl::Decompose => {
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "decomposed",
-                ).await;
+                emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "decomposed")
+                    .await;
                 return Ok(ConvergentOutcome::Decomposed(trajectory));
             }
             LoopControl::OverseerConverged => {
@@ -1393,20 +1451,17 @@ where
                         final_observation_sequence: final_seq,
                     };
                     engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                    emit_convergence_terminated(
-                        event_bus, task, goal_id, &trajectory, "converged",
-                    ).await;
+                    emit_convergence_terminated(event_bus, task, goal_id, &trajectory, "converged")
+                        .await;
                     return Ok(ConvergentOutcome::Converged);
                 }
 
-                let overseer_signals = trajectory
-                    .observations
-                    .last()
-                    .map(|o| &o.overseer_signals);
+                let overseer_signals = trajectory.observations.last().map(|o| &o.overseer_signals);
 
-                match intent_verifier.verify_convergent_intent(
-                    task, goal_id, sequence, overseer_signals,
-                ).await {
+                match intent_verifier
+                    .verify_convergent_intent(task, goal_id, sequence, overseer_signals)
+                    .await
+                {
                     Ok(Some(ivr)) => {
                         tracing::info!(
                             task_id = %task.id,
@@ -1416,9 +1471,7 @@ where
                             "OverseerConverged intent verification gate",
                         );
 
-                        emit_intent_verification_event(
-                            event_bus, task, goal_id, &ivr,
-                        ).await;
+                        emit_intent_verification_event(event_bus, task, goal_id, &ivr).await;
 
                         trajectory.prev_intent_confidence = trajectory.last_intent_confidence;
                         trajectory.last_intent_confidence = Some(ivr.confidence);
@@ -1437,8 +1490,13 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "converged",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "converged",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::Converged);
                             }
                             IntentSatisfaction::Partial | IntentSatisfaction::Unsatisfied => {
@@ -1462,8 +1520,13 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "intent_gaps_found",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "intent_gaps_found",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::IntentGapsFound(ivr));
                             }
                             IntentSatisfaction::Indeterminate => {
@@ -1484,8 +1547,13 @@ where
                                 };
                                 engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                                 emit_convergence_terminated(
-                                    event_bus, task, goal_id, &trajectory, "indeterminate_accepted",
-                                ).await;
+                                    event_bus,
+                                    task,
+                                    goal_id,
+                                    &trajectory,
+                                    "indeterminate_accepted",
+                                )
+                                .await;
                                 return Ok(ConvergentOutcome::IndeterminateAccepted);
                             }
                         }
@@ -1507,8 +1575,13 @@ where
                         };
                         engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                         emit_convergence_terminated(
-                            event_bus, task, goal_id, &trajectory, "converged",
-                        ).await;
+                            event_bus,
+                            task,
+                            goal_id,
+                            &trajectory,
+                            "converged",
+                        )
+                        .await;
                         return Ok(ConvergentOutcome::Converged);
                     }
                     Err(e) => {
@@ -1530,8 +1603,13 @@ where
                         };
                         engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                         emit_convergence_terminated(
-                            event_bus, task, goal_id, &trajectory, "converged",
-                        ).await;
+                            event_bus,
+                            task,
+                            goal_id,
+                            &trajectory,
+                            "converged",
+                        )
+                        .await;
                         return Ok(ConvergentOutcome::Converged);
                     }
                 }
@@ -1541,42 +1619,51 @@ where
                 let additional_tokens = (trajectory.budget.max_tokens as f64 * 0.3) as u64;
 
                 if engine.request_extension(&mut trajectory).await? {
-                    event_bus.publish(event_factory::make_event(
-                        EventSeverity::Info,
-                        crate::services::event_bus::EventCategory::Convergence,
-                        goal_id,
-                        Some(task.id),
-                        EventPayload::ConvergenceBudgetExtension {
-                            task_id: task.id,
-                            trajectory_id: trajectory.id,
-                            granted: true,
-                            additional_iterations,
-                            additional_tokens,
-                        },
-                    )).await;
+                    event_bus
+                        .publish(event_factory::make_event(
+                            EventSeverity::Info,
+                            crate::services::event_bus::EventCategory::Convergence,
+                            goal_id,
+                            Some(task.id),
+                            EventPayload::ConvergenceBudgetExtension {
+                                task_id: task.id,
+                                trajectory_id: trajectory.id,
+                                granted: true,
+                                additional_iterations,
+                                additional_tokens,
+                            },
+                        ))
+                        .await;
                     continue;
                 } else {
-                    event_bus.publish(event_factory::make_event(
-                        EventSeverity::Warning,
-                        crate::services::event_bus::EventCategory::Convergence,
-                        goal_id,
-                        Some(task.id),
-                        EventPayload::ConvergenceBudgetExtension {
-                            task_id: task.id,
-                            trajectory_id: trajectory.id,
-                            granted: false,
-                            additional_iterations: 0,
-                            additional_tokens: 0,
-                        },
-                    )).await;
+                    event_bus
+                        .publish(event_factory::make_event(
+                            EventSeverity::Warning,
+                            crate::services::event_bus::EventCategory::Convergence,
+                            goal_id,
+                            Some(task.id),
+                            EventPayload::ConvergenceBudgetExtension {
+                                task_id: task.id,
+                                trajectory_id: trajectory.id,
+                                granted: false,
+                                additional_iterations: 0,
+                                additional_tokens: 0,
+                            },
+                        ))
+                        .await;
 
                     let outcome = ConvergenceOutcome::BudgetDenied {
                         trajectory_id: trajectory.id.to_string(),
                     };
                     engine.finalize(&mut trajectory, &outcome, &bandit).await?;
                     emit_convergence_terminated(
-                        event_bus, task, goal_id, &trajectory, "budget_denied",
-                    ).await;
+                        event_bus,
+                        task,
+                        goal_id,
+                        &trajectory,
+                        "budget_denied",
+                    )
+                    .await;
                     return Ok(ConvergentOutcome::Failed(
                         "budget extension denied".to_string(),
                     ));
@@ -1596,10 +1683,7 @@ where
 /// This enriches the effective specification so that subsequent iterations
 /// see the discovered requirements. Minor and Moderate gaps are left as
 /// prompt-level feedback only (via `last_intent_verification`).
-fn apply_verification_amendments(
-    ivr: &IntentVerificationResult,
-    trajectory: &mut Trajectory,
-) {
+fn apply_verification_amendments(ivr: &IntentVerificationResult, trajectory: &mut Trajectory) {
     for gap in ivr.all_gaps() {
         if gap.severity >= GapSeverity::Major {
             let amendment = SpecificationAmendment::new(
@@ -1622,19 +1706,21 @@ async fn emit_intent_verification_event(
     ivr: &IntentVerificationResult,
 ) {
     let should_continue = ivr.satisfaction.should_retry();
-    event_bus.publish(event_factory::make_event(
-        EventSeverity::Info,
-        crate::services::event_bus::EventCategory::Verification,
-        goal_id,
-        Some(task.id),
-        EventPayload::IntentVerificationResult {
-            satisfaction: ivr.satisfaction.as_str().to_string(),
-            confidence: ivr.confidence,
-            gaps_count: ivr.gaps.len() + ivr.implicit_gaps.len(),
-            iteration: ivr.iteration,
-            should_continue,
-        },
-    )).await;
+    event_bus
+        .publish(event_factory::make_event(
+            EventSeverity::Info,
+            crate::services::event_bus::EventCategory::Verification,
+            goal_id,
+            Some(task.id),
+            EventPayload::IntentVerificationResult {
+                satisfaction: ivr.satisfaction.as_str().to_string(),
+                confidence: ivr.confidence,
+                gaps_count: ivr.gaps.len() + ivr.implicit_gaps.len(),
+                iteration: ivr.iteration,
+                should_continue,
+            },
+        ))
+        .await;
 }
 
 /// Emit a `HumanEscalationNeeded` event triggered by intent verification.
@@ -1648,20 +1734,22 @@ async fn emit_escalation_from_verification(
         escalation.urgency,
         crate::domain::models::intent_verification::EscalationUrgency::Blocking,
     );
-    event_bus.publish(event_factory::make_event(
-        EventSeverity::Warning,
-        crate::services::event_bus::EventCategory::Escalation,
-        goal_id,
-        Some(task.id),
-        EventPayload::HumanEscalationNeeded {
+    event_bus
+        .publish(event_factory::make_event(
+            EventSeverity::Warning,
+            crate::services::event_bus::EventCategory::Escalation,
             goal_id,
-            task_id: Some(task.id),
-            reason: escalation.reason.clone(),
-            urgency: format!("{:?}", escalation.urgency).to_lowercase(),
-            questions: escalation.questions.clone(),
-            is_blocking,
-        },
-    )).await;
+            Some(task.id),
+            EventPayload::HumanEscalationNeeded(HumanEscalationPayload {
+                goal_id,
+                task_id: Some(task.id),
+                reason: escalation.reason.clone(),
+                urgency: format!("{:?}", escalation.urgency).to_lowercase(),
+                questions: escalation.questions.clone(),
+                is_blocking,
+            }),
+        ))
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1691,19 +1779,20 @@ async fn reset_worktree(worktree_path: &str) -> DomainResult<()> {
         .current_dir(worktree_path)
         .output()
         .await
-        .map_err(|e| {
-            DomainError::ExecutionFailed(format!(
+        .map_err(|e| DomainError::ExternalServiceError {
+            service: "git".to_string(),
+            reason: format!(
                 "failed to reset worktree {}: git checkout: {}",
                 worktree_path, e
-            ))
+            ),
         })?;
 
     if !checkout.status.success() {
         let stderr = String::from_utf8_lossy(&checkout.stderr);
-        return Err(DomainError::ExecutionFailed(format!(
-            "git checkout -- . failed in {}: {}",
-            worktree_path, stderr
-        )));
+        return Err(DomainError::ExternalServiceError {
+            service: "git".to_string(),
+            reason: format!("git checkout -- . failed in {}: {}", worktree_path, stderr),
+        });
     }
 
     let clean = tokio::process::Command::new("git")
@@ -1711,19 +1800,20 @@ async fn reset_worktree(worktree_path: &str) -> DomainResult<()> {
         .current_dir(worktree_path)
         .output()
         .await
-        .map_err(|e| {
-            DomainError::ExecutionFailed(format!(
+        .map_err(|e| DomainError::ExternalServiceError {
+            service: "git".to_string(),
+            reason: format!(
                 "failed to clean worktree {}: git clean: {}",
                 worktree_path, e
-            ))
+            ),
         })?;
 
     if !clean.status.success() {
         let stderr = String::from_utf8_lossy(&clean.stderr);
-        return Err(DomainError::ExecutionFailed(format!(
-            "git clean -fd failed in {}: {}",
-            worktree_path, stderr
-        )));
+        return Err(DomainError::ExternalServiceError {
+            service: "git".to_string(),
+            reason: format!("git clean -fd failed in {}: {}", worktree_path, stderr),
+        });
     }
 
     Ok(())
@@ -1760,9 +1850,7 @@ async fn check_work_already_done(
             .ok();
 
         let log_output = match &upstream_log {
-            Some(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
+            Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => {
                 // No upstream tracking branch — fall back to origin/main
                 let fallback = tokio::process::Command::new("git")
@@ -1822,20 +1910,22 @@ async fn check_work_already_done(
 
                 // Emit a lightweight convergence event (no trajectory available
                 // at this stage since we short-circuit before iteration begins).
-                event_bus.publish(event_factory::make_event(
-                    EventSeverity::Info,
-                    crate::services::event_bus::EventCategory::Convergence,
-                    goal_id,
-                    Some(task.id),
-                    EventPayload::ConvergenceTerminated {
-                        task_id: task.id,
-                        trajectory_id: Uuid::nil(),
-                        outcome: "already_done".to_string(),
-                        total_iterations: 0,
-                        total_tokens: 0,
-                        final_convergence_level: 1.0,
-                    },
-                )).await;
+                event_bus
+                    .publish(event_factory::make_event(
+                        EventSeverity::Info,
+                        crate::services::event_bus::EventCategory::Convergence,
+                        goal_id,
+                        Some(task.id),
+                        EventPayload::ConvergenceTerminated(ConvergenceTerminatedPayload {
+                            task_id: task.id,
+                            trajectory_id: Uuid::nil(),
+                            outcome: "already_done".to_string(),
+                            total_iterations: 0,
+                            total_tokens: 0,
+                            final_convergence_level: 1.0,
+                        }),
+                    ))
+                    .await;
 
                 Some(ConvergentOutcome::Converged)
             } else {
@@ -1875,19 +1965,17 @@ async fn create_worktree(worktree_path: &str, branch: &str) -> DomainResult<()> 
         .args(["worktree", "add", worktree_path, branch])
         .output()
         .await
-        .map_err(|e| {
-            DomainError::ExecutionFailed(format!(
-                "failed to create worktree at {}: {}",
-                worktree_path, e
-            ))
+        .map_err(|e| DomainError::ExternalServiceError {
+            service: "git".to_string(),
+            reason: format!("failed to create worktree at {}: {}", worktree_path, e),
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DomainError::ExecutionFailed(format!(
-            "git worktree add failed for {}: {}",
-            worktree_path, stderr
-        )));
+        return Err(DomainError::ExternalServiceError {
+            service: "git".to_string(),
+            reason: format!("git worktree add failed for {}: {}", worktree_path, stderr),
+        });
     }
 
     Ok(())
@@ -1902,11 +1990,9 @@ async fn destroy_worktree(worktree_path: &str) -> DomainResult<()> {
         .args(["worktree", "remove", "--force", worktree_path])
         .output()
         .await
-        .map_err(|e| {
-            DomainError::ExecutionFailed(format!(
-                "failed to destroy worktree at {}: {}",
-                worktree_path, e
-            ))
+        .map_err(|e| DomainError::ExternalServiceError {
+            service: "git".to_string(),
+            reason: format!("failed to destroy worktree at {}: {}", worktree_path, e),
         })?;
 
     if !output.status.success() {
@@ -1940,20 +2026,22 @@ async fn emit_convergence_terminated(
         .map(|m| m.convergence_level)
         .unwrap_or(0.0);
 
-    event_bus.publish(event_factory::make_event(
-        EventSeverity::Info,
-        crate::services::event_bus::EventCategory::Convergence,
-        goal_id,
-        Some(task.id),
-        EventPayload::ConvergenceTerminated {
-            task_id: task.id,
-            trajectory_id: trajectory.id,
-            outcome: outcome_label.to_string(),
-            total_iterations: trajectory.observations.len() as u32,
-            total_tokens: trajectory.budget.tokens_used,
-            final_convergence_level: final_level,
-        },
-    )).await;
+    event_bus
+        .publish(event_factory::make_event(
+            EventSeverity::Info,
+            crate::services::event_bus::EventCategory::Convergence,
+            goal_id,
+            Some(task.id),
+            EventPayload::ConvergenceTerminated(ConvergenceTerminatedPayload {
+                task_id: task.id,
+                trajectory_id: trajectory.id,
+                outcome: outcome_label.to_string(),
+                total_iterations: trajectory.observations.len() as u32,
+                total_tokens: trajectory.budget.tokens_used,
+                final_convergence_level: final_level,
+            }),
+        ))
+        .await;
 }
 
 /// Map an AttractorType to a human-readable label for event payloads.
@@ -2081,11 +2169,7 @@ mod tests {
             _iteration: u32,
             _overseer_signals: Option<&OverseerSignals>,
         ) -> DomainResult<Option<IntentVerificationResult>> {
-            self.result
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or(Ok(None))
+            self.result.lock().unwrap().take().unwrap_or(Ok(None))
         }
     }
 
@@ -2117,11 +2201,7 @@ mod tests {
             .unwrap();
         run_git(&path, &["remote", "add", "origin", &origin_path]).await;
         run_git(&path, &["fetch", "origin"]).await;
-        run_git(
-            &path,
-            &["branch", "--set-upstream-to=origin/main", "main"],
-        )
-        .await;
+        run_git(&path, &["branch", "--set-upstream-to=origin/main", "main"]).await;
 
         (dir, path)
     }
@@ -2155,22 +2235,22 @@ mod tests {
     async fn no_new_commits_and_no_staged_returns_none() {
         let (_dir, path) = setup_git_repo().await;
         let task = make_task();
-        let verifier: Arc<dyn ConvergentIntentVerifier> =
-            Arc::new(MockIntentVerifier::satisfied());
+        let verifier: Arc<dyn ConvergentIntentVerifier> = Arc::new(MockIntentVerifier::satisfied());
         let event_bus = make_event_bus();
 
         // No new commits on main (HEAD == origin/main), no staged changes
-        let result =
-            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
-        assert!(result.is_none(), "should return None when no new work exists");
+        let result = check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        assert!(
+            result.is_none(),
+            "should return None when no new work exists"
+        );
     }
 
     #[tokio::test]
     async fn new_commits_and_satisfied_intent_returns_converged() {
         let (dir, path) = setup_git_repo().await;
         let task = make_task();
-        let verifier: Arc<dyn ConvergentIntentVerifier> =
-            Arc::new(MockIntentVerifier::satisfied());
+        let verifier: Arc<dyn ConvergentIntentVerifier> = Arc::new(MockIntentVerifier::satisfied());
         let event_bus = make_event_bus();
 
         // Add a new commit ahead of origin/main
@@ -2178,8 +2258,7 @@ mod tests {
         run_git(&path, &["add", "."]).await;
         run_git(&path, &["commit", "-m", "add feature"]).await;
 
-        let result =
-            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        let result = check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
         assert!(
             matches!(result, Some(ConvergentOutcome::Converged)),
             "should return Converged when new commits satisfy intent"
@@ -2190,8 +2269,7 @@ mod tests {
     async fn new_commits_but_partial_intent_returns_none() {
         let (dir, path) = setup_git_repo().await;
         let task = make_task();
-        let verifier: Arc<dyn ConvergentIntentVerifier> =
-            Arc::new(MockIntentVerifier::partial());
+        let verifier: Arc<dyn ConvergentIntentVerifier> = Arc::new(MockIntentVerifier::partial());
         let event_bus = make_event_bus();
 
         // Add a new commit ahead of origin/main
@@ -2199,8 +2277,7 @@ mod tests {
         run_git(&path, &["add", "."]).await;
         run_git(&path, &["commit", "-m", "add feature"]).await;
 
-        let result =
-            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        let result = check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
         assert!(
             result.is_none(),
             "should return None when intent is only partially satisfied"
@@ -2211,16 +2288,14 @@ mod tests {
     async fn staged_changes_and_satisfied_intent_returns_converged() {
         let (dir, path) = setup_git_repo().await;
         let task = make_task();
-        let verifier: Arc<dyn ConvergentIntentVerifier> =
-            Arc::new(MockIntentVerifier::satisfied());
+        let verifier: Arc<dyn ConvergentIntentVerifier> = Arc::new(MockIntentVerifier::satisfied());
         let event_bus = make_event_bus();
 
         // Stage a file without committing — no new commits, but staged changes
         std::fs::write(dir.path().join("staged.rs"), "fn staged() {}").unwrap();
         run_git(&path, &["add", "staged.rs"]).await;
 
-        let result =
-            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        let result = check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
         assert!(
             matches!(result, Some(ConvergentOutcome::Converged)),
             "should return Converged when staged changes satisfy intent"
@@ -2231,8 +2306,7 @@ mod tests {
     async fn no_intent_extractable_returns_none() {
         let (dir, path) = setup_git_repo().await;
         let task = make_task();
-        let verifier: Arc<dyn ConvergentIntentVerifier> =
-            Arc::new(MockIntentVerifier::no_intent());
+        let verifier: Arc<dyn ConvergentIntentVerifier> = Arc::new(MockIntentVerifier::no_intent());
         let event_bus = make_event_bus();
 
         // Add work so we reach the verification branch
@@ -2240,8 +2314,7 @@ mod tests {
         run_git(&path, &["add", "."]).await;
         run_git(&path, &["commit", "-m", "add feature"]).await;
 
-        let result =
-            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        let result = check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
         assert!(
             result.is_none(),
             "should return None when no intent can be extracted"
@@ -2252,8 +2325,7 @@ mod tests {
     async fn intent_verification_error_returns_none() {
         let (dir, path) = setup_git_repo().await;
         let task = make_task();
-        let verifier: Arc<dyn ConvergentIntentVerifier> =
-            Arc::new(MockIntentVerifier::error());
+        let verifier: Arc<dyn ConvergentIntentVerifier> = Arc::new(MockIntentVerifier::error());
         let event_bus = make_event_bus();
 
         // Add work so we reach the verification branch
@@ -2261,8 +2333,7 @@ mod tests {
         run_git(&path, &["add", "."]).await;
         run_git(&path, &["commit", "-m", "add feature"]).await;
 
-        let result =
-            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        let result = check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
         assert!(
             result.is_none(),
             "should return None when verification errors out"
@@ -2389,25 +2460,76 @@ mod tests {
             self.tasks.lock().unwrap().insert(task.id, task.clone());
             Ok(())
         }
-        async fn delete(&self, _id: Uuid) -> DomainResult<()> { Ok(()) }
-        async fn list(&self, _filter: crate::domain::ports::task_repository::TaskFilter) -> DomainResult<Vec<Task>> { Ok(vec![]) }
-        async fn list_by_status(&self, _status: crate::domain::models::TaskStatus) -> DomainResult<Vec<Task>> { Ok(vec![]) }
-        async fn get_subtasks(&self, _parent_id: Uuid) -> DomainResult<Vec<Task>> { Ok(vec![]) }
-        async fn get_ready_tasks(&self, _limit: usize) -> DomainResult<Vec<Task>> { Ok(vec![]) }
-        async fn get_by_agent(&self, _agent_type: &str) -> DomainResult<Vec<Task>> { Ok(vec![]) }
-        async fn get_dependencies(&self, _task_id: Uuid) -> DomainResult<Vec<Task>> { Ok(vec![]) }
-        async fn get_dependents(&self, _task_id: Uuid) -> DomainResult<Vec<Task>> { Ok(vec![]) }
-        async fn add_dependency(&self, _task_id: Uuid, _depends_on: Uuid) -> DomainResult<()> { Ok(()) }
-        async fn remove_dependency(&self, _task_id: Uuid, _depends_on: Uuid) -> DomainResult<()> { Ok(()) }
-        async fn count_descendants(&self, _task_id: Uuid) -> DomainResult<u64> { Ok(0) }
-        async fn get_by_idempotency_key(&self, _key: &str) -> DomainResult<Option<Task>> { Ok(None) }
-        async fn list_by_source(&self, _source_type: &str) -> DomainResult<Vec<Task>> { Ok(vec![]) }
-        async fn count_by_status(&self) -> DomainResult<std::collections::HashMap<crate::domain::models::TaskStatus, u64>> { Ok(std::collections::HashMap::new()) }
-        async fn claim_task_atomic(&self, _task_id: Uuid, _agent_type: &str) -> DomainResult<Option<Task>> { Ok(None) }
-        async fn get_parent_id(&self, _task_id: Uuid) -> DomainResult<Option<Uuid>> { Ok(None) }
-        async fn calculate_depth(&self, _task_id: Uuid) -> DomainResult<u32> { Ok(0) }
-        async fn find_root_task_id(&self, _task_id: Uuid) -> DomainResult<Uuid> { Ok(Uuid::nil()) }
-        async fn count_children(&self, _task_id: Uuid) -> DomainResult<u32> { Ok(0) }
+        async fn delete(&self, _id: Uuid) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn list(
+            &self,
+            _filter: crate::domain::ports::task_repository::TaskFilter,
+        ) -> DomainResult<Vec<Task>> {
+            Ok(vec![])
+        }
+        async fn list_by_status(
+            &self,
+            _status: crate::domain::models::TaskStatus,
+        ) -> DomainResult<Vec<Task>> {
+            Ok(vec![])
+        }
+        async fn get_subtasks(&self, _parent_id: Uuid) -> DomainResult<Vec<Task>> {
+            Ok(vec![])
+        }
+        async fn get_ready_tasks(&self, _limit: usize) -> DomainResult<Vec<Task>> {
+            Ok(vec![])
+        }
+        async fn get_by_agent(&self, _agent_type: &str) -> DomainResult<Vec<Task>> {
+            Ok(vec![])
+        }
+        async fn get_dependencies(&self, _task_id: Uuid) -> DomainResult<Vec<Task>> {
+            Ok(vec![])
+        }
+        async fn get_dependents(&self, _task_id: Uuid) -> DomainResult<Vec<Task>> {
+            Ok(vec![])
+        }
+        async fn add_dependency(&self, _task_id: Uuid, _depends_on: Uuid) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn remove_dependency(&self, _task_id: Uuid, _depends_on: Uuid) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn count_descendants(&self, _task_id: Uuid) -> DomainResult<u64> {
+            Ok(0)
+        }
+        async fn get_by_idempotency_key(&self, _key: &str) -> DomainResult<Option<Task>> {
+            Ok(None)
+        }
+        async fn list_by_source(&self, _source_type: &str) -> DomainResult<Vec<Task>> {
+            Ok(vec![])
+        }
+        async fn count_by_status(
+            &self,
+        ) -> DomainResult<std::collections::HashMap<crate::domain::models::TaskStatus, u64>>
+        {
+            Ok(std::collections::HashMap::new())
+        }
+        async fn claim_task_atomic(
+            &self,
+            _task_id: Uuid,
+            _agent_type: &str,
+        ) -> DomainResult<Option<Task>> {
+            Ok(None)
+        }
+        async fn get_parent_id(&self, _task_id: Uuid) -> DomainResult<Option<Uuid>> {
+            Ok(None)
+        }
+        async fn calculate_depth(&self, _task_id: Uuid) -> DomainResult<u32> {
+            Ok(0)
+        }
+        async fn find_root_task_id(&self, _task_id: Uuid) -> DomainResult<Uuid> {
+            Ok(Uuid::nil())
+        }
+        async fn count_children(&self, _task_id: Uuid) -> DomainResult<u32> {
+            Ok(0)
+        }
     }
 
     #[tokio::test]
@@ -2416,8 +2538,8 @@ mod tests {
         use crate::domain::models::convergence::{
             BuildResult, OverseerSignals, TestResults, TypeCheckResult,
         };
-        use crate::services::convergence_engine::test_support::*;
         use crate::services::convergence_engine::ConvergenceEngine;
+        use crate::services::convergence_engine::test_support::*;
 
         // 1. Set up git repo for worktree path
         let (_dir, path) = setup_git_repo().await;
@@ -2466,8 +2588,7 @@ mod tests {
         task_repo.insert(&task);
 
         // 5. Mock substrate
-        let substrate: Arc<dyn crate::domain::ports::Substrate> =
-            Arc::new(MockSubstrate::new());
+        let substrate: Arc<dyn crate::domain::ports::Substrate> = Arc::new(MockSubstrate::new());
 
         // 6. Intent verifier that returns Satisfied
         let intent_verifier: Arc<dyn ConvergentIntentVerifier> =

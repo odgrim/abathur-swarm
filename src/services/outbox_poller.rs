@@ -3,12 +3,14 @@
 //! Reads unpublished events from the outbox table and publishes them
 //! to the EventBus. Follows the same daemon pattern as [`MemoryDecayDaemon`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::domain::ports::OutboxRepository;
+use crate::services::clock::{DynClock, system_clock};
 use crate::services::event_bus::EventBus;
+use crate::services::supervise;
 
 /// Configuration for the outbox poller.
 #[derive(Debug, Clone)]
@@ -52,6 +54,7 @@ pub struct OutboxPoller {
     event_bus: Arc<EventBus>,
     config: OutboxPollerConfig,
     stop_flag: Arc<AtomicBool>,
+    clock: DynClock,
 }
 
 impl OutboxPoller {
@@ -66,7 +69,14 @@ impl OutboxPoller {
             event_bus,
             config,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            clock: system_clock(),
         }
+    }
+
+    /// Inject a custom clock (for deterministic testing).
+    pub fn with_clock(mut self, clock: DynClock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Get a handle to control the poller.
@@ -79,7 +89,7 @@ impl OutboxPoller {
     /// Start the poller as a background task. Returns a handle to stop it.
     pub fn start(self) -> OutboxPollerHandle {
         let handle = self.handle();
-        tokio::spawn(async move {
+        supervise("outbox_poller", async move {
             self.run_loop().await;
         });
         handle

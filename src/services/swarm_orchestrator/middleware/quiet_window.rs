@@ -26,10 +26,7 @@ impl PreSpawnMiddleware for QuietWindowMiddleware {
         "quiet-window"
     }
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision> {
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
         let Some(ref cws) = ctx.cost_window_service else {
             return Ok(PreSpawnDecision::Continue);
         };
@@ -44,7 +41,9 @@ impl PreSpawnMiddleware for QuietWindowMiddleware {
             return Ok(PreSpawnDecision::Skip {
                 reason: format!(
                     "quiet-window:{}",
-                    check.active_window_name.unwrap_or_else(|| "unnamed".to_string())
+                    check
+                        .active_window_name
+                        .unwrap_or_else(|| "unnamed".to_string())
                 ),
             });
         }

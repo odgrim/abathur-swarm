@@ -33,25 +33,24 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use abathur::adapters::sqlite::{
-    create_migrated_test_pool, SqliteAgentRepository,
-    SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
-    SqliteWorktreeRepository,
+    SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
+    SqliteWorktreeRepository, create_migrated_test_pool,
 };
-use abathur::adapters::substrates::{ClaudeCodeSubstrate, MockSubstrate};
 use abathur::adapters::substrates::mock::MockResponse;
+use abathur::adapters::substrates::{ClaudeCodeSubstrate, MockSubstrate};
+use abathur::domain::models::workflow_template::{DEFAULT_WORKFLOW_YAMLS, WorkflowTemplate};
 use abathur::domain::models::{
-    AccessorId, AgentConstraint, AgentTier, Goal, GoalConstraint, GoalPriority, GoalStatus, MemoryTier,
-    MemoryType, Task, TaskDag, TaskPriority, TaskSource, TaskStatus, ToolCapability,
+    AccessorId, AgentConstraint, AgentTier, Goal, GoalConstraint, GoalPriority, GoalStatus,
+    MemoryTier, MemoryType, Task, TaskDag, TaskPriority, TaskSource, TaskStatus, ToolCapability,
 };
-use abathur::domain::models::workflow_template::{WorkflowTemplate, DEFAULT_WORKFLOW_YAMLS};
 use abathur::domain::ports::{
-    AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository, Substrate,
-    TaskFilter, TaskRepository,
+    AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository, Substrate, TaskFilter,
+    TaskRepository,
 };
 use abathur::services::{
-    AgentService, DagExecutor, ExecutionEvent, ExecutionStatus, ExecutorConfig, EvolutionLoop,
-    GoalService, MemoryService, SwarmConfig, SwarmOrchestrator,
-    TaskExecution, TaskOutcome, TaskService,
+    AgentService, DagExecutor, EvolutionLoop, ExecutionEvent, ExecutionStatus, ExecutorConfig,
+    GoalService, MemoryService, SwarmConfig, SwarmOrchestrator, TaskExecution, TaskOutcome,
+    TaskService,
 };
 
 /// Load the embedded `code` workflow YAML for use as a test fixture.
@@ -96,12 +95,23 @@ async fn test_swarm_orchestrator_initialization_and_tick() {
     let mock_substrate = Arc::new(MockSubstrate::new());
     let substrate: Arc<dyn Substrate> = mock_substrate;
 
-    let mut config = SwarmConfig::default();
-    config.use_worktrees = false; // Disable for test simplicity
+    // Disable for test simplicity.
+    let config = SwarmConfig {
+        use_worktrees: false,
+        ..Default::default()
+    };
 
-    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
-    let event_reactor = Arc::new(abathur::services::EventReactor::new(event_bus.clone(), abathur::services::ReactorConfig::default()));
-    let event_scheduler = Arc::new(abathur::services::EventScheduler::new(event_bus.clone(), abathur::services::SchedulerConfig::default()));
+    let event_bus = Arc::new(abathur::services::EventBus::new(
+        abathur::services::EventBusConfig::default(),
+    ));
+    let event_reactor = Arc::new(abathur::services::EventReactor::new(
+        event_bus.clone(),
+        abathur::services::ReactorConfig::default(),
+    ));
+    let event_scheduler = Arc::new(abathur::services::EventScheduler::new(
+        event_bus.clone(),
+        abathur::services::SchedulerConfig::default(),
+    ));
 
     let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
         goal_repo.clone(),
@@ -134,7 +144,9 @@ async fn test_swarm_orchestrator_initialization_and_tick() {
 async fn test_goal_lifecycle_with_constraints() {
     let (goal_repo, _, _, _, _) = setup_test_environment().await;
 
-    let _event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let _event_bus = Arc::new(abathur::services::EventBus::new(
+        abathur::services::EventBusConfig::default(),
+    ));
     let goal_service = GoalService::new(goal_repo.clone());
 
     // Create a goal with constraints
@@ -211,7 +223,9 @@ async fn test_goal_lifecycle_with_constraints() {
 async fn test_task_dag_with_dependencies() {
     let (goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
-    let _event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let _event_bus = Arc::new(abathur::services::EventBus::new(
+        abathur::services::EventBusConfig::default(),
+    ));
     let goal_service = GoalService::new(goal_repo.clone());
     let task_service = TaskService::new(task_repo.clone());
 
@@ -349,7 +363,9 @@ async fn test_task_dag_with_dependencies() {
     assert!(dag.nodes.contains_key(&test_task.id));
 
     // Verify execution waves
-    let waves = dag.execution_waves().expect("Failed to get execution waves");
+    let waves = dag
+        .execution_waves()
+        .expect("Failed to get execution waves");
 
     assert_eq!(waves.len(), 4, "Expected 4 execution waves");
 
@@ -389,10 +405,18 @@ async fn test_task_dag_with_dependencies() {
 
     // Verify initial task statuses
     let setup = task_repo.get(setup_task.id).await.unwrap().unwrap();
-    assert_eq!(setup.status, TaskStatus::Ready, "Setup should be Ready (no deps)");
+    assert_eq!(
+        setup.status,
+        TaskStatus::Ready,
+        "Setup should be Ready (no deps)"
+    );
 
     let auth = task_repo.get(auth_task.id).await.unwrap().unwrap();
-    assert_eq!(auth.status, TaskStatus::Pending, "Auth should be Pending (deps not met)");
+    assert_eq!(
+        auth.status,
+        TaskStatus::Pending,
+        "Auth should be Pending (deps not met)"
+    );
 
     println!("✓ Task DAG with dependencies structured correctly");
 }
@@ -406,7 +430,9 @@ async fn test_task_dag_with_dependencies() {
 async fn test_agent_template_and_instance_management() {
     let (_, task_repo, _, agent_repo, _) = setup_test_environment().await;
 
-    let event_bus = Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default()));
+    let event_bus = Arc::new(abathur::services::event_bus::EventBus::new(
+        abathur::services::event_bus::EventBusConfig::default(),
+    ));
     let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
 
     // Register different agent tiers
@@ -415,7 +441,8 @@ async fn test_agent_template_and_instance_management() {
             "code-worker".to_string(),
             "A worker agent for coding tasks".to_string(),
             AgentTier::Worker,
-            "You are a skilled software developer. Focus on writing clean, tested code.".to_string(),
+            "You are a skilled software developer. Focus on writing clean, tested code."
+                .to_string(),
             vec![
                 ToolCapability::new("Read", "Read files"),
                 ToolCapability::new("Write", "Write files"),
@@ -472,7 +499,10 @@ async fn test_agent_template_and_instance_management() {
     // Create a task so FK constraint is satisfied, then assign it
     let task = Task::with_title("Agent test task", "Task for agent instance test")
         .with_source(TaskSource::Human);
-    task_repo.create(&task).await.expect("Failed to create task for agent assignment");
+    task_repo
+        .create(&task)
+        .await
+        .expect("Failed to create task for agent assignment");
     let task_id = task.id;
     let running_instance = agent_service
         .assign_task(worker_instance.id, task_id)
@@ -539,10 +569,22 @@ async fn test_dag_execution_with_waves() {
         .with_dependency(task3.id);
 
     // Store tasks
-    task_repo.create(&task1).await.expect("Failed to create task1");
-    task_repo.create(&task2).await.expect("Failed to create task2");
-    task_repo.create(&task3).await.expect("Failed to create task3");
-    task_repo.create(&task4).await.expect("Failed to create task4");
+    task_repo
+        .create(&task1)
+        .await
+        .expect("Failed to create task1");
+    task_repo
+        .create(&task2)
+        .await
+        .expect("Failed to create task2");
+    task_repo
+        .create(&task3)
+        .await
+        .expect("Failed to create task3");
+    task_repo
+        .create(&task4)
+        .await
+        .expect("Failed to create task4");
 
     // Build DAG
     let tasks = task_repo
@@ -568,8 +610,12 @@ async fn test_dag_execution_with_waves() {
         ..Default::default()
     };
 
-    let executor: DagExecutor<_, SqliteAgentRepository, SqliteGoalRepository> =
-        DagExecutor::new(task_repo.clone(), agent_repo.clone(), mock_substrate.clone(), config);
+    let executor: DagExecutor<_, SqliteAgentRepository, SqliteGoalRepository> = DagExecutor::new(
+        task_repo.clone(),
+        agent_repo.clone(),
+        mock_substrate.clone(),
+        config,
+    );
 
     // Execute DAG with events
     let (event_tx, mut event_rx) = mpsc::channel(100);
@@ -596,13 +642,21 @@ async fn test_dag_execution_with_waves() {
         .iter()
         .filter(|e| matches!(e, ExecutionEvent::Started { .. }))
         .collect();
-    assert_eq!(start_events.len(), 1, "Should have exactly one Started event");
+    assert_eq!(
+        start_events.len(),
+        1,
+        "Should have exactly one Started event"
+    );
 
     let wave_started_events: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, ExecutionEvent::WaveStarted { .. }))
         .collect();
-    assert_eq!(wave_started_events.len(), 3, "Should have 3 WaveStarted events");
+    assert_eq!(
+        wave_started_events.len(),
+        3,
+        "Should have 3 WaveStarted events"
+    );
 
     let completed_events: Vec<_> = events
         .iter()
@@ -635,8 +689,14 @@ async fn test_dag_execution_with_failures() {
         .await;
 
     // Store tasks
-    task_repo.create(&task1).await.expect("Failed to create task1");
-    task_repo.create(&task2).await.expect("Failed to create task2");
+    task_repo
+        .create(&task1)
+        .await
+        .expect("Failed to create task1");
+    task_repo
+        .create(&task2)
+        .await
+        .expect("Failed to create task2");
 
     // Build DAG
     let tasks = task_repo
@@ -655,8 +715,12 @@ async fn test_dag_execution_with_failures() {
         ..Default::default()
     };
 
-    let executor: DagExecutor<_, SqliteAgentRepository, SqliteGoalRepository> =
-        DagExecutor::new(task_repo.clone(), agent_repo.clone(), mock_substrate.clone(), config);
+    let executor: DagExecutor<_, SqliteAgentRepository, SqliteGoalRepository> = DagExecutor::new(
+        task_repo.clone(),
+        agent_repo.clone(),
+        mock_substrate.clone(),
+        config,
+    );
 
     // Execute DAG
     let results = executor.execute(&dag).await.expect("Failed to execute DAG");
@@ -729,10 +793,7 @@ async fn test_evolution_loop_tracking_and_improvements() {
     assert_eq!(stats.total_tasks, 10);
     assert_eq!(stats.successful_tasks, 3);
     assert_eq!(stats.failed_tasks, 7);
-    assert!(
-        stats.success_rate < 0.4,
-        "Success rate should be ~30%"
-    );
+    assert!(stats.success_rate < 0.4, "Success rate should be ~30%");
 
     // Evaluate - should trigger evolution due to very low success rate
     // VeryLowSuccessRate requires: success_rate < 40% AND total_tasks >= 10
@@ -758,7 +819,10 @@ async fn test_evolution_loop_tracking_and_improvements() {
 
     // Check pending refinements
     let refinements = evolution_loop.get_pending_refinements().await;
-    assert!(!refinements.is_empty(), "Should have pending refinement request");
+    assert!(
+        !refinements.is_empty(),
+        "Should have pending refinement request"
+    );
 
     let refinement = &refinements[0];
     assert_eq!(refinement.template_name, template_name);
@@ -845,7 +909,9 @@ async fn test_full_end_to_end_workflow() {
         setup_test_environment().await;
 
     // 1. Create services
-    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let event_bus = Arc::new(abathur::services::EventBus::new(
+        abathur::services::EventBusConfig::default(),
+    ));
     let goal_service = GoalService::new(goal_repo.clone());
     let task_service = TaskService::new(task_repo.clone());
     let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
@@ -1044,15 +1110,25 @@ async fn test_swarm_orchestrator_goal_execution() {
     let substrate: Arc<dyn Substrate> = mock_substrate.clone();
 
     // Configure orchestrator
-    let mut config = SwarmConfig::default();
-    config.use_worktrees = false;
-    config.use_llm_decomposition = false;
-    config.track_evolution = true;
-    config.workflow_template = Some(code_workflow_fixture());
+    let config = SwarmConfig {
+        use_worktrees: false,
+        use_llm_decomposition: false,
+        track_evolution: true,
+        workflow_template: Some(code_workflow_fixture()),
+        ..Default::default()
+    };
 
-    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
-    let event_reactor = Arc::new(abathur::services::EventReactor::new(event_bus.clone(), abathur::services::ReactorConfig::default()));
-    let event_scheduler = Arc::new(abathur::services::EventScheduler::new(event_bus.clone(), abathur::services::SchedulerConfig::default()));
+    let event_bus = Arc::new(abathur::services::EventBus::new(
+        abathur::services::EventBusConfig::default(),
+    ));
+    let event_reactor = Arc::new(abathur::services::EventReactor::new(
+        event_bus.clone(),
+        abathur::services::ReactorConfig::default(),
+    ));
+    let event_scheduler = Arc::new(abathur::services::EventScheduler::new(
+        event_bus.clone(),
+        abathur::services::SchedulerConfig::default(),
+    ));
 
     let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
         goal_repo.clone(),
@@ -1070,13 +1146,19 @@ async fn test_swarm_orchestrator_goal_execution() {
     // Create a goal
     let goal = Goal::new("Test Goal", "A simple goal for orchestrator testing")
         .with_priority(GoalPriority::Normal);
-    goal_repo.create(&goal).await.expect("Failed to create goal");
+    goal_repo
+        .create(&goal)
+        .await
+        .expect("Failed to create goal");
 
     // Create ready task for the goal
-    let mut task = Task::with_title("Test Task", "A task to execute")
-        .with_source(TaskSource::Human);
+    let mut task =
+        Task::with_title("Test Task", "A task to execute").with_source(TaskSource::Human);
     task.status = TaskStatus::Ready;
-    task_repo.create(&task).await.expect("Failed to create task");
+    task_repo
+        .create(&task)
+        .await
+        .expect("Failed to create task");
 
     // Run orchestrator tick
     let stats = orchestrator.tick().await.expect("Failed to run tick");
@@ -1154,7 +1236,11 @@ async fn test_memory_system_integration() {
 
     // Test recall
     let (recalled, _events) = memory_service
-        .recall_by_key("error_handling_pattern", "session", AccessorId::system("e2e-test"))
+        .recall_by_key(
+            "error_handling_pattern",
+            "session",
+            AccessorId::system("e2e-test"),
+        )
         .await
         .expect("Failed to recall");
     assert!(recalled.is_some());
@@ -1179,7 +1265,9 @@ async fn test_memory_system_integration() {
 async fn test_task_idempotency() {
     let (_goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
-    let _event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let _event_bus = Arc::new(abathur::services::EventBus::new(
+        abathur::services::EventBusConfig::default(),
+    ));
     let task_service = TaskService::new(task_repo.clone());
 
     // Submit task with idempotency key
@@ -1222,7 +1310,10 @@ async fn test_task_idempotency() {
 
     // Should return the same task
     assert_eq!(task1.id, task2.id, "Should return same task ID");
-    assert_eq!(task2.title, "Unique Task", "Original title should be preserved");
+    assert_eq!(
+        task2.title, "Unique Task",
+        "Original title should be preserved"
+    );
 
     // Verify only one task exists
     let all_tasks = task_repo
@@ -1252,7 +1343,9 @@ async fn test_e2e_all_critical_paths() {
         setup_test_environment().await;
 
     // 1. Goal Creation
-    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let event_bus = Arc::new(abathur::services::EventBus::new(
+        abathur::services::EventBusConfig::default(),
+    ));
     let goal_service = GoalService::new(goal_repo.clone());
     let (goal, _events) = goal_service
         .create_goal(
@@ -1451,7 +1544,10 @@ async fn test_real_agent_simple_task_execution() {
         "Test Task - Echo Success",
         "This is an automated test. Reply with exactly: TEST_SUCCESS_12345",
     );
-    task_repo.create(&task).await.expect("Failed to create task");
+    task_repo
+        .create(&task)
+        .await
+        .expect("Failed to create task");
 
     // Create substrate request
     use abathur::domain::models::{SubstrateConfig, SubstrateRequest};
@@ -1531,8 +1627,14 @@ async fn test_real_agent_dag_execution() {
     )
     .with_dependency(task1.id);
 
-    task_repo.create(&task1).await.expect("Failed to create task1");
-    task_repo.create(&task2).await.expect("Failed to create task2");
+    task_repo
+        .create(&task1)
+        .await
+        .expect("Failed to create task1");
+    task_repo
+        .create(&task2)
+        .await
+        .expect("Failed to create task2");
 
     // Build DAG
     let tasks = task_repo
@@ -1652,17 +1754,20 @@ async fn test_real_agent_evolution_tracking() {
 
     for i in 0..3 {
         let task = Task::with_title(
-            &format!("Evolution Test Task {}", i + 1),
-            &format!("Test task {}. Reply with: SUCCESS_{}", i + 1, i + 1),
+            format!("Evolution Test Task {}", i + 1),
+            format!("Test task {}. Reply with: SUCCESS_{}", i + 1, i + 1),
         );
-        task_repo.create(&task).await.expect("Failed to create task");
+        task_repo
+            .create(&task)
+            .await
+            .expect("Failed to create task");
 
         use abathur::domain::models::{SubstrateConfig, SubstrateRequest};
         let request = SubstrateRequest::new(
             task.id,
             template_name,
             "You are a test agent.",
-            &format!("Reply with exactly: SUCCESS_{}", i + 1),
+            format!("Reply with exactly: SUCCESS_{}", i + 1),
         )
         .with_config(SubstrateConfig::default().with_max_turns(1));
 
@@ -1697,12 +1802,7 @@ async fn test_real_agent_evolution_tracking() {
             })
             .await;
 
-        println!(
-            "  Task {}: {:?} ({:?})",
-            i + 1,
-            outcome,
-            duration
-        );
+        println!("  Task {}: {:?} ({:?})", i + 1, outcome, duration);
     }
 
     // Check evolution stats
@@ -1750,7 +1850,9 @@ async fn test_real_e2e_full_workflow() {
         setup_test_environment().await;
 
     // 1. Create services
-    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let event_bus = Arc::new(abathur::services::EventBus::new(
+        abathur::services::EventBusConfig::default(),
+    ));
     let goal_service = GoalService::new(goal_repo.clone());
     let task_service = TaskService::new(task_repo.clone());
     let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
@@ -1764,7 +1866,10 @@ async fn test_real_e2e_full_workflow() {
             "Verify the complete system works with real agents".to_string(),
             GoalPriority::Normal,
             None,
-            vec![GoalConstraint::invariant("format", "All responses must include SUCCESS marker")],
+            vec![GoalConstraint::invariant(
+                "format",
+                "All responses must include SUCCESS marker",
+            )],
             vec![],
         )
         .await
@@ -1947,7 +2052,10 @@ async fn test_real_e2e_full_workflow() {
     );
 
     println!("\n=== REAL E2E TEST COMPLETE ===");
-    println!("  Tasks completed: {}/{}", results.completed_tasks, results.total_tasks);
+    println!(
+        "  Tasks completed: {}/{}",
+        results.completed_tasks, results.total_tasks
+    );
     println!("  Tokens used: {}", results.total_tokens_used);
     println!("  Duration: {:?}", duration);
     println!("  Success rate: {:.0}%\n", stats.success_rate * 100.0);

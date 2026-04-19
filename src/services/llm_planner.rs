@@ -78,7 +78,10 @@ pub struct LlmTaskSpec {
 
 impl LlmTaskSpec {
     /// Convert to internal TaskSpec format.
-    pub fn to_task_spec(&self, task_index_map: &std::collections::HashMap<String, usize>) -> TaskSpec {
+    pub fn to_task_spec(
+        &self,
+        task_index_map: &std::collections::HashMap<String, usize>,
+    ) -> TaskSpec {
         let priority = match self.priority.to_lowercase().as_str() {
             "low" => TaskPriority::Low,
             "high" => TaskPriority::High,
@@ -115,7 +118,10 @@ impl LlmPlanner {
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { config, http_client }
+        Self {
+            config,
+            http_client,
+        }
     }
 
     pub fn with_default_config() -> Self {
@@ -160,7 +166,8 @@ impl LlmPlanner {
         let memory_patterns_text = if context.memory_patterns.is_empty() {
             "No historical patterns available".to_string()
         } else {
-            context.memory_patterns
+            context
+                .memory_patterns
                 .iter()
                 .enumerate()
                 .map(|(i, p)| format!("{}. {}", i + 1, p))
@@ -228,7 +235,10 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
             goal.priority,
             constraints_text,
             existing_agents_text,
-            context.project_context.as_deref().unwrap_or("No additional context"),
+            context
+                .project_context
+                .as_deref()
+                .unwrap_or("No additional context"),
             memory_patterns_text
         )
     }
@@ -251,12 +261,12 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
             .stderr(Stdio::piped());
 
         let output = cmd.output().await.map_err(|e| {
-            DomainError::ValidationFailed(format!("Failed to execute Claude Code: {}", e))
+            DomainError::SubstrateError(format!("Failed to execute Claude Code: {}", e))
         })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(DomainError::ValidationFailed(format!(
+            return Err(DomainError::SubstrateError(format!(
                 "Claude Code failed: {}",
                 stderr
             )));
@@ -270,9 +280,10 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
     async fn query_direct_api(&self, prompt: &str) -> DomainResult<String> {
         let api_key = self.config.api_key.clone()
             .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-            .ok_or_else(|| DomainError::ValidationFailed(
-                "API key required for direct API mode. Set api_key in config or ANTHROPIC_API_KEY env var.".to_string()
-            ))?;
+            .ok_or_else(|| DomainError::ConfigError {
+                key: "ANTHROPIC_API_KEY".to_string(),
+                reason: "API key required for direct API mode. Set api_key in config or ANTHROPIC_API_KEY env var.".to_string(),
+            })?;
 
         let request_body = serde_json::json!({
             "model": self.config.model,
@@ -286,7 +297,8 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
             ]
         });
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post("https://api.anthropic.com/v1/messages")
             .header("content-type", "application/json")
             .header("x-api-key", &api_key)
@@ -294,29 +306,30 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| DomainError::ValidationFailed(
-                format!("Direct API request failed: {}", e)
-            ))?;
+            .map_err(|e| {
+                DomainError::SubstrateError(format!("Direct API request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(DomainError::ValidationFailed(
-                format!("Anthropic API error {}: {}", status, body)
-            ));
+            return Err(DomainError::SubstrateError(format!(
+                "Anthropic API error {}: {}",
+                status, body
+            )));
         }
 
         // Parse the Messages API response
-        let result: serde_json::Value = response.json().await
-            .map_err(|e| DomainError::ValidationFailed(
-                format!("Failed to parse API response: {}", e)
-            ))?;
+        let result: serde_json::Value = response.json().await.map_err(|e| {
+            DomainError::SubstrateError(format!("Failed to parse API response: {}", e))
+        })?;
 
         // Extract text from content blocks
         let text = result["content"]
             .as_array()
             .map(|blocks| {
-                blocks.iter()
+                blocks
+                    .iter()
                     .filter_map(|block| {
                         if block["type"].as_str() == Some("text") {
                             block["text"].as_str().map(String::from)
@@ -330,8 +343,8 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
             .unwrap_or_default();
 
         if text.is_empty() {
-            return Err(DomainError::ValidationFailed(
-                "API returned no text content".to_string()
+            return Err(DomainError::SubstrateError(
+                "API returned no text content".to_string(),
             ));
         }
 
@@ -452,13 +465,19 @@ mod tests {
     #[test]
     fn test_extract_json_plain() {
         let input = r#"{"analysis": "test"}"#;
-        assert_eq!(crate::services::extract_json_from_response(input), r#"{"analysis": "test"}"#);
+        assert_eq!(
+            crate::services::extract_json_from_response(input),
+            r#"{"analysis": "test"}"#
+        );
     }
 
     #[test]
     fn test_extract_json_code_block() {
         let input = "```json\n{\"analysis\": \"test\"}\n```";
-        assert_eq!(crate::services::extract_json_from_response(input), r#"{"analysis": "test"}"#);
+        assert_eq!(
+            crate::services::extract_json_from_response(input),
+            r#"{"analysis": "test"}"#
+        );
     }
 
     #[test]
@@ -468,7 +487,10 @@ mod tests {
         assert_eq!(planner.parse_complexity("simple"), Complexity::Simple);
         assert_eq!(planner.parse_complexity("moderate"), Complexity::Moderate);
         assert_eq!(planner.parse_complexity("complex"), Complexity::Complex);
-        assert_eq!(planner.parse_complexity("very_complex"), Complexity::VeryComplex);
+        assert_eq!(
+            planner.parse_complexity("very_complex"),
+            Complexity::VeryComplex
+        );
         assert_eq!(planner.parse_complexity("unknown"), Complexity::Moderate);
     }
 

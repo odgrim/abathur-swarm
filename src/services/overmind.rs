@@ -18,9 +18,7 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    overmind::*,
-    SessionStatus, SubstrateConfig, SubstrateRequest,
-    OVERMIND_SYSTEM_PROMPT,
+    OVERMIND_SYSTEM_PROMPT, SessionStatus, SubstrateConfig, SubstrateRequest, overmind::*,
 };
 use crate::domain::ports::Substrate;
 
@@ -103,7 +101,7 @@ impl OvermindService {
 
         match decision {
             OvermindDecision::GoalDecomposition(d) => Ok(d),
-            _ => Err(DomainError::ExecutionFailed(
+            _ => Err(DomainError::SubstrateError(
                 "Overmind returned unexpected decision type".to_string(),
             )),
         }
@@ -119,7 +117,7 @@ impl OvermindService {
 
         match decision {
             OvermindDecision::Prioritization(d) => Ok(d),
-            _ => Err(DomainError::ExecutionFailed(
+            _ => Err(DomainError::SubstrateError(
                 "Overmind returned unexpected decision type".to_string(),
             )),
         }
@@ -135,7 +133,7 @@ impl OvermindService {
 
         match decision {
             OvermindDecision::CapabilityGap(d) => Ok(d),
-            _ => Err(DomainError::ExecutionFailed(
+            _ => Err(DomainError::SubstrateError(
                 "Overmind returned unexpected decision type".to_string(),
             )),
         }
@@ -151,7 +149,7 @@ impl OvermindService {
 
         match decision {
             OvermindDecision::ConflictResolution(d) => Ok(d),
-            _ => Err(DomainError::ExecutionFailed(
+            _ => Err(DomainError::SubstrateError(
                 "Overmind returned unexpected decision type".to_string(),
             )),
         }
@@ -167,7 +165,7 @@ impl OvermindService {
 
         match decision {
             OvermindDecision::StuckStateRecovery(d) => Ok(d),
-            _ => Err(DomainError::ExecutionFailed(
+            _ => Err(DomainError::SubstrateError(
                 "Overmind returned unexpected decision type".to_string(),
             )),
         }
@@ -183,7 +181,7 @@ impl OvermindService {
 
         match decision {
             OvermindDecision::Escalation(d) => Ok(d),
-            _ => Err(DomainError::ExecutionFailed(
+            _ => Err(DomainError::SubstrateError(
                 "Overmind returned unexpected decision type".to_string(),
             )),
         }
@@ -197,7 +195,7 @@ impl OvermindService {
     async fn invoke(&self, request: OvermindRequest) -> DomainResult<OvermindDecision> {
         // Acquire concurrency permit
         let _permit = self.concurrency_limiter.acquire().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("Failed to acquire Overmind permit: {}", e))
+            DomainError::SubstrateError(format!("Failed to acquire Overmind permit: {}", e))
         })?;
 
         let request_type = request.request_type_name();
@@ -235,7 +233,7 @@ impl OvermindService {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            DomainError::ExecutionFailed("Overmind invocation failed".to_string())
+            DomainError::SubstrateError("Overmind invocation failed".to_string())
         }))
     }
 
@@ -247,22 +245,17 @@ impl OvermindService {
     ) -> DomainResult<OvermindDecision> {
         let task_id = Uuid::new_v4();
 
-        let substrate_request = SubstrateRequest::new(
-            task_id,
-            "overmind",
-            &self.system_prompt,
-            prompt,
-        )
-        .with_config(
-            SubstrateConfig::default()
-                .with_max_turns(self.config.max_turns)
-                .with_allowed_tools(vec![
-                    "read".to_string(),
-                    "glob".to_string(),
-                    "grep".to_string(),
-                    "memory_query".to_string(),
-                ]),
-        );
+        let substrate_request =
+            SubstrateRequest::new(task_id, "overmind", &self.system_prompt, prompt).with_config(
+                SubstrateConfig::default()
+                    .with_max_turns(self.config.max_turns)
+                    .with_allowed_tools(vec![
+                        "read".to_string(),
+                        "glob".to_string(),
+                        "grep".to_string(),
+                        "memory_query".to_string(),
+                    ]),
+            );
 
         // Execute with timeout
         let session = match timeout(
@@ -273,16 +266,16 @@ impl OvermindService {
         {
             Ok(result) => result?,
             Err(_) => {
-                return Err(DomainError::ExecutionFailed(format!(
-                    "Overmind {} decision timed out after {:?}",
-                    request_type, self.config.decision_timeout
-                )));
+                return Err(DomainError::TimeoutError {
+                    operation: format!("overmind_{}", request_type),
+                    limit_secs: self.config.decision_timeout.as_secs(),
+                });
             }
         };
 
         // Check session status
         if session.status != SessionStatus::Completed {
-            return Err(DomainError::ExecutionFailed(format!(
+            return Err(DomainError::SubstrateError(format!(
                 "Overmind session failed: {:?} - {}",
                 session.status,
                 session.error.unwrap_or_else(|| "Unknown error".to_string())
@@ -292,7 +285,7 @@ impl OvermindService {
         // Extract and parse JSON from the response
         let response = session
             .result
-            .ok_or_else(|| DomainError::ExecutionFailed("No response from Overmind".to_string()))?;
+            .ok_or_else(|| DomainError::SubstrateError("No response from Overmind".to_string()))?;
 
         self.parse_decision(&response, request_type)
     }
@@ -311,15 +304,14 @@ impl OvermindService {
     }
 
     /// Parse the decision from the Overmind response.
-    fn parse_decision(
-        &self,
-        response: &str,
-        request_type: &str,
-    ) -> DomainResult<OvermindDecision> {
+    fn parse_decision(&self, response: &str, request_type: &str) -> DomainResult<OvermindDecision> {
         // Try to extract JSON from the response
         let json_str = super::extract_json_from_response(response);
 
-        debug!("Parsing Overmind response for {}: {}", request_type, json_str);
+        debug!(
+            "Parsing Overmind response for {}: {}",
+            request_type, json_str
+        );
 
         // Parse based on expected decision type
         let decision: OvermindDecision = serde_json::from_str(&json_str).map_err(|e| {
@@ -359,7 +351,7 @@ impl OvermindService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::substrates::mock::{MockSubstrate, MockResponse};
+    use crate::adapters::substrates::mock::{MockResponse, MockSubstrate};
 
     fn create_mock_substrate_with_response(response: &str) -> MockSubstrate {
         MockSubstrate::with_default_response(MockResponse::success(response))
@@ -529,7 +521,10 @@ mod tests {
 
         let decision = service.recover_from_stuck(request).await.unwrap();
 
-        assert_eq!(decision.root_cause.category, RootCauseCategory::InformationGap);
+        assert_eq!(
+            decision.root_cause.category,
+            RootCauseCategory::InformationGap
+        );
         assert!(!decision.cancel_original);
         match decision.recovery_action {
             RecoveryAction::ResearchFirst { research_questions } => {
@@ -555,7 +550,10 @@ mod tests {
 
         // JSON with surrounding text
         let with_text = r#"Here is the response: {"key": "value"} and some more text"#;
-        assert_eq!(crate::services::extract_json_from_response(with_text), r#"{"key": "value"}"#);
+        assert_eq!(
+            crate::services::extract_json_from_response(with_text),
+            r#"{"key": "value"}"#
+        );
 
         // JSON with whitespace
         let with_whitespace = r#"
@@ -563,7 +561,10 @@ mod tests {
             {"key": "value"}
 
         "#;
-        assert_eq!(crate::services::extract_json_from_response(with_whitespace), r#"{"key": "value"}"#);
+        assert_eq!(
+            crate::services::extract_json_from_response(with_whitespace),
+            r#"{"key": "value"}"#
+        );
     }
 
     #[tokio::test]

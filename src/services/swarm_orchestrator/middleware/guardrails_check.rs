@@ -29,10 +29,7 @@ impl PreSpawnMiddleware for GuardrailsMiddleware {
         "guardrails"
     }
 
-    async fn handle(
-        &self,
-        ctx: &mut PreSpawnContext,
-    ) -> DomainResult<PreSpawnDecision> {
+    async fn handle(&self, ctx: &mut PreSpawnContext) -> DomainResult<PreSpawnDecision> {
         // The unique id used by guardrails is the task id as a string —
         // matches the previous inline behaviour. Registration happens after
         // atomic claim in the orchestrator, not here.

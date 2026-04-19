@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 
-use abathur::adapters::sqlite::{create_migrated_test_pool, SqliteTaskRepository};
+use abathur::adapters::sqlite::{SqliteTaskRepository, create_migrated_test_pool};
+use abathur::domain::models::TaskPriority;
 use abathur::domain::models::task::{Task, TaskSource, TaskStatus, TaskType};
 use abathur::domain::models::workflow_state::{FanOutSlice, WorkflowState};
-use abathur::domain::models::workflow_template::{WorkflowTemplate, DEFAULT_WORKFLOW_YAMLS};
-use abathur::domain::models::TaskPriority;
+use abathur::domain::models::workflow_template::{DEFAULT_WORKFLOW_YAMLS, WorkflowTemplate};
 use abathur::domain::ports::TaskRepository;
 use abathur::services::event_bus::{EventBus, EventBusConfig};
 use abathur::services::task_service::TaskService;
@@ -38,16 +38,18 @@ async fn setup() -> (
     let task_repo = Arc::new(SqliteTaskRepository::new(pool));
     let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
     let task_service = TaskService::new(task_repo.clone()).with_event_bus(event_bus.clone());
-    let engine = WorkflowEngine::new(task_repo.clone(), task_service.clone(), event_bus.clone(), true)
-        .with_templates(embedded_workflows());
+    let engine = WorkflowEngine::new(
+        task_repo.clone(),
+        task_service.clone(),
+        event_bus.clone(),
+        true,
+    )
+    .with_templates(embedded_workflows());
     (task_service, engine, task_repo, event_bus)
 }
 
 /// Helper: submit a root task and verify it's auto-enrolled.
-async fn submit_root_task(
-    service: &TaskService<SqliteTaskRepository>,
-    title: &str,
-) -> Task {
+async fn submit_root_task(service: &TaskService<SqliteTaskRepository>, title: &str) -> Task {
     let (task, _events) = service
         .submit_task(
             Some(title.to_string()),
@@ -419,7 +421,10 @@ async fn test_fan_out_to_aggregation() {
     let parent = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(parent.context.custom["workflow_state"].clone()).unwrap();
-    assert!(matches!(ws, WorkflowState::FanningOut { slice_count: 2, .. }));
+    assert!(matches!(
+        ws,
+        WorkflowState::FanningOut { slice_count: 2, .. }
+    ));
 
     // Complete both fan-out subtasks
     for id in &fan_result.subtask_ids {
@@ -729,7 +734,10 @@ async fn test_advance_then_fan_out_creates_subtask() {
     // Advance to first phase (research) — should be PhaseReady
     let result = engine.advance(task.id).await.unwrap();
     match &result {
-        AdvanceResult::PhaseReady { phase_index, phase_name } => {
+        AdvanceResult::PhaseReady {
+            phase_index,
+            phase_name,
+        } => {
             assert_eq!(*phase_index, 0);
             assert_eq!(phase_name, "research");
         }
@@ -966,11 +974,19 @@ async fn test_provide_verdict_reject() {
         .unwrap();
 
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
-    assert_eq!(reloaded.status, TaskStatus::Failed, "Parent task should be Failed after rejection");
+    assert_eq!(
+        reloaded.status,
+        TaskStatus::Failed,
+        "Parent task should be Failed after rejection"
+    );
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
     match ws {
-        WorkflowState::Rejected { phase_index, reason, .. } => {
+        WorkflowState::Rejected {
+            phase_index,
+            reason,
+            ..
+        } => {
             assert_eq!(phase_index, 2);
             assert_eq!(reason, "Not acceptable");
         }

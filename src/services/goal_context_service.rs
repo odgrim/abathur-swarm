@@ -32,11 +32,11 @@ pub struct ContextBudget {
 impl Default for ContextBudget {
     fn default() -> Self {
         Self {
-            total_tokens: 8000, // Conservative default for agent context
-            goal_fraction: 0.20,    // 20% for goals
-            memory_fraction: 0.25,  // 25% for relevant memories
+            total_tokens: 8000,      // Conservative default for agent context
+            goal_fraction: 0.20,     // 20% for goals
+            memory_fraction: 0.25,   // 25% for relevant memories
             artifact_fraction: 0.15, // 15% for upstream artifacts
-            task_fraction: 0.40,    // 40% for the task itself
+            task_fraction: 0.40,     // 40% for the task itself
         }
     }
 }
@@ -143,29 +143,44 @@ impl<G: GoalRepository> GoalContextService<G> {
     /// Infer which applicability domains a task touches based on its content.
     pub fn infer_task_domains(task: &Task) -> Vec<String> {
         let mut domains = Vec::new();
-        let text = format!("{} {} {}", task.title, task.description, task.context.input).to_lowercase();
+        let text =
+            format!("{} {} {}", task.title, task.description, task.context.input).to_lowercase();
         let agent = task.agent_type.as_deref().unwrap_or("").to_lowercase();
 
         // Code quality is almost always relevant for code-producing tasks
-        if agent.contains("code") || agent.contains("developer") || agent.contains("engineer")
-            || text.contains("implement") || text.contains("refactor") || text.contains("write")
-            || text.contains("build") || text.contains("create") || text.contains("fix")
+        if agent.contains("code")
+            || agent.contains("developer")
+            || agent.contains("engineer")
+            || text.contains("implement")
+            || text.contains("refactor")
+            || text.contains("write")
+            || text.contains("build")
+            || text.contains("create")
+            || text.contains("fix")
         {
             domains.push("code-quality".to_string());
         }
 
         // Frontend/UX
-        if agent.contains("frontend") || text.contains("ui") || text.contains("ux")
-            || text.contains("component") || text.contains("css") || text.contains("layout")
-            || text.contains("design") || text.contains("user interface")
+        if agent.contains("frontend")
+            || text.contains("ui")
+            || text.contains("ux")
+            || text.contains("component")
+            || text.contains("css")
+            || text.contains("layout")
+            || text.contains("design")
+            || text.contains("user interface")
         {
             domains.push("frontend".to_string());
             domains.push("ux".to_string());
         }
 
         // Testing
-        if text.contains("test") || text.contains("spec") || text.contains("coverage")
-            || text.contains("assertion") || text.contains("mock")
+        if text.contains("test")
+            || text.contains("spec")
+            || text.contains("coverage")
+            || text.contains("assertion")
+            || text.contains("mock")
         {
             domains.push("testing".to_string());
         }
@@ -175,24 +190,39 @@ impl<G: GoalRepository> GoalContextService<G> {
             && !text.contains("token budget")
             && !text.contains("token limit")
             && !text.contains("token count");
-        if agent.contains("security") || text.contains("auth") || text.contains("encrypt")
-            || text.contains("vulnerab") || text.contains("permission") || text.contains("credential")
-            || token_is_security || text.contains("secret") || text.contains("jwt")
+        if agent.contains("security")
+            || text.contains("auth")
+            || text.contains("encrypt")
+            || text.contains("vulnerab")
+            || text.contains("permission")
+            || text.contains("credential")
+            || token_is_security
+            || text.contains("secret")
+            || text.contains("jwt")
         {
             domains.push("security".to_string());
         }
 
         // Performance
-        if text.contains("perf") || text.contains("optimiz") || text.contains("cache")
-            || text.contains("latency") || text.contains("throughput") || text.contains("speed")
+        if text.contains("perf")
+            || text.contains("optimiz")
+            || text.contains("cache")
+            || text.contains("latency")
+            || text.contains("throughput")
+            || text.contains("speed")
         {
             domains.push("performance".to_string());
         }
 
         // Infrastructure
-        if text.contains("deploy") || text.contains("infra") || text.contains("terraform")
-            || text.contains("docker") || text.contains("ci/cd") || text.contains("pipeline")
-            || text.contains("kubernetes") || text.contains("k8s")
+        if text.contains("deploy")
+            || text.contains("infra")
+            || text.contains("terraform")
+            || text.contains("docker")
+            || text.contains("ci/cd")
+            || text.contains("pipeline")
+            || text.contains("kubernetes")
+            || text.contains("k8s")
         {
             domains.push("infrastructure".to_string());
         }
@@ -202,70 +232,101 @@ impl<G: GoalRepository> GoalContextService<G> {
             && !text.contains("mcp server")
             && !text.contains("language server")
             && !text.contains("lsp server");
-        if agent.contains("backend") || text.contains("api") || text.contains("endpoint")
-            || text.contains("database") || text.contains("query") || text.contains("migration")
+        if agent.contains("backend")
+            || text.contains("api")
+            || text.contains("endpoint")
+            || text.contains("database")
+            || text.contains("query")
+            || text.contains("migration")
             || server_is_backend
         {
             domains.push("backend".to_string());
         }
 
         // Convergence / convergence engine
-        if text.contains("convergence") || text.contains("converge") || text.contains("attractor")
-            || text.contains("trajectory") || text.contains("thompson sampling")
-            || text.contains("strategy selection") || text.contains("budget allocation")
+        if text.contains("convergence")
+            || text.contains("converge")
+            || text.contains("attractor")
+            || text.contains("trajectory")
+            || text.contains("thompson sampling")
+            || text.contains("strategy selection")
+            || text.contains("budget allocation")
             || text.contains("overseer")
         {
             domains.push("convergence".to_string());
         }
 
         // Evolution / agent evolution
-        if agent.contains("evolution") || text.contains("evolution") || text.contains("evolve")
-            || text.contains("agent template") || text.contains("refinement")
-            || text.contains("success rate") || text.contains("regression")
-            || text.contains("revert") || text.contains("performance tracking")
+        if agent.contains("evolution")
+            || text.contains("evolution")
+            || text.contains("evolve")
+            || text.contains("agent template")
+            || text.contains("refinement")
+            || text.contains("success rate")
+            || text.contains("regression")
+            || text.contains("revert")
+            || text.contains("performance tracking")
         {
             domains.push("evolution".to_string());
         }
 
         // Memory lifecycle
-        if text.contains("memory tier") || text.contains("working memory")
-            || text.contains("episodic") || text.contains("semantic")
-            || text.contains("decay") || text.contains("promotion")
-            || text.contains("relevance") || text.contains("context budget")
+        if text.contains("memory tier")
+            || text.contains("working memory")
+            || text.contains("episodic")
+            || text.contains("semantic")
+            || text.contains("decay")
+            || text.contains("promotion")
+            || text.contains("relevance")
+            || text.contains("context budget")
         {
             domains.push("memory-lifecycle".to_string());
         }
 
         // Agent lifecycle
-        if agent.contains("agent") || text.contains("agent lifecycle")
-            || text.contains("agent template") || text.contains("spawn")
-            || text.contains("routing") || text.contains("specialist")
-            || text.contains("worker") || text.contains("architect")
+        if agent.contains("agent")
+            || text.contains("agent lifecycle")
+            || text.contains("agent template")
+            || text.contains("spawn")
+            || text.contains("routing")
+            || text.contains("specialist")
+            || text.contains("worker")
+            || text.contains("architect")
         {
             domains.push("agent-lifecycle".to_string());
         }
 
         // Workflow
-        if text.contains("workflow") || text.contains("phase")
-            || text.contains("spine") || text.contains("fan out")
-            || text.contains("fan_out") || text.contains("gate")
-            || text.contains("advance") || text.contains("triage")
+        if text.contains("workflow")
+            || text.contains("phase")
+            || text.contains("spine")
+            || text.contains("fan out")
+            || text.contains("fan_out")
+            || text.contains("gate")
+            || text.contains("advance")
+            || text.contains("triage")
         {
             domains.push("workflow".to_string());
         }
 
         // Swarm orchestration
-        if text.contains("swarm") || text.contains("orchestrat")
-            || text.contains("coordinator") || text.contains("event bus")
-            || text.contains("event reactor") || text.contains("circuit breaker")
+        if text.contains("swarm")
+            || text.contains("orchestrat")
+            || text.contains("coordinator")
+            || text.contains("event bus")
+            || text.contains("event reactor")
+            || text.contains("circuit breaker")
         {
             domains.push("swarm-orchestration".to_string());
         }
 
         // Goal management
-        if text.contains("goal") || text.contains("convergence check")
-            || text.contains("constraint") || text.contains("aspiration")
-            || text.contains("domain inference") || text.contains("traceability")
+        if text.contains("goal")
+            || text.contains("convergence check")
+            || text.contains("constraint")
+            || text.contains("aspiration")
+            || text.contains("domain inference")
+            || text.contains("traceability")
         {
             domains.push("goal-management".to_string());
         }
@@ -274,9 +335,10 @@ impl<G: GoalRepository> GoalContextService<G> {
         if let Some(serde_json::Value::Array(explicit)) = task.context.custom.get("domains") {
             for d in explicit {
                 if let Some(s) = d.as_str()
-                    && !domains.contains(&s.to_string()) {
-                        domains.push(s.to_string());
-                    }
+                    && !domains.contains(&s.to_string())
+                {
+                    domains.push(s.to_string());
+                }
             }
         }
 
@@ -306,7 +368,9 @@ impl<G: GoalRepository> GoalContextService<G> {
             return String::new();
         }
 
-        let mut output = String::from("## Guiding Goals\nThe following organizational goals are relevant to this task. Use them as guidance:\n\n");
+        let mut output = String::from(
+            "## Guiding Goals\nThe following organizational goals are relevant to this task. Use them as guidance:\n\n",
+        );
 
         for goal in goals {
             output.push_str(&format!("### {}\n", goal.name));
@@ -399,28 +463,36 @@ mod tests {
     #[test]
     fn test_infer_domains_empty_task() {
         let task = make_task("", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.is_empty(), "Empty task should produce no domains");
     }
 
     #[test]
     fn test_infer_domains_code_quality_from_text() {
         let task = make_task("implement feature", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"code-quality".to_string()));
     }
 
     #[test]
     fn test_infer_domains_code_quality_from_agent() {
         let task = make_task_with_agent("some task", "do stuff", "code-reviewer");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"code-quality".to_string()));
     }
 
     #[test]
     fn test_infer_domains_frontend() {
         let task = make_task("update component css", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"frontend".to_string()));
         assert!(domains.contains(&"ux".to_string()));
     }
@@ -428,91 +500,117 @@ mod tests {
     #[test]
     fn test_infer_domains_testing() {
         let task = make_task("improve test coverage", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"testing".to_string()));
     }
 
     #[test]
     fn test_infer_domains_security() {
         let task = make_task("fix authentication flow", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"security".to_string()));
     }
 
     #[test]
     fn test_infer_domains_performance() {
         let task = make_task("optimize latency", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"performance".to_string()));
     }
 
     #[test]
     fn test_infer_domains_infrastructure() {
         let task = make_task("deploy docker image", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"infrastructure".to_string()));
     }
 
     #[test]
     fn test_infer_domains_backend() {
         let task = make_task("add api endpoint", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"backend".to_string()));
     }
 
     #[test]
     fn test_infer_domains_convergence() {
         let task = make_task("convergence engine attractor", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"convergence".to_string()));
     }
 
     #[test]
     fn test_infer_domains_evolution() {
         let task = make_task("agent template refinement", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"evolution".to_string()));
     }
 
     #[test]
     fn test_infer_domains_memory_lifecycle() {
         let task = make_task("memory tier promotion decay", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"memory-lifecycle".to_string()));
     }
 
     #[test]
     fn test_infer_domains_agent_lifecycle() {
         let task = make_task("agent lifecycle routing", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"agent-lifecycle".to_string()));
     }
 
     #[test]
     fn test_infer_domains_workflow() {
         let task = make_task("workflow phase advance", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"workflow".to_string()));
     }
 
     #[test]
     fn test_infer_domains_swarm_orchestration() {
         let task = make_task("swarm orchestrator event bus", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"swarm-orchestration".to_string()));
     }
 
     #[test]
     fn test_infer_domains_goal_management() {
         let task = make_task("goal convergence check constraint", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"goal-management".to_string()));
     }
 
     #[test]
     fn test_infer_domains_multiple() {
         let task = make_task("implement test for api auth", "");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"code-quality".to_string()));
         assert!(domains.contains(&"testing".to_string()));
         assert!(domains.contains(&"security".to_string()));
@@ -524,11 +622,10 @@ mod tests {
         let mut task = make_task("generic task", "no keywords");
         task.context
             .custom
-            .insert(
-                "domains".to_string(),
-                serde_json::json!(["custom-domain"]),
-            );
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+            .insert("domains".to_string(), serde_json::json!(["custom-domain"]));
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(domains.contains(&"custom-domain".to_string()));
     }
 
@@ -539,7 +636,9 @@ mod tests {
         task.context
             .custom
             .insert("domains".to_string(), serde_json::json!(["testing"]));
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         let testing_count = domains.iter().filter(|d| d.as_str() == "testing").count();
         assert_eq!(testing_count, 1, "testing should appear exactly once");
     }
@@ -548,7 +647,9 @@ mod tests {
     fn test_infer_domains_case_insensitive() {
         // Title is uppercased but should still match via to_lowercase()
         let task = make_task("CONVERGENCE ENGINE", "ATTRACTOR TRAJECTORY");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(
             domains.contains(&"convergence".to_string()),
             "Case-insensitive match should find convergence domain"
@@ -558,8 +659,13 @@ mod tests {
     #[test]
     fn test_infer_domains_token_budget_not_security() {
         // "token budget" is a memory/resource concept, not a security concept
-        let task = make_task("Optimize token budget allocation", "Reduce token count for context loading");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let task = make_task(
+            "Optimize token budget allocation",
+            "Reduce token count for context loading",
+        );
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(
             !domains.contains(&"security".to_string()),
             "Token budget/count should not trigger security domain"
@@ -569,8 +675,13 @@ mod tests {
     #[test]
     fn test_infer_domains_mcp_server_not_backend() {
         // "mcp server" and "language server" are tooling, not backend services
-        let task = make_task("Configure mcp server instructions", "Update language server protocol settings");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let task = make_task(
+            "Configure mcp server instructions",
+            "Update language server protocol settings",
+        );
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(
             !domains.contains(&"backend".to_string()),
             "MCP server / language server should not trigger backend domain"
@@ -581,7 +692,9 @@ mod tests {
     fn test_infer_domains_auth_token_still_security() {
         // "auth token" should still match security via both "auth" and "token"
         let task = make_task("Rotate auth token", "Refresh expired JWT credentials");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(
             domains.contains(&"security".to_string()),
             "Auth token / JWT should still trigger security domain"
@@ -592,7 +705,9 @@ mod tests {
     fn test_infer_domains_api_server_still_backend() {
         // "api server" should still match backend via both "api" and "server"
         let task = make_task("Deploy api server", "Scale the REST server instances");
-        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        let domains = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::infer_task_domains(&task);
         assert!(
             domains.contains(&"backend".to_string()),
             "API server / REST server should still trigger backend domain"
@@ -603,14 +718,18 @@ mod tests {
 
     #[test]
     fn test_format_goal_context_empty() {
-        let result = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::format_goal_context(&[]);
+        let result = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::format_goal_context(&[]);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_format_goal_context_single_goal_no_constraints() {
         let goal = make_goal("Test Goal", "A description", vec![], vec![]);
-        let result = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::format_goal_context(&[goal]);
+        let result = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::format_goal_context(&[goal]);
         assert!(result.contains("### Test Goal"));
         assert!(result.contains("A description"));
         assert!(!result.contains("Constraints:"));
@@ -618,15 +737,16 @@ mod tests {
 
     #[test]
     fn test_format_goal_context_with_constraints() {
-        let constraint =
-            GoalConstraint::preference("test-constraint", "Must do the thing");
+        let constraint = GoalConstraint::preference("test-constraint", "Must do the thing");
         let goal = make_goal(
             "Constrained Goal",
             "Has constraints",
             vec![constraint],
             vec![],
         );
-        let result = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::format_goal_context(&[goal]);
+        let result = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::format_goal_context(&[goal]);
         assert!(result.contains("Constraints:"));
         assert!(result.contains("[Preference]"));
         assert!(result.contains("test-constraint"));
@@ -637,7 +757,9 @@ mod tests {
     fn test_format_goal_context_multiple_goals() {
         let goal1 = make_goal("Goal One", "First", vec![], vec![]);
         let goal2 = make_goal("Goal Two", "Second", vec![], vec![]);
-        let result = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::format_goal_context(&[goal1, goal2]);
+        let result = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::format_goal_context(&[goal1, goal2]);
         assert!(result.contains("### Goal One"));
         assert!(result.contains("### Goal Two"));
     }
@@ -646,14 +768,18 @@ mod tests {
 
     #[test]
     fn test_collect_constraints_empty() {
-        let result = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::collect_constraints(&[]);
+        let result = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::collect_constraints(&[]);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_collect_constraints_no_constraints() {
         let goal = make_goal("No Constraints", "None here", vec![], vec![]);
-        let result = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::collect_constraints(&[goal]);
+        let result = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::collect_constraints(&[goal]);
         assert!(result.is_empty());
     }
 
@@ -663,9 +789,18 @@ mod tests {
         let c2 = GoalConstraint::invariant("shared-name", "Description from goal 2");
         let goal1 = make_goal("G1", "g1", vec![c1], vec![]);
         let goal2 = make_goal("G2", "g2", vec![c2], vec![]);
-        let result = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::collect_constraints(&[goal1, goal2]);
-        assert_eq!(result.len(), 1, "Same-name constraints should be deduplicated");
-        assert_eq!(result[0].description, "Description from goal 1", "First occurrence wins");
+        let result = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::collect_constraints(&[goal1, goal2]);
+        assert_eq!(
+            result.len(),
+            1,
+            "Same-name constraints should be deduplicated"
+        );
+        assert_eq!(
+            result[0].description, "Description from goal 1",
+            "First occurrence wins"
+        );
     }
 
     #[test]
@@ -674,7 +809,9 @@ mod tests {
         let c2 = GoalConstraint::invariant("constraint-b", "Desc B");
         let goal1 = make_goal("G1", "g1", vec![c1], vec![]);
         let goal2 = make_goal("G2", "g2", vec![c2], vec![]);
-        let result = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::collect_constraints(&[goal1, goal2]);
+        let result = GoalContextService::<
+            crate::adapters::sqlite::goal_repository::SqliteGoalRepository,
+        >::collect_constraints(&[goal1, goal2]);
         assert_eq!(result.len(), 2);
     }
 
@@ -683,7 +820,10 @@ mod tests {
     #[test]
     fn test_context_budget_default_fractions_sum() {
         let budget = ContextBudget::default();
-        let sum = budget.goal_fraction + budget.memory_fraction + budget.artifact_fraction + budget.task_fraction;
+        let sum = budget.goal_fraction
+            + budget.memory_fraction
+            + budget.artifact_fraction
+            + budget.task_fraction;
         assert!(
             (sum - 1.0).abs() < f32::EPSILON,
             "Default fractions should sum to 1.0, got {}",
@@ -695,7 +835,10 @@ mod tests {
     fn test_context_budget_generous() {
         let budget = ContextBudget::generous();
         assert_eq!(budget.total_tokens, 16000);
-        let sum = budget.goal_fraction + budget.memory_fraction + budget.artifact_fraction + budget.task_fraction;
+        let sum = budget.goal_fraction
+            + budget.memory_fraction
+            + budget.artifact_fraction
+            + budget.task_fraction;
         assert!(
             (sum - 1.0).abs() < f32::EPSILON,
             "Generous fractions should sum to 1.0"
@@ -706,7 +849,10 @@ mod tests {
     fn test_context_budget_tight() {
         let budget = ContextBudget::tight();
         assert_eq!(budget.total_tokens, 4000);
-        let sum = budget.goal_fraction + budget.memory_fraction + budget.artifact_fraction + budget.task_fraction;
+        let sum = budget.goal_fraction
+            + budget.memory_fraction
+            + budget.artifact_fraction
+            + budget.task_fraction;
         assert!(
             (sum - 1.0).abs() < f32::EPSILON,
             "Tight fractions should sum to 1.0"

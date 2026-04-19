@@ -4,11 +4,11 @@
 //! the task queue. Supports querying, submitting, and updating tasks.
 
 use axum::{
+    Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -20,11 +20,11 @@ use uuid::Uuid;
 
 use crate::domain::models::{Task, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::TaskRepository;
+use crate::services::TaskService;
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, TaskCommand,
 };
 use crate::services::guardrails::{GuardrailResult, Guardrails};
-use crate::services::TaskService;
 
 /// Configuration for the tasks HTTP server.
 #[derive(Debug, Clone)]
@@ -178,11 +178,18 @@ pub struct TasksHttpServer<T: TaskRepository + 'static> {
     guardrails: Option<Arc<Guardrails>>,
 }
 
-impl<T: TaskRepository + Clone + Send + Sync + 'static>
-    TasksHttpServer<T>
-{
-    pub fn new(service: TaskService<T>, command_bus: Arc<CommandBus>, config: TasksHttpConfig) -> Self {
-        Self { config, service, command_bus, guardrails: None }
+impl<T: TaskRepository + Clone + Send + Sync + 'static> TasksHttpServer<T> {
+    pub fn new(
+        service: TaskService<T>,
+        command_bus: Arc<CommandBus>,
+        config: TasksHttpConfig,
+    ) -> Self {
+        Self {
+            config,
+            service,
+            command_bus,
+            guardrails: None,
+        }
     }
 
     /// Set an optional guardrails instance for pre-flight checks on task submission.
@@ -218,8 +225,13 @@ impl<T: TaskRepository + Clone + Send + Sync + 'static>
             .with_state(state);
 
         if self.config.enable_cors {
-            app.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-                .layer(TraceLayer::new_for_http())
+            app.layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            )
+            .layer(TraceLayer::new_for_http())
         } else {
             app.layer(TraceLayer::new_for_http())
         }
@@ -276,9 +288,10 @@ async fn list_tasks<T: TaskRepository + Clone + Send + Sync + 'static>(
 
             // Filter by status if specified
             if let Some(status_str) = &params.status
-                && let Some(status) = TaskStatus::from_str(status_str) {
-                    tasks.retain(|t| t.status == status.as_str());
-                }
+                && let Some(status) = TaskStatus::from_str(status_str)
+            {
+                tasks.retain(|t| t.status == status.as_str());
+            }
 
             tasks.truncate(params.limit);
             Ok(Json(tasks))
@@ -514,13 +527,15 @@ async fn list_ready_tasks<T: TaskRepository + Clone + Send + Sync + 'static>(
 async fn get_stats<T: TaskRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<T>>>,
 ) -> Result<Json<QueueStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let counts = state.service.get_status_counts().await.map_err(|e| (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: e.to_string(),
-            code: "QUERY_ERROR".to_string(),
-        }),
-    ))?;
+    let counts = state.service.get_status_counts().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+                code: "QUERY_ERROR".to_string(),
+            }),
+        )
+    })?;
 
     let pending = *counts.get(&TaskStatus::Pending).unwrap_or(&0);
     let ready = *counts.get(&TaskStatus::Ready).unwrap_or(&0);
@@ -537,7 +552,6 @@ async fn get_stats<T: TaskRepository + Clone + Send + Sync + 'static>(
         total: pending + ready + running + complete + failed,
     }))
 }
-
 
 #[cfg(test)]
 mod tests {

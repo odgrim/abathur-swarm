@@ -23,8 +23,6 @@ use self::github_issues::client::GitHubClient;
 use self::github_issues::egress::GitHubEgressAdapter;
 use self::github_issues::ingestion::GitHubIngestionAdapter;
 
-
-
 /// Metadata for an adapter that the binary knows how to scaffold.
 #[derive(Debug, Clone)]
 pub struct KnownAdapter {
@@ -124,15 +122,14 @@ pub fn create_native_adapter(
                     None
                 };
 
-            let egress: Option<Box<dyn EgressAdapter>> =
-                if manifest.direction.supports_egress() {
-                    Some(Box::new(ClickUpEgressAdapter::new(
-                        manifest.clone(),
-                        Arc::clone(&client),
-                    )))
-                } else {
-                    None
-                };
+            let egress: Option<Box<dyn EgressAdapter>> = if manifest.direction.supports_egress() {
+                Some(Box::new(ClickUpEgressAdapter::new(
+                    manifest.clone(),
+                    Arc::clone(&client),
+                )))
+            } else {
+                None
+            };
 
             Ok((ingestion, egress))
         }
@@ -149,15 +146,14 @@ pub fn create_native_adapter(
                     None
                 };
 
-            let egress: Option<Box<dyn EgressAdapter>> =
-                if manifest.direction.supports_egress() {
-                    Some(Box::new(GitHubEgressAdapter::new(
-                        manifest.clone(),
-                        Arc::clone(&client),
-                    )))
-                } else {
-                    None
-                };
+            let egress: Option<Box<dyn EgressAdapter>> = if manifest.direction.supports_egress() {
+                Some(Box::new(GitHubEgressAdapter::new(
+                    manifest.clone(),
+                    Arc::clone(&client),
+                )))
+            } else {
+                None
+            };
 
             Ok((ingestion, egress))
         }
@@ -170,15 +166,16 @@ pub fn create_native_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::adapter::{
-        AdapterCapability, AdapterDirection, AdapterType,
-    };
+    use crate::domain::models::adapter::{AdapterCapability, AdapterDirection, AdapterType};
 
     #[test]
     fn test_unknown_adapter_returns_error() {
-        let manifest =
-            AdapterManifest::new("nonexistent", AdapterType::Native, AdapterDirection::Ingestion)
-                .with_capability(AdapterCapability::PollItems);
+        let manifest = AdapterManifest::new(
+            "nonexistent",
+            AdapterType::Native,
+            AdapterDirection::Ingestion,
+        )
+        .with_capability(AdapterCapability::PollItems);
 
         let result = create_native_adapter(&manifest, "");
         match result {
@@ -211,7 +208,9 @@ mod tests {
     #[test]
     fn test_github_issues_missing_env_var() {
         // Serialize access to ABATHUR_GITHUB_TOKEN with the lock used by client.rs tests.
-        let _guard = self::github_issues::client::GITHUB_TOKEN_ENV_LOCK.lock().unwrap();
+        let _guard = self::github_issues::client::GITHUB_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap();
         // SAFETY: test-only; serialized via GITHUB_TOKEN_ENV_LOCK.
         unsafe { std::env::remove_var("ABATHUR_GITHUB_TOKEN") };
 

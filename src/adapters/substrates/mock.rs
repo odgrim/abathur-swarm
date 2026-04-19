@@ -3,13 +3,11 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{
-    SubstrateOutput, SubstrateRequest, SubstrateSession,
-};
+use crate::domain::models::{SubstrateOutput, SubstrateRequest, SubstrateSession};
 use crate::domain::ports::Substrate;
 
 /// Mock response configuration.
@@ -92,7 +90,10 @@ impl MockSubstrate {
     /// Get the response for a task.
     async fn get_response(&self, task_id: Uuid) -> MockResponse {
         let overrides = self.response_overrides.read().await;
-        overrides.get(&task_id).cloned().unwrap_or_else(|| self.default_response.clone())
+        overrides
+            .get(&task_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_response.clone())
     }
 
     /// Get all completed sessions.
@@ -126,18 +127,26 @@ impl Substrate for MockSubstrate {
 
     async fn execute(&self, request: SubstrateRequest) -> DomainResult<SubstrateSession> {
         let response = self.get_response(request.task_id).await;
-        let mut session = SubstrateSession::new(request.task_id, &request.agent_template, request.config);
+        let mut session =
+            SubstrateSession::new(request.task_id, &request.agent_template, request.config);
 
         session.start(None);
 
         // Simulate turns
         for _ in 0..response.turns {
-            session.record_turn(response.input_tokens_per_turn, response.output_tokens_per_turn);
+            session.record_turn(
+                response.input_tokens_per_turn,
+                response.output_tokens_per_turn,
+            );
         }
 
         // Complete or fail
         if response.fail {
-            session.fail(response.error_message.unwrap_or_else(|| "Mock failure".to_string()));
+            session.fail(
+                response
+                    .error_message
+                    .unwrap_or_else(|| "Mock failure".to_string()),
+            );
         } else {
             session.complete(&response.output);
         }
@@ -154,7 +163,8 @@ impl Substrate for MockSubstrate {
         request: SubstrateRequest,
     ) -> DomainResult<(mpsc::Receiver<SubstrateOutput>, SubstrateSession)> {
         let response = self.get_response(request.task_id).await;
-        let mut session = SubstrateSession::new(request.task_id, &request.agent_template, request.config);
+        let mut session =
+            SubstrateSession::new(request.task_id, &request.agent_template, request.config);
         session.start(None);
 
         let (tx, rx) = mpsc::channel(100);
@@ -164,25 +174,35 @@ impl Substrate for MockSubstrate {
         tokio::spawn(async move {
             // Simulate turns
             for turn in 0..response_clone.turns {
-                let _ = tx.send(SubstrateOutput::TurnComplete {
-                    turn_number: turn + 1,
-                    input_tokens: response_clone.input_tokens_per_turn,
-                    output_tokens: response_clone.output_tokens_per_turn,
-                }).await;
+                let _ = tx
+                    .send(SubstrateOutput::TurnComplete {
+                        turn_number: turn + 1,
+                        input_tokens: response_clone.input_tokens_per_turn,
+                        output_tokens: response_clone.output_tokens_per_turn,
+                    })
+                    .await;
             }
 
             // Send result
             if response_clone.fail {
-                let _ = tx.send(SubstrateOutput::Error {
-                    message: response_clone.error_message.unwrap_or_else(|| "Mock failure".to_string()),
-                }).await;
+                let _ = tx
+                    .send(SubstrateOutput::Error {
+                        message: response_clone
+                            .error_message
+                            .unwrap_or_else(|| "Mock failure".to_string()),
+                    })
+                    .await;
             } else {
-                let _ = tx.send(SubstrateOutput::AssistantText {
-                    content: response_clone.output.clone(),
-                }).await;
-                let _ = tx.send(SubstrateOutput::SessionComplete {
-                    result: response_clone.output,
-                }).await;
+                let _ = tx
+                    .send(SubstrateOutput::AssistantText {
+                        content: response_clone.output.clone(),
+                    })
+                    .await;
+                let _ = tx
+                    .send(SubstrateOutput::SessionComplete {
+                        result: response_clone.output,
+                    })
+                    .await;
             }
         });
 
@@ -199,10 +219,15 @@ impl Substrate for MockSubstrate {
         _additional_prompt: Option<String>,
     ) -> DomainResult<SubstrateSession> {
         let sessions = self.sessions.read().await;
-        let original = sessions.get(&session_id)
-            .ok_or_else(|| DomainError::ValidationFailed(format!("Session {} not found", session_id)))?;
+        let original = sessions.get(&session_id).ok_or_else(|| {
+            DomainError::ValidationFailed(format!("Session {} not found", session_id))
+        })?;
 
-        let mut session = SubstrateSession::new(original.task_id, &original.agent_template, original.config.clone());
+        let mut session = SubstrateSession::new(
+            original.task_id,
+            &original.agent_template,
+            original.config.clone(),
+        );
         session.start(None);
         session.record_turn(100, 50);
         session.complete("Resumed and completed");
@@ -242,12 +267,8 @@ mod tests {
     #[tokio::test]
     async fn test_mock_execute_success() {
         let substrate = MockSubstrate::new();
-        let request = SubstrateRequest::new(
-            Uuid::new_v4(),
-            "test-agent",
-            "System prompt",
-            "User prompt",
-        );
+        let request =
+            SubstrateRequest::new(Uuid::new_v4(), "test-agent", "System prompt", "User prompt");
 
         let session = substrate.execute(request).await.unwrap();
 
@@ -259,12 +280,8 @@ mod tests {
     #[tokio::test]
     async fn test_mock_execute_failure() {
         let substrate = MockSubstrate::with_default_response(MockResponse::failure("Test error"));
-        let request = SubstrateRequest::new(
-            Uuid::new_v4(),
-            "test-agent",
-            "System prompt",
-            "User prompt",
-        );
+        let request =
+            SubstrateRequest::new(Uuid::new_v4(), "test-agent", "System prompt", "User prompt");
 
         let session = substrate.execute(request).await.unwrap();
 
@@ -277,18 +294,18 @@ mod tests {
         let substrate = MockSubstrate::new();
         let task_id = Uuid::new_v4();
 
-        substrate.set_response_for_task(task_id, MockResponse {
-            output: "Custom output".to_string(),
-            turns: 3,
-            ..Default::default()
-        }).await;
+        substrate
+            .set_response_for_task(
+                task_id,
+                MockResponse {
+                    output: "Custom output".to_string(),
+                    turns: 3,
+                    ..Default::default()
+                },
+            )
+            .await;
 
-        let request = SubstrateRequest::new(
-            task_id,
-            "test-agent",
-            "System prompt",
-            "User prompt",
-        );
+        let request = SubstrateRequest::new(task_id, "test-agent", "System prompt", "User prompt");
 
         let session = substrate.execute(request).await.unwrap();
 
@@ -299,12 +316,8 @@ mod tests {
     #[tokio::test]
     async fn test_mock_streaming() {
         let substrate = MockSubstrate::new();
-        let request = SubstrateRequest::new(
-            Uuid::new_v4(),
-            "test-agent",
-            "System prompt",
-            "User prompt",
-        );
+        let request =
+            SubstrateRequest::new(Uuid::new_v4(), "test-agent", "System prompt", "User prompt");
 
         let (mut rx, _session) = substrate.execute_streaming(request).await.unwrap();
 

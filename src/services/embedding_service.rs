@@ -185,8 +185,14 @@ mod tests {
         let service = EmbeddingService::with_defaults(provider);
 
         let inputs = vec![
-            EmbeddingInput { id: "1".to_string(), text: "hello".to_string() },
-            EmbeddingInput { id: "2".to_string(), text: "world".to_string() },
+            EmbeddingInput {
+                id: "1".to_string(),
+                text: "hello".to_string(),
+            },
+            EmbeddingInput {
+                id: "2".to_string(),
+                text: "world".to_string(),
+            },
         ];
 
         let result = service.embed_many(&inputs).await.unwrap();
@@ -201,8 +207,14 @@ mod tests {
         let service = EmbeddingService::with_defaults(provider);
 
         let inputs = vec![
-            EmbeddingInput { id: "1".to_string(), text: "hello".to_string() },
-            EmbeddingInput { id: "2".to_string(), text: "world".to_string() },
+            EmbeddingInput {
+                id: "1".to_string(),
+                text: "hello".to_string(),
+            },
+            EmbeddingInput {
+                id: "2".to_string(),
+                text: "world".to_string(),
+            },
         ];
 
         let (outputs, report) = service.embed_many_with_report(&inputs).await;
@@ -235,40 +247,61 @@ mod tests {
 
     impl MockEmbeddingProvider {
         fn new(dimension: usize, max_batch: usize) -> Self {
-            Self { dimension, max_batch }
+            Self {
+                dimension,
+                max_batch,
+            }
         }
     }
 
     #[async_trait::async_trait]
     impl EmbeddingProvider for MockEmbeddingProvider {
-        fn name(&self) -> &'static str { "mock" }
-        fn dimension(&self) -> usize { self.dimension }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+        fn dimension(&self) -> usize {
+            self.dimension
+        }
 
         async fn embed(&self, _text: &str) -> DomainResult<Vec<f32>> {
             Ok(vec![0.1; self.dimension])
         }
 
-        async fn embed_batch(&self, inputs: &[EmbeddingInput]) -> DomainResult<Vec<EmbeddingOutput>> {
-            Ok(inputs.iter().map(|i| EmbeddingOutput {
-                id: i.id.clone(),
-                vector: vec![0.1; self.dimension],
-            }).collect())
+        async fn embed_batch(
+            &self,
+            inputs: &[EmbeddingInput],
+        ) -> DomainResult<Vec<EmbeddingOutput>> {
+            Ok(inputs
+                .iter()
+                .map(|i| EmbeddingOutput {
+                    id: i.id.clone(),
+                    vector: vec![0.1; self.dimension],
+                })
+                .collect())
         }
 
-        fn max_batch_size(&self) -> usize { self.max_batch }
+        fn max_batch_size(&self) -> usize {
+            self.max_batch
+        }
     }
 
     #[tokio::test]
     async fn test_batch_threshold_triggers_batch_api() {
         let provider = Arc::new(MockEmbeddingProvider::new(4, 100));
-        let service = EmbeddingService::new(provider, EmbeddingServiceConfig {
-            batch_threshold: 3,
-            max_concurrency: 5,
-        });
+        let service = EmbeddingService::new(
+            provider,
+            EmbeddingServiceConfig {
+                batch_threshold: 3,
+                max_concurrency: 5,
+            },
+        );
 
         // 5 items >= threshold of 3, should use batch API
         let inputs: Vec<EmbeddingInput> = (0..5)
-            .map(|i| EmbeddingInput { id: i.to_string(), text: format!("text {}", i) })
+            .map(|i| EmbeddingInput {
+                id: i.to_string(),
+                text: format!("text {}", i),
+            })
             .collect();
 
         let result = service.embed_many(&inputs).await.unwrap();
@@ -279,14 +312,20 @@ mod tests {
     #[tokio::test]
     async fn test_auto_chunking_large_batch() {
         let provider = Arc::new(MockEmbeddingProvider::new(4, 3));
-        let service = EmbeddingService::new(provider, EmbeddingServiceConfig {
-            batch_threshold: 2,
-            max_concurrency: 5,
-        });
+        let service = EmbeddingService::new(
+            provider,
+            EmbeddingServiceConfig {
+                batch_threshold: 2,
+                max_concurrency: 5,
+            },
+        );
 
         // 7 items with max_batch_size=3: should chunk into 3+3+1
         let inputs: Vec<EmbeddingInput> = (0..7)
-            .map(|i| EmbeddingInput { id: i.to_string(), text: format!("text {}", i) })
+            .map(|i| EmbeddingInput {
+                id: i.to_string(),
+                text: format!("text {}", i),
+            })
             .collect();
 
         let result = service.embed_many(&inputs).await.unwrap();
@@ -296,13 +335,19 @@ mod tests {
     #[tokio::test]
     async fn test_embed_many_with_report_counts_api_calls() {
         let provider = Arc::new(MockEmbeddingProvider::new(4, 3));
-        let service = EmbeddingService::new(provider, EmbeddingServiceConfig {
-            batch_threshold: 2,
-            max_concurrency: 5,
-        });
+        let service = EmbeddingService::new(
+            provider,
+            EmbeddingServiceConfig {
+                batch_threshold: 2,
+                max_concurrency: 5,
+            },
+        );
 
         let inputs: Vec<EmbeddingInput> = (0..7)
-            .map(|i| EmbeddingInput { id: i.to_string(), text: format!("text {}", i) })
+            .map(|i| EmbeddingInput {
+                id: i.to_string(),
+                text: format!("text {}", i),
+            })
             .collect();
 
         let (outputs, report) = service.embed_many_with_report(&inputs).await;

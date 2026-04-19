@@ -244,8 +244,10 @@ mod tests {
     #[test]
     fn test_fast_hint_caps_iterations() {
         let mut policy = ConvergencePolicy::default();
-        let mut budget = ConvergenceBudget::default();
-        budget.max_iterations = 12;
+        let mut budget = ConvergenceBudget {
+            max_iterations: 12,
+            ..Default::default()
+        };
 
         PriorityHint::Fast.apply(&mut policy, &mut budget);
 
@@ -261,8 +263,10 @@ mod tests {
     #[test]
     fn test_fast_hint_preserves_lower_iteration_cap() {
         let mut policy = ConvergencePolicy::default();
-        let mut budget = ConvergenceBudget::default();
-        budget.max_iterations = 3;
+        let mut budget = ConvergenceBudget {
+            max_iterations: 3,
+            ..Default::default()
+        };
 
         PriorityHint::Fast.apply(&mut policy, &mut budget);
 
@@ -273,8 +277,10 @@ mod tests {
     #[test]
     fn test_thorough_hint_increases_extensions() {
         let mut policy = ConvergencePolicy::default();
-        let mut budget = ConvergenceBudget::default();
-        budget.max_extensions = 1;
+        let mut budget = ConvergenceBudget {
+            max_extensions: 1,
+            ..Default::default()
+        };
 
         PriorityHint::Thorough.apply(&mut policy, &mut budget);
 
@@ -291,8 +297,10 @@ mod tests {
     #[test]
     fn test_cheap_hint_reduces_tokens() {
         let mut policy = ConvergencePolicy::default();
-        let mut budget = ConvergenceBudget::default();
-        budget.max_tokens = 100_000;
+        let mut budget = ConvergenceBudget {
+            max_tokens: 100_000,
+            ..Default::default()
+        };
 
         PriorityHint::Cheap.apply(&mut policy, &mut budget);
 

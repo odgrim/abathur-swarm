@@ -427,34 +427,40 @@ impl AuditFilter {
     /// Check if an entry matches this filter.
     pub fn matches(&self, entry: &AuditEntry) -> bool {
         if let Some(min_level) = self.min_level
-            && entry.level < min_level {
-                return false;
-            }
+            && entry.level < min_level
+        {
+            return false;
+        }
 
         if let Some(ref category) = self.category
-            && &entry.category != category {
-                return false;
-            }
+            && &entry.category != category
+        {
+            return false;
+        }
 
         if let Some(ref action) = self.action
-            && &entry.action != action {
-                return false;
-            }
+            && &entry.action != action
+        {
+            return false;
+        }
 
         if let Some(entity_id) = self.entity_id
-            && entry.entity_id != Some(entity_id) {
-                return false;
-            }
+            && entry.entity_id != Some(entity_id)
+        {
+            return false;
+        }
 
         if let Some(from) = self.from
-            && entry.timestamp < from {
-                return false;
-            }
+            && entry.timestamp < from
+        {
+            return false;
+        }
 
         if let Some(to) = self.to
-            && entry.timestamp > to {
-                return false;
-            }
+            && entry.timestamp > to
+        {
+            return false;
+        }
 
         true
     }
@@ -509,7 +515,12 @@ impl AuditLogService {
     }
 
     /// Log a simple info event.
-    pub async fn info(&self, category: AuditCategory, action: AuditAction, message: impl Into<String>) {
+    pub async fn info(
+        &self,
+        category: AuditCategory,
+        action: AuditAction,
+        message: impl Into<String>,
+    ) {
         self.log(AuditEntry::new(
             AuditLevel::Info,
             category,
@@ -574,7 +585,12 @@ impl AuditLogService {
     }
 
     /// Log a warning.
-    pub async fn warn(&self, category: AuditCategory, action: AuditAction, message: impl Into<String>) {
+    pub async fn warn(
+        &self,
+        category: AuditCategory,
+        action: AuditAction,
+        message: impl Into<String>,
+    ) {
         self.log(AuditEntry::new(
             AuditLevel::Warning,
             category,
@@ -586,7 +602,12 @@ impl AuditLogService {
     }
 
     /// Log an error.
-    pub async fn error(&self, category: AuditCategory, action: AuditAction, message: impl Into<String>) {
+    pub async fn error(
+        &self,
+        category: AuditCategory,
+        action: AuditAction,
+        message: impl Into<String>,
+    ) {
         self.log(AuditEntry::new(
             AuditLevel::Error,
             category,
@@ -636,13 +657,19 @@ impl AuditLogService {
     pub async fn stats(&self) -> AuditStats {
         let entries = self.entries.read().await;
 
-        let mut by_level: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut by_category: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut by_level: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut by_category: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut decisions_logged = 0;
 
         for entry in entries.iter() {
-            *by_level.entry(entry.level.as_str().to_string()).or_default() += 1;
-            *by_category.entry(entry.category.as_str().to_string()).or_default() += 1;
+            *by_level
+                .entry(entry.level.as_str().to_string())
+                .or_default() += 1;
+            *by_category
+                .entry(entry.category.as_str().to_string())
+                .or_default() += 1;
             if entry.rationale.is_some() {
                 decisions_logged += 1;
             }
@@ -724,7 +751,10 @@ mod tests {
         assert_eq!(entry.level, AuditLevel::Info);
         assert_eq!(entry.category, AuditCategory::Task);
         assert!(entry.entity_id.is_some());
-        assert_eq!(entry.metadata.get("priority"), Some(&serde_json::json!("high")));
+        assert_eq!(
+            entry.metadata.get("priority"),
+            Some(&serde_json::json!("high"))
+        );
     }
 
     #[test]
@@ -744,12 +774,15 @@ mod tests {
 
     #[test]
     fn test_decision_rationale() {
-        let rationale = DecisionRationale::new("Grant extension", "Task complexity warrants additional subtasks")
-            .with_alternative("Deny extension")
-            .with_alternative("Restructure task")
-            .with_factor("current_depth", "3")
-            .with_factor("subtask_count", "8")
-            .with_confidence(0.85);
+        let rationale = DecisionRationale::new(
+            "Grant extension",
+            "Task complexity warrants additional subtasks",
+        )
+        .with_alternative("Deny extension")
+        .with_alternative("Restructure task")
+        .with_factor("current_depth", "3")
+        .with_factor("subtask_count", "8")
+        .with_confidence(0.85);
 
         assert_eq!(rationale.alternatives.len(), 2);
         assert_eq!(rationale.factors.len(), 2);
@@ -781,13 +814,25 @@ mod tests {
         let service = AuditLogService::with_defaults();
 
         service
-            .info(AuditCategory::Task, AuditAction::TaskCreated, "Task 1 created")
+            .info(
+                AuditCategory::Task,
+                AuditAction::TaskCreated,
+                "Task 1 created",
+            )
             .await;
         service
-            .info(AuditCategory::Task, AuditAction::TaskCompleted, "Task 1 completed")
+            .info(
+                AuditCategory::Task,
+                AuditAction::TaskCompleted,
+                "Task 1 completed",
+            )
             .await;
         service
-            .info(AuditCategory::Goal, AuditAction::GoalCreated, "Goal created")
+            .info(
+                AuditCategory::Goal,
+                AuditAction::GoalCreated,
+                "Goal created",
+            )
             .await;
 
         let all = service.query(AuditFilter::new()).await;
@@ -803,8 +848,7 @@ mod tests {
     async fn test_decision_logging() {
         let service = AuditLogService::with_defaults();
 
-        let rationale = DecisionRationale::new("Accept", "Meets criteria")
-            .with_confidence(0.9);
+        let rationale = DecisionRationale::new("Accept", "Meets criteria").with_confidence(0.9);
 
         service
             .log_decision(

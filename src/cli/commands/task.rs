@@ -6,15 +6,15 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{SqliteTaskRepository, initialize_default_database};
 use crate::cli::command_dispatcher::CliCommandDispatcher;
-use crate::cli::id_resolver::{resolve_goal_id, resolve_task_id};
 use crate::cli::display::{
-    action_success, colorize_priority, colorize_status, list_table, output, render_list,
-    short_id, relative_time_str, truncate_ellipsis, CommandOutput, DetailView,
+    CommandOutput, DetailView, action_success, colorize_priority, colorize_status, list_table,
+    output, relative_time_str, render_list, short_id, truncate_ellipsis,
 };
+use crate::cli::id_resolver::{resolve_goal_id, resolve_task_id};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::ports::TaskFilter;
-use crate::services::command_bus::{CommandResult, DomainCommand, TaskCommand};
 use crate::services::TaskService;
+use crate::services::command_bus::{CommandResult, DomainCommand, TaskCommand};
 
 /// CLI-local priority enum — maps to `TaskPriority` after clap parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -45,14 +45,17 @@ pub struct TaskArgs {
 #[derive(Subcommand, Debug)]
 pub enum TaskCommands {
     /// Create a new task
-    #[command(visible_alias = "submit", after_help = "\
+    #[command(
+        visible_alias = "submit",
+        after_help = "\
 Examples:
   abathur task create \"Fix the login bug\"
   abathur task create \"Review PR #42\" --priority high
   abathur task create \"Implement feature X\" --goal abc123 --agent rust-impl
   abathur task create \"Subtask\" --parent def456 --depends-on ghi789
   abathur task create -f prompt.md --priority high
-")]
+"
+    )]
     Create {
         /// The prompt to send to the agent (provide this or --file, not both)
         prompt: Option<String>,
@@ -277,7 +280,10 @@ impl CommandOutput for TaskDetailOutput {
         let mut view = DetailView::new(&self.task.title)
             .field("ID", &self.task.id)
             .field("Status", &colorize_status(&self.task.status).to_string())
-            .field("Priority", &colorize_priority(&self.task.priority).to_string())
+            .field(
+                "Priority",
+                &colorize_priority(&self.task.priority).to_string(),
+            )
             .field("Type", &self.task.task_type)
             .field_opt("Agent", self.task.agent_type.as_deref())
             .field("Source", "human")
@@ -290,7 +296,8 @@ impl CommandOutput for TaskDetailOutput {
         }
 
         if !self.context_input.is_empty() {
-            view = view.section("Input")
+            view = view
+                .section("Input")
                 .item(&truncate_ellipsis(&self.context_input, 200));
         }
 
@@ -308,9 +315,10 @@ impl CommandOutput for TaskDetailOutput {
                 view = view.field("Satisfaction", sat);
             }
             if let Some(serde_json::Value::Number(conf)) = self.context_custom.get("confidence")
-                && let Some(c) = conf.as_f64() {
-                    view = view.field("Confidence", &format!("{:.0}%", c * 100.0));
-                }
+                && let Some(c) = conf.as_f64()
+            {
+                view = view.field("Confidence", &format!("{:.0}%", c * 100.0));
+            }
             if let Some(serde_json::Value::Number(iter)) = self.context_custom.get("iteration") {
                 view = view.field("Iteration", &iter.to_string());
             }
@@ -325,15 +333,39 @@ impl CommandOutput for TaskDetailOutput {
                     }
                 }
             }
-            if let Some(serde_json::Value::String(summary)) = self.context_custom.get("accomplishment_summary") {
+            if let Some(serde_json::Value::String(summary)) =
+                self.context_custom.get("accomplishment_summary")
+            {
                 view = view.field("Summary", &truncate_ellipsis(summary, 120));
             }
         }
 
-        view = view.section("Timing")
-            .field("Created", &format!("{} ({})", relative_time_str(&self.created_at), &self.created_at))
-            .field("Started", &self.started_at.as_deref().map(|s| format!("{} ({})", relative_time_str(s), s)).unwrap_or_else(|| "-".to_string()))
-            .field("Completed", &self.completed_at.as_deref().map(|s| format!("{} ({})", relative_time_str(s), s)).unwrap_or_else(|| "-".to_string()))
+        view = view
+            .section("Timing")
+            .field(
+                "Created",
+                &format!(
+                    "{} ({})",
+                    relative_time_str(&self.created_at),
+                    &self.created_at
+                ),
+            )
+            .field(
+                "Started",
+                &self
+                    .started_at
+                    .as_deref()
+                    .map(|s| format!("{} ({})", relative_time_str(s), s))
+                    .unwrap_or_else(|| "-".to_string()),
+            )
+            .field(
+                "Completed",
+                &self
+                    .completed_at
+                    .as_deref()
+                    .map(|s| format!("{} ({})", relative_time_str(s), s))
+                    .unwrap_or_else(|| "-".to_string()),
+            )
             .field("Retries", &self.task.retry_count.to_string());
 
         if let Some(path) = &self.worktree_path {
@@ -395,7 +427,12 @@ impl CommandOutput for TaskStatusOutput {
             ("canceled", self.canceled, "white"),
         ];
 
-        let max_count = statuses.iter().map(|(_, c, _)| *c).max().unwrap_or(1).max(1);
+        let max_count = statuses
+            .iter()
+            .map(|(_, c, _)| *c)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let bar_width = 20u64;
 
         let mut lines = vec![format!("{}", "Task Status Summary".bold())];
@@ -421,7 +458,11 @@ impl CommandOutput for TaskStatusOutput {
                 colored_bar,
             ));
         }
-        lines.push(format!("  {:<12} {:>4}", "Total".bold(), self.total.to_string().bold()));
+        lines.push(format!(
+            "  {:<12} {:>4}",
+            "Total".bold(),
+            self.total.to_string().bold()
+        ));
 
         lines.join("\n")
     }
@@ -451,7 +492,11 @@ impl CommandOutput for TaskPruneOutput {
         use colored::Colorize;
 
         let mut lines = Vec::new();
-        let action = if self.dry_run { "Would prune" } else { "Pruned" };
+        let action = if self.dry_run {
+            "Would prune"
+        } else {
+            "Pruned"
+        };
 
         if self.pruned_count == 0 && self.skipped.is_empty() {
             return "No tasks matched the given filters.".to_string();
@@ -520,10 +565,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         } => {
             let prompt = match (prompt, file) {
                 (Some(p), None) => p,
-                (None, Some(path)) => {
-                    std::fs::read_to_string(&path)
-                        .map_err(|e| anyhow::anyhow!("failed to read file '{}': {}", path.display(), e))?
-                }
+                (None, Some(path)) => std::fs::read_to_string(&path).map_err(|e| {
+                    anyhow::anyhow!("failed to read file '{}': {}", path.display(), e)
+                })?,
                 (None, None) => anyhow::bail!("provide either a prompt or --file"),
                 (Some(_), Some(_)) => anyhow::bail!("provide either a prompt or --file, not both"),
             };
@@ -587,7 +631,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 execution_mode: None,
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let task = match result {
@@ -597,13 +643,25 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
             let out = TaskActionOutput {
                 success: true,
-                message: format!("Task created: {} (status: {})", task.id, task.status.as_str()),
+                message: format!(
+                    "Task created: {} (status: {})",
+                    task.id,
+                    task.status.as_str()
+                ),
                 task: Some(TaskOutput::from(&task)),
             };
             output(&out, json_mode);
         }
 
-        TaskCommands::List { status, priority, agent, task_type, ready, parent, limit } => {
+        TaskCommands::List {
+            status,
+            priority,
+            agent,
+            task_type,
+            ready,
+            parent,
+            limit,
+        } => {
             let parent_id = match parent {
                 Some(ref p) => Some(resolve_task_id(&pool, p).await?),
                 None => None,
@@ -633,7 +691,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
         TaskCommands::Show { id } => {
             let uuid = resolve_task_id(&pool, &id).await?;
-            let task = service.get_task(uuid).await?
+            let task = service
+                .get_task(uuid)
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("Task not found: {}", id))?;
 
             let out = TaskDetailOutput {
@@ -657,7 +717,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 reason: "user-requested".to_string(),
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let task = match result {
@@ -678,7 +740,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
             let cmd = DomainCommand::Task(TaskCommand::Retry { task_id: uuid });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let task = match result {
@@ -697,13 +761,16 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         TaskCommands::Delete { id, force } => {
             let uuid = resolve_task_id(&pool, &id).await?;
 
-            let task = service.get_task(uuid).await?
+            let task = service
+                .get_task(uuid)
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("Task not found: {}", id))?;
 
             if !task.is_terminal() && !force {
                 anyhow::bail!(
                     "Task {} is in state '{}' (not terminal). Use --force to delete anyway.",
-                    id, task.status.as_str()
+                    id,
+                    task.status.as_str()
                 );
             }
 
@@ -717,7 +784,14 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        TaskCommands::Prune { status, agent, older_than, dry_run, force, limit } => {
+        TaskCommands::Prune {
+            status,
+            agent,
+            older_than,
+            dry_run,
+            force,
+            limit,
+        } => {
             // Require at least one filter unless --force
             let has_filter = !status.is_empty() || agent.is_some() || older_than.is_some();
             if !has_filter && !force {
@@ -796,7 +870,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 reason: reason.clone(),
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let task = match result {
@@ -808,7 +884,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 success: true,
                 message: format!(
                     "Force-transitioned task {} to {}: {}",
-                    task.id, task.status.as_str(), reason
+                    task.id,
+                    task.status.as_str(),
+                    reason
                 ),
                 task: Some(TaskOutput::from(&task)),
             };
@@ -818,21 +896,32 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         TaskCommands::Unstick { id, strategy } => {
             let uuid = resolve_task_id(&pool, &id).await?;
 
-            let task = service.get_task(uuid).await?
+            let task = service
+                .get_task(uuid)
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("Task not found: {}", id))?;
 
             let (new_status, reason) = match strategy.as_str() {
                 "fail" => (
                     TaskStatus::Failed,
-                    format!("unstick(fail): task was stuck in {} state", task.status.as_str()),
+                    format!(
+                        "unstick(fail): task was stuck in {} state",
+                        task.status.as_str()
+                    ),
                 ),
                 "complete" => (
                     TaskStatus::Complete,
-                    format!("unstick(complete): task was stuck in {} state", task.status.as_str()),
+                    format!(
+                        "unstick(complete): task was stuck in {} state",
+                        task.status.as_str()
+                    ),
                 ),
                 "retry" => (
                     TaskStatus::Running,
-                    format!("unstick(retry): task was stuck in {} state, resuming", task.status.as_str()),
+                    format!(
+                        "unstick(retry): task was stuck in {} state, resuming",
+                        task.status.as_str()
+                    ),
                 ),
                 _ => anyhow::bail!(
                     "unknown strategy '{}'. Valid: fail, complete, retry",
@@ -846,7 +935,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 reason: reason.clone(),
             });
 
-            let result = dispatcher.dispatch(cmd).await
+            let result = dispatcher
+                .dispatch(cmd)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let task = match result {
@@ -858,7 +949,9 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 success: true,
                 message: format!(
                     "Unstuck task {} -> {}: {}",
-                    task.id, task.status.as_str(), reason
+                    task.id,
+                    task.status.as_str(),
+                    reason
                 ),
                 task: Some(TaskOutput::from(&task)),
             };
@@ -892,5 +985,3 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
     Ok(())
 }
-
-
