@@ -1114,10 +1114,17 @@ async fn handle_tasks_send(state: Arc<A2AState>, request: JsonRpcRequest) -> Jso
         }
     };
 
-    Json(JsonRpcResponse::success(
-        request.id,
-        serde_json::to_value(task.to_a2a_task()).unwrap(),
-    ))
+    let task_value = match serde_json::to_value(task.to_a2a_task()) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InternalError,
+                Some(json!({"message": format!("Failed to serialize task: {}", e)})),
+            ))
+        }
+    };
+    Json(JsonRpcResponse::success(request.id, task_value))
 }
 
 /// Route a `tasks/send` request containing federation metadata to the
@@ -1233,10 +1240,14 @@ async fn handle_federation_routing(
                             }
                         })),
                     };
-                    Some(Json(JsonRpcResponse::success(
-                        request_id.clone(),
-                        serde_json::to_value(response_task).unwrap(),
-                    )))
+                    match serde_json::to_value(response_task) {
+                        Ok(v) => Some(Json(JsonRpcResponse::success(request_id.clone(), v))),
+                        Err(e) => Some(Json(JsonRpcResponse::error(
+                            request_id.clone(),
+                            A2AErrorCode::InternalError,
+                            Some(json!({"message": format!("Failed to serialize task: {}", e)})),
+                        ))),
+                    }
                 }
                 Err(e) => Some(Json(JsonRpcResponse::error(
                     request_id.clone(),
@@ -1283,10 +1294,14 @@ async fn handle_federation_routing(
                     }
                 })),
             };
-            Some(Json(JsonRpcResponse::success(
-                request_id.clone(),
-                serde_json::to_value(response_task).unwrap(),
-            )))
+            match serde_json::to_value(response_task) {
+                Ok(v) => Some(Json(JsonRpcResponse::success(request_id.clone(), v))),
+                Err(e) => Some(Json(JsonRpcResponse::error(
+                    request_id.clone(),
+                    A2AErrorCode::InternalError,
+                    Some(json!({"message": format!("Failed to serialize task: {}", e)})),
+                ))),
+            }
         }
 
         "register" => {
@@ -1346,10 +1361,14 @@ async fn handle_federation_routing(
                     }
                 })),
             };
-            Some(Json(JsonRpcResponse::success(
-                request_id.clone(),
-                serde_json::to_value(response_task).unwrap(),
-            )))
+            match serde_json::to_value(response_task) {
+                Ok(v) => Some(Json(JsonRpcResponse::success(request_id.clone(), v))),
+                Err(e) => Some(Json(JsonRpcResponse::error(
+                    request_id.clone(),
+                    A2AErrorCode::InternalError,
+                    Some(json!({"message": format!("Failed to serialize task: {}", e)})),
+                ))),
+            }
         }
 
         "goal_delegate" => {
@@ -1453,10 +1472,14 @@ async fn handle_federation_routing(
                 artifacts: None,
                 metadata: Some(task_metadata),
             };
-            Some(Json(JsonRpcResponse::success(
-                request_id.clone(),
-                serde_json::to_value(response_task).unwrap(),
-            )))
+            match serde_json::to_value(response_task) {
+                Ok(v) => Some(Json(JsonRpcResponse::success(request_id.clone(), v))),
+                Err(e) => Some(Json(JsonRpcResponse::error(
+                    request_id.clone(),
+                    A2AErrorCode::InternalError,
+                    Some(json!({"message": format!("Failed to serialize task: {}", e)})),
+                ))),
+            }
         }
 
         // Unknown intent — fall through to normal task handling
@@ -1749,10 +1772,17 @@ async fn handle_tasks_get(state: Arc<A2AState>, request: JsonRpcRequest) -> Json
         metadata: task.metadata.clone(),
     };
 
-    Json(JsonRpcResponse::success(
-        request.id,
-        serde_json::to_value(response).unwrap(),
-    ))
+    let value = match serde_json::to_value(response) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InternalError,
+                Some(json!({"message": format!("Failed to serialize task: {}", e)})),
+            ))
+        }
+    };
+    Json(JsonRpcResponse::success(request.id, value))
 }
 
 async fn handle_tasks_cancel(
@@ -1813,10 +1843,17 @@ async fn handle_tasks_cancel(
         metadata: task.metadata.clone(),
     };
 
-    Json(JsonRpcResponse::success(
-        request.id,
-        serde_json::to_value(response).unwrap(),
-    ))
+    let value = match serde_json::to_value(response) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InternalError,
+                Some(json!({"message": format!("Failed to serialize task: {}", e)})),
+            ))
+        }
+    };
+    Json(JsonRpcResponse::success(request.id, value))
 }
 
 async fn handle_push_notification_config(
@@ -1873,10 +1910,14 @@ async fn handle_agent_card(state: Arc<A2AState>, request: JsonRpcRequest) -> Jso
 
     if let Some(id) = agent_id {
         match cards.get(&id) {
-            Some(card) => Json(JsonRpcResponse::success(
-                request.id,
-                serde_json::to_value(card).unwrap(),
-            )),
+            Some(card) => match serde_json::to_value(card) {
+                Ok(v) => Json(JsonRpcResponse::success(request.id, v)),
+                Err(e) => Json(JsonRpcResponse::error(
+                    request.id,
+                    A2AErrorCode::InternalError,
+                    Some(json!({"message": format!("Failed to serialize agent card: {}", e)})),
+                )),
+            },
             None => Json(JsonRpcResponse::error(
                 request.id,
                 A2AErrorCode::AgentNotFound,
@@ -1886,10 +1927,14 @@ async fn handle_agent_card(state: Arc<A2AState>, request: JsonRpcRequest) -> Jso
     } else {
         // Return first available agent card
         match cards.values().next() {
-            Some(card) => Json(JsonRpcResponse::success(
-                request.id,
-                serde_json::to_value(card).unwrap(),
-            )),
+            Some(card) => match serde_json::to_value(card) {
+                Ok(v) => Json(JsonRpcResponse::success(request.id, v)),
+                Err(e) => Json(JsonRpcResponse::error(
+                    request.id,
+                    A2AErrorCode::InternalError,
+                    Some(json!({"message": format!("Failed to serialize agent card: {}", e)})),
+                )),
+            },
             None => Json(JsonRpcResponse::error(
                 request.id,
                 A2AErrorCode::AgentNotFound,
@@ -1930,10 +1975,14 @@ async fn handle_agent_skills(
                 })
                 .collect();
 
-            Json(JsonRpcResponse::success(
-                request.id,
-                serde_json::to_value(skills).unwrap(),
-            ))
+            match serde_json::to_value(skills) {
+                Ok(v) => Json(JsonRpcResponse::success(request.id, v)),
+                Err(e) => Json(JsonRpcResponse::error(
+                    request.id,
+                    A2AErrorCode::InternalError,
+                    Some(json!({"message": format!("Failed to serialize skills: {}", e)})),
+                )),
+            }
         }
         None => Json(JsonRpcResponse::error(
             request.id,
@@ -2938,6 +2987,41 @@ mod tests {
         };
         assert_eq!(tls_config.cert_path, "/path/to/cert.pem");
         assert!(tls_config.ca_path.is_some());
+    }
+
+    /// Regression: every `serde_json::to_value(...).unwrap()` panic site in
+    /// JSON-RPC / REST handlers has been replaced with an error branch that
+    /// emits a `-32603` InternalError response. A panicking unwrap on a
+    /// serialization error would crash the gateway process on malformed input.
+    ///
+    /// Because `serde_json::to_value` on well-typed Rust values (e.g.
+    /// `A2ATask`, `A2AAgentCard`, `Vec<A2ASkill>`) effectively cannot fail
+    /// at runtime, we cannot craft a realistic request that triggers the
+    /// error branch. Instead, this test statically verifies that no
+    /// `serde_json::to_value(...).unwrap()` remains in the production code
+    /// of this file (test module is permitted to keep unwrap for brevity).
+    #[test]
+    fn test_no_to_value_unwrap_in_production_code() {
+        let src = include_str!("a2a_http.rs");
+        // Split at the start of the test module so we only scan production code.
+        let prod_src = match src.find("#[cfg(test)]") {
+            Some(idx) => &src[..idx],
+            None => src,
+        };
+        // Look for the pattern `serde_json::to_value(...).unwrap()` — with any
+        // arguments in between. A simple substring check for the ending is
+        // sufficient because every such site in this file used this exact form.
+        let mut offenders = Vec::new();
+        for (lineno, line) in prod_src.lines().enumerate() {
+            if line.contains("serde_json::to_value(") && line.contains(".unwrap()") {
+                offenders.push((lineno + 1, line.trim().to_string()));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "Found panicking serde_json::to_value(...).unwrap() in production code: {:?}",
+            offenders
+        );
     }
 
     #[test]
