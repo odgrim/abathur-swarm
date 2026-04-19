@@ -26,8 +26,8 @@ mod prepare;
 mod resolve;
 
 pub use ports::{
-    ConvergenceDomainEvent, ConvergenceEventSink, NullEventSink, StrategyExecutionContext,
-    StrategyExecutionOutput, StrategyExecutor, TracingEventSink,
+    ConvergenceDomainEvent, ConvergenceEventSink, NullEventSink, StrategyEffects,
+    StrategyExecutionContext, StrategyExecutionOutput, StrategyExecutor, TracingEventSink,
 };
 
 #[cfg(test)]
@@ -128,6 +128,19 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     /// field. Today the orchestrator invokes the executor out-of-band.
     #[allow(dead_code)]
     pub(super) executor: Option<Arc<dyn StrategyExecutor>>,
+    /// Optional strategy side-effects port.
+    ///
+    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): the
+    /// field and builder exist in PR 3 so callers can wire a concrete
+    /// [`StrategyEffects`] implementation (e.g.
+    /// `OrchestratorStrategyEffects`), but the engine's internal strategy
+    /// handling does not yet dispatch through this field. Today the
+    /// orchestrator handles `FreshStart` inline in
+    /// `run_convergent_execution_inner`; `RevertAndBranch` has no
+    /// filesystem-visible side effect (the engine just routes to an earlier
+    /// observation's artifact).
+    #[allow(dead_code)]
+    pub(super) effects: Option<Arc<dyn StrategyEffects>>,
 }
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
@@ -152,6 +165,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             calibration_tracker: Mutex::new(BudgetCalibrationTracker::default()),
             event_sink: Arc::new(TracingEventSink),
             executor: None,
+            effects: None,
         }
     }
 
@@ -173,6 +187,19 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
     /// been updated to install one.
     pub fn with_executor<E: StrategyExecutor + 'static>(mut self, e: Arc<E>) -> Self {
         self.executor = Some(e);
+        self
+    }
+
+    /// Attach a [`StrategyEffects`] implementation (builder-style).
+    ///
+    /// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): today
+    /// the engine stores the effects handle but its internal strategy
+    /// handling does not yet dispatch through it. PR 4 will migrate
+    /// `execute_strategy` to call `self.effects.as_ref().unwrap().on_fresh_start(...)`
+    /// / `on_revert(...)` and delete the orchestrator's inline `FreshStart`
+    /// handling.
+    pub fn with_effects<E: StrategyEffects + 'static>(mut self, e: Arc<E>) -> Self {
+        self.effects = Some(e);
         self
     }
 

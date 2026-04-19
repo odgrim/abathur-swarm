@@ -16,6 +16,7 @@
 //! so the engine stays free of orchestrator imports.
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::convergence::{
@@ -341,4 +342,37 @@ pub trait StrategyExecutor: Send + Sync {
         &self,
         ctx: &StrategyExecutionContext<'_>,
     ) -> DomainResult<StrategyExecutionOutput>;
+}
+
+// ---------------------------------------------------------------------------
+// StrategyEffects
+// ---------------------------------------------------------------------------
+
+/// Port the engine uses to request side-effectful strategy work.
+///
+/// Strategies like `FreshStart` and `RevertAndBranch` have side effects that
+/// touch the filesystem (worktree reset) or external event buses (fresh start
+/// notifications). The engine itself has no notion of worktrees or event
+/// payloads, so it delegates these effects to an implementation provided by
+/// the orchestrator (see `OrchestratorStrategyEffects`).
+///
+/// Staged for PR 4 of the engine-as-core refactor chain (#13/#21): PR 3
+/// introduces the port and wires an optional effects field onto
+/// `ConvergenceEngine`. The engine's own `execute_strategy` does not yet
+/// dispatch through this port; today the orchestrator handles `FreshStart`
+/// inline in `run_convergent_execution_inner` and `RevertAndBranch` runs
+/// inside the engine with no worktree side effects. PR 4 will flip the inner
+/// loop to call `effects.on_fresh_start(...)` / `effects.on_revert(...)` and
+/// delete the orchestrator's inline handling.
+#[async_trait]
+pub trait StrategyEffects: Send + Sync {
+    /// Invoked when a `FreshStart` strategy is selected. Implementations
+    /// typically reset the trajectory's worktree to the base branch state
+    /// and emit a `ConvergenceFreshStart` event.
+    async fn on_fresh_start(&self, trajectory: &Trajectory) -> DomainResult<()>;
+
+    /// Invoked when a `RevertAndBranch` strategy is selected. Implementations
+    /// typically roll the worktree back to the filesystem state associated
+    /// with the target observation.
+    async fn on_revert(&self, trajectory: &Trajectory, target: &Uuid) -> DomainResult<()>;
 }

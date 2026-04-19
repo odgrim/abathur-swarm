@@ -43,8 +43,8 @@ use crate::domain::models::{SubstrateConfig, SubstrateRequest};
 use crate::domain::ports::{MemoryRepository, Substrate, TaskRepository, TrajectoryRepository};
 use crate::services::convergence_bridge;
 use crate::services::convergence_engine::{
-    ConvergenceEngine, OverseerMeasurer, StrategyExecutionContext, StrategyExecutionOutput,
-    StrategyExecutor,
+    ConvergenceEngine, OverseerMeasurer, StrategyEffects, StrategyExecutionContext,
+    StrategyExecutionOutput, StrategyExecutor,
 };
 use crate::services::event_bus::{
     ConvergenceIterationPayload, ConvergenceTerminatedPayload, EventBus, EventPayload,
@@ -182,6 +182,78 @@ impl StrategyExecutor for OrchestratorStrategyExecutor {
             tokens_used,
             wall_time_ms,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OrchestratorStrategyEffects
+// ---------------------------------------------------------------------------
+
+/// `StrategyEffects` implementation used by the orchestrator's convergent
+/// path. Wraps the worktree-reset + `ConvergenceFreshStart` event emission
+/// that currently lives inline inside `run_convergent_execution_inner`.
+///
+/// Part of the engine-as-core refactor chain (#13/#21): PR 3 establishes the
+/// boundary so PR 4 can migrate the engine's inner strategy handling to call
+/// `effects.on_fresh_start(...)` / `effects.on_revert(...)` directly. When
+/// that happens, the inline `FreshStart` handling in
+/// `run_convergent_execution_inner` can be deleted.
+///
+/// NOTE: PR 3 does NOT migrate the orchestrator's inline `FreshStart` code to
+/// call this impl. The inline path mutates trajectory state
+/// (`trajectory.total_fresh_starts += 1`) that the `&Trajectory` signature
+/// here cannot express, so extraction waits until PR 4 inverts ownership
+/// (engine drives the loop and owns the trajectory mutably). `on_revert` has
+/// no pre-existing orchestrator-side logic to mirror; `RevertAndBranch` is
+/// currently handled entirely inside the engine by routing to a prior
+/// observation's artifact, with no worktree side effect.
+#[allow(dead_code)]
+pub(super) struct OrchestratorStrategyEffects {
+    event_bus: Arc<EventBus>,
+    goal_id: Option<Uuid>,
+    task_id: Uuid,
+    /// Worktree path the FreshStart reset should target. `None` means no
+    /// worktree was allocated for this run (e.g. in-process tests); the reset
+    /// becomes a no-op, matching the inline code's `if let Some(wt) = ...`
+    /// guard.
+    worktree_path: Option<PathBuf>,
+}
+
+#[async_trait]
+impl StrategyEffects for OrchestratorStrategyEffects {
+    async fn on_fresh_start(&self, trajectory: &Trajectory) -> DomainResult<()> {
+        if let Some(ref wt) = self.worktree_path {
+            reset_worktree(wt.to_string_lossy().as_ref()).await?;
+        }
+        self.event_bus
+            .publish(event_factory::make_event(
+                EventSeverity::Info,
+                crate::services::event_bus::EventCategory::Convergence,
+                self.goal_id,
+                Some(self.task_id),
+                EventPayload::ConvergenceFreshStart {
+                    task_id: self.task_id,
+                    trajectory_id: trajectory.id,
+                    fresh_start_number: trajectory.total_fresh_starts,
+                    reason: "FreshStart strategy selected".to_string(),
+                },
+            ))
+            .await;
+        Ok(())
+    }
+
+    async fn on_revert(&self, trajectory: &Trajectory, target: &Uuid) -> DomainResult<()> {
+        // RevertAndBranch currently has no orchestrator-side filesystem
+        // effect: the engine handles the revert by routing to the target
+        // observation's stored artifact reference. We trace the call so PR 4
+        // can introduce a real worktree-rewind here when the engine starts
+        // owning the inner loop.
+        tracing::debug!(
+            trajectory_id = %trajectory.id,
+            target = %target,
+            "StrategyEffects::on_revert invoked (no-op until PR 4 owns the loop)"
+        );
+        Ok(())
     }
 }
 
