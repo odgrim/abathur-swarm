@@ -474,9 +474,22 @@ impl CommandBus {
             }
 
             // Commit the transaction — atomically persists both mutations and events.
-            let tx = Arc::try_unwrap(shared_tx)
-                .expect("shared_tx should have no other references after handler scope")
-                .into_inner();
+            let tx = match tx_context::take_inner_tx(shared_tx).await {
+                Ok(tx) => tx,
+                Err(still_shared) => {
+                    tracing::error!(
+                        "Failed to acquire exclusive ownership of outbox transaction — \
+                         other references still outstanding; rolling back"
+                    );
+                    // Dropping the still-shared SharedTx allows the inner transaction
+                    // to roll back cleanly once the final reference is released.
+                    drop(still_shared);
+                    return Err(CommandError::DomainError(DomainError::DatabaseError(
+                        "failed to acquire exclusive ownership of outbox transaction for commit"
+                            .into(),
+                    )));
+                }
+            };
             tx.commit().await.map_err(|e| {
                 tracing::error!(error = %e, "Failed to commit outbox transaction");
                 CommandError::DomainError(DomainError::DatabaseError(e.to_string()))
