@@ -64,20 +64,40 @@ impl DefaultDelegationStrategy {
     }
 }
 
+/// Maximum number of re-delegation attempts before giving up on a task and
+/// falling through to local execution. Prevents infinite redelegation loops.
+const MAX_REJECTION_COUNT: u32 = 5;
+
 impl FederationDelegationStrategy for DefaultDelegationStrategy {
     fn select_cerebrate(
         &self,
         task: &FederationTaskEnvelope,
         cerebrates: &[CerebrateStatus],
     ) -> Option<String> {
+        // Build a quick lookup of in-flight counts from the envelope's peer
+        // hints. Strategy: prefer the under-loaded peer when hints are present;
+        // fall back to the reported `load` metric otherwise.
+        let hint_for = |id: &str| -> Option<u32> {
+            task.peer_load_hints
+                .iter()
+                .find(|(cid, _)| cid == id)
+                .map(|(_, n)| *n)
+        };
+
         cerebrates
             .iter()
             .filter(|c| c.can_accept_task())
             .filter(|c| Self::has_required_capabilities(c, &task.required_capabilities))
+            // Never pick a cerebrate that has already rejected this task.
+            .filter(|c| !task.rejected_by.iter().any(|r| r == &c.id))
             .min_by(|a, b| {
-                a.load
-                    .partial_cmp(&b.load)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                match (hint_for(&a.id), hint_for(&b.id)) {
+                    (Some(la), Some(lb)) => la.cmp(&lb),
+                    _ => a
+                        .load
+                        .partial_cmp(&b.load)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                }
             })
             .map(|c| c.id.clone())
     }
@@ -89,10 +109,20 @@ impl FederationDelegationStrategy for DefaultDelegationStrategy {
         _reason: &str,
         remaining: &[CerebrateStatus],
     ) -> DelegationDecision {
-        // Try next available cerebrate (excluding the one that rejected)
+        // Bail out of the redelegation loop if we've exhausted the budget.
+        if task.rejection_count >= MAX_REJECTION_COUNT {
+            return DelegationDecision::Fail(format!(
+                "Task {} rejected {} times; giving up",
+                task.task_id, task.rejection_count
+            ));
+        }
+
+        // Exclude the rejecting cerebrate AND anyone in the rejection history
+        // so we don't ping-pong the task between the same peers.
         let others: Vec<_> = remaining
             .iter()
             .filter(|c| c.id != rejected_by && c.can_accept_task())
+            .filter(|c| !task.rejected_by.iter().any(|r| r == &c.id))
             .cloned()
             .collect();
 
@@ -410,6 +440,92 @@ mod tests {
             DelegationDecision::Redelegate(id) => assert_eq!(id, "c2"),
             _ => panic!("Expected Redelegate, got {:?}", decision),
         }
+    }
+
+    #[test]
+    fn test_default_delegation_avoids_prior_rejectors() {
+        let strategy = DefaultDelegationStrategy;
+        let envelope = FederationTaskEnvelope::new(Uuid::new_v4(), "Test", "Test desc")
+            .with_rejection_history(vec!["c1".to_string(), "c2".to_string()]);
+
+        let remaining = vec![
+            {
+                let mut c = CerebrateStatus::new("c1", "Cerebrate 1").with_max_delegations(5);
+                c.connection_state = ConnectionState::Connected;
+                c.load = 0.1;
+                c
+            },
+            {
+                let mut c = CerebrateStatus::new("c2", "Cerebrate 2").with_max_delegations(5);
+                c.connection_state = ConnectionState::Connected;
+                c.load = 0.1;
+                c
+            },
+            {
+                let mut c = CerebrateStatus::new("c3", "Cerebrate 3").with_max_delegations(5);
+                c.connection_state = ConnectionState::Connected;
+                c.load = 0.9;
+                c
+            },
+        ];
+
+        // c1/c2 already rejected; c3 is the only valid target even though
+        // its raw `load` is highest.
+        let decision = strategy.on_rejection(&envelope, "c2", "busy", &remaining);
+        match decision {
+            DelegationDecision::Redelegate(id) => assert_eq!(id, "c3"),
+            other => panic!("Expected Redelegate to c3, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_default_delegation_prefers_lowest_peer_load_hint() {
+        let strategy = DefaultDelegationStrategy;
+        // c1 has higher reported `load` but fewer in-flight tasks per the
+        // envelope hints; we should prefer c1.
+        let envelope = FederationTaskEnvelope::new(Uuid::new_v4(), "Test", "Test desc")
+            .with_peer_load_hints(vec![("c1".to_string(), 1), ("c2".to_string(), 4)]);
+
+        let cerebrates = vec![
+            {
+                let mut c = CerebrateStatus::new("c1", "Cerebrate 1").with_max_delegations(5);
+                c.connection_state = ConnectionState::Connected;
+                c.load = 0.9;
+                c
+            },
+            {
+                let mut c = CerebrateStatus::new("c2", "Cerebrate 2").with_max_delegations(5);
+                c.connection_state = ConnectionState::Connected;
+                c.load = 0.1;
+                c
+            },
+        ];
+
+        let selected = strategy.select_cerebrate(&envelope, &cerebrates);
+        assert_eq!(selected.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn test_default_delegation_fails_after_max_rejections() {
+        let strategy = DefaultDelegationStrategy;
+        let rejectors: Vec<String> =
+            (0..6).map(|i| format!("c{}", i)).collect();
+        let envelope = FederationTaskEnvelope::new(Uuid::new_v4(), "Test", "Test desc")
+            .with_rejection_history(rejectors);
+
+        let remaining = vec![{
+            let mut c = CerebrateStatus::new("c99", "Fresh").with_max_delegations(5);
+            c.connection_state = ConnectionState::Connected;
+            c.load = 0.1;
+            c
+        }];
+
+        let decision = strategy.on_rejection(&envelope, "c5", "busy", &remaining);
+        assert!(
+            matches!(decision, DelegationDecision::Fail(_)),
+            "Expected Fail after exceeding MAX_REJECTION_COUNT, got {:?}",
+            decision
+        );
     }
 
     #[test]

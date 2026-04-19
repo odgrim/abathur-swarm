@@ -712,10 +712,10 @@ async fn test_federation_result_handler_reactor_emits_reactions() {
 
 /// Test 5: Federated task rejection path.
 /// handle_reject should emit a FederationTaskRejected event and, with one
-/// remaining healthy cerebrate, return a Redelegate decision (covered in
-/// the earlier unit test but not the event emission). Documents the
-/// current envelope shape — per task #15 the envelope uses a placeholder
-/// task body; the assertions here check what the code actually does today.
+/// remaining healthy cerebrate, return a Redelegate decision. The rejection
+/// envelope is populated with real context (task_id, parent_task_id,
+/// rejection_count, rejected_by, peer_load_hints) and the delegation
+/// strategy consumes those fields to avoid re-delegating to the rejector.
 #[tokio::test]
 async fn test_federation_rejection_emits_rejected_event() {
     let (overmind, bus) = make_overmind();
@@ -730,7 +730,9 @@ async fn test_federation_rejection_emits_rejected_event() {
     overmind.connect("c2").await.unwrap();
 
     let task_id = Uuid::new_v4();
-    let envelope = FederationTaskEnvelope::new(task_id, "reject-me", "this will be rejected");
+    let parent_task_id = Uuid::new_v4();
+    let envelope = FederationTaskEnvelope::new(task_id, "reject-me", "this will be rejected")
+        .with_parent_task(parent_task_id);
     overmind.delegate_to(&envelope, "c1").await.unwrap();
     assert_eq!(overmind.in_flight_count().await, 1);
 
@@ -780,4 +782,15 @@ async fn test_federation_rejection_emits_rejected_event() {
         1,
         "Redelegate re-inserts task into in_flight mapped to the new cerebrate"
     );
+
+    // Reject again from c2 to verify the envelope carries accumulated history
+    // and the strategy refuses to redelegate to either prior rejector.
+    let second_decision = overmind.handle_reject(task_id, "c2", "also busy").await;
+    match second_decision {
+        abathur::services::federation::DelegationDecision::ExecuteLocally => {}
+        other => panic!(
+            "Expected ExecuteLocally after both c1 and c2 rejected, got {:?}",
+            other
+        ),
+    }
 }

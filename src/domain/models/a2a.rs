@@ -459,6 +459,10 @@ pub struct FederationTaskEnvelope {
     /// ID of the delegated task.
     pub task_id: Uuid,
     /// Parent goal this task belongs to.
+    ///
+    /// NOTE: Per domain design ("tasks have parent tasks, not parent goals"),
+    /// goal association should live on the Task model via `goal_id`, not on
+    /// the envelope as a parent relationship. Retained for wire compatibility.
     pub parent_goal_id: Option<Uuid>,
     /// Correlation ID for tracking the delegation conversation.
     pub correlation_id: Uuid,
@@ -482,6 +486,23 @@ pub struct FederationTaskEnvelope {
     /// only those whose `capabilities` list contains all required entries.
     #[serde(default)]
     pub required_capabilities: Vec<String>,
+    /// Immediate parent task (task-to-task ancestry). `None` when this was a
+    /// top-level task.
+    #[serde(default)]
+    pub parent_task_id: Option<Uuid>,
+    /// Number of times this specific task has been rejected/retried.
+    /// Used by delegation strategies to avoid infinite re-delegation loops.
+    #[serde(default)]
+    pub rejection_count: u32,
+    /// Cerebrate IDs that have rejected this task. Delegation strategies
+    /// should avoid re-delegating to members of this list.
+    #[serde(default)]
+    pub rejected_by: Vec<String>,
+    /// Current in-flight counts per cerebrate at the time this envelope was
+    /// built. `(cerebrate_id, in_flight_count)`. Transport-layer hint; the
+    /// strategy uses it to prefer under-loaded peers.
+    #[serde(default)]
+    pub peer_load_hints: Vec<(String, u32)>,
 }
 
 impl FederationTaskEnvelope {
@@ -498,11 +519,38 @@ impl FederationTaskEnvelope {
             accept_timeout_secs: 300,
             result_schema: None,
             required_capabilities: Vec::new(),
+            parent_task_id: None,
+            rejection_count: 0,
+            rejected_by: Vec::new(),
+            peer_load_hints: Vec::new(),
         }
     }
 
     pub fn with_parent_goal(mut self, goal_id: Uuid) -> Self {
         self.parent_goal_id = Some(goal_id);
+        self
+    }
+
+    /// Set the immediate parent task (task-to-task ancestry).
+    pub fn with_parent_task(mut self, parent_task_id: Uuid) -> Self {
+        self.parent_task_id = Some(parent_task_id);
+        self
+    }
+
+    /// Populate rejection history. Typically called by the federation service
+    /// when rebuilding an envelope for re-delegation after a rejection.
+    pub fn with_rejection_history(
+        mut self,
+        rejected_by: Vec<String>,
+    ) -> Self {
+        self.rejection_count = rejected_by.len() as u32;
+        self.rejected_by = rejected_by;
+        self
+    }
+
+    /// Populate peer load hints — `(cerebrate_id, in_flight_count)` pairs.
+    pub fn with_peer_load_hints(mut self, hints: Vec<(String, u32)>) -> Self {
+        self.peer_load_hints = hints;
         self
     }
 

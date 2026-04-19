@@ -321,6 +321,15 @@ pub struct FederationService {
     cerebrates: Arc<RwLock<HashMap<String, CerebrateStatus>>>,
     /// In-flight delegated tasks (task_id → cerebrate_id).
     in_flight: Arc<RwLock<HashMap<Uuid, String>>>,
+    /// Envelope snapshots for in-flight tasks (task_id → envelope). Kept so
+    /// rejection handling can recover task context (`parent_task_id`, title,
+    /// capability requirements) without depending on a task repository.
+    /// Cleared on terminal results.
+    delegated_envelopes: Arc<RwLock<HashMap<Uuid, FederationTaskEnvelope>>>,
+    /// Rejection history per task (task_id → list of cerebrate_ids that
+    /// rejected it, in order). Populated by `handle_reject`; consumed by
+    /// the delegation strategy to avoid re-delegating to a rejector.
+    rejection_history: Arc<RwLock<HashMap<Uuid, Vec<String>>>>,
     /// Maps federation task_id → FederatedGoal.id so that result handlers
     /// can correlate incoming results back to the federated goal that owns
     /// the DAG node.
@@ -357,6 +366,8 @@ impl FederationService {
             config,
             cerebrates: Arc::new(RwLock::new(HashMap::new())),
             in_flight: Arc::new(RwLock::new(HashMap::new())),
+            delegated_envelopes: Arc::new(RwLock::new(HashMap::new())),
+            rejection_history: Arc::new(RwLock::new(HashMap::new())),
             task_to_federated_goal: Arc::new(RwLock::new(HashMap::new())),
             last_activity: Arc::new(RwLock::new(HashMap::new())),
             event_bus,
@@ -815,6 +826,13 @@ impl FederationService {
             in_flight.insert(envelope.task_id, cerebrate_id.to_string());
         }
         {
+            // Snapshot envelope for later context lookup (e.g. rejection
+            // handling rebuilding a context-carrying envelope for the
+            // delegation strategy).
+            let mut envs = self.delegated_envelopes.write().await;
+            envs.insert(envelope.task_id, envelope.clone());
+        }
+        {
             let mut activity = self.last_activity.write().await;
             activity.insert(envelope.task_id, chrono::Utc::now());
         }
@@ -1056,6 +1074,14 @@ impl FederationService {
             }
         }
 
+        // Record rejection in history (append cerebrate_id).
+        let rejected_by: Vec<String> = {
+            let mut history = self.rejection_history.write().await;
+            let entry = history.entry(task_id).or_insert_with(Vec::new);
+            entry.push(cerebrate_id.to_string());
+            entry.clone()
+        };
+
         self.event_bus
             .publish(event_factory::federation_event(
                 EventSeverity::Warning,
@@ -1071,18 +1097,50 @@ impl FederationService {
         // Get remaining cerebrates for strategy decision
         let remaining = self.list_cerebrates().await;
 
-        // Build a temporary envelope for the strategy
-        let envelope = FederationTaskEnvelope::new(task_id, "", "");
+        // Compute peer load hints from current in_flight tracking:
+        // count per cerebrate_id.
+        let peer_load_hints: Vec<(String, u32)> = {
+            let in_flight = self.in_flight.read().await;
+            let mut counts: HashMap<String, u32> = HashMap::new();
+            for cid in in_flight.values() {
+                *counts.entry(cid.clone()).or_insert(0) += 1;
+            }
+            // Ensure every known cerebrate appears (with 0 if idle) so the
+            // strategy can reason about the whole peer set.
+            for c in &remaining {
+                counts.entry(c.id.clone()).or_insert(0);
+            }
+            counts.into_iter().collect()
+        };
+
+        // Build the context-carrying envelope for the strategy. Prefer the
+        // original envelope snapshot (carries title/description/capabilities/
+        // parent_task_id); fall back to a minimal shell if missing.
+        let envelope = {
+            let envs = self.delegated_envelopes.read().await;
+            envs.get(&task_id).cloned()
+        }
+        .unwrap_or_else(|| FederationTaskEnvelope::new(task_id, "", ""))
+        .with_rejection_history(rejected_by)
+        .with_peer_load_hints(peer_load_hints);
+
         let decision =
             self.delegation_strategy
                 .on_rejection(&envelope, cerebrate_id, reason, &remaining);
 
         // If the strategy decides to redelegate, update in_flight to point at
         // the new cerebrate so subsequent result/progress messages are routed
-        // correctly.
+        // correctly. Also refresh the stored envelope so subsequent rejections
+        // see the updated rejection history.
         if let DelegationDecision::Redelegate(ref new_cerebrate_id) = decision {
-            let mut in_flight = self.in_flight.write().await;
-            in_flight.insert(task_id, new_cerebrate_id.clone());
+            {
+                let mut in_flight = self.in_flight.write().await;
+                in_flight.insert(task_id, new_cerebrate_id.clone());
+            }
+            {
+                let mut envs = self.delegated_envelopes.write().await;
+                envs.insert(task_id, envelope);
+            }
         }
 
         decision
@@ -1149,6 +1207,14 @@ impl FederationService {
             {
                 let mut activity = self.last_activity.write().await;
                 activity.remove(&task_id);
+            }
+            {
+                let mut envs = self.delegated_envelopes.write().await;
+                envs.remove(&task_id);
+            }
+            {
+                let mut history = self.rejection_history.write().await;
+                history.remove(&task_id);
             }
             // Note: task_to_federated_goal is intentionally NOT cleaned up here.
             // The FederationResultHandler needs to look up the mapping when it
