@@ -21,8 +21,11 @@ use crate::services::budget_tracker::BudgetTracker;
 
 mod decide;
 mod iterate;
+pub mod ports;
 mod prepare;
 mod resolve;
+
+pub use ports::{ConvergenceDomainEvent, ConvergenceEventSink, NullEventSink, TracingEventSink};
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -107,6 +110,12 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
         Option<Arc<crate::services::cost_window_service::CostWindowService>>,
     /// Tracks actual token usage per complexity tier for budget calibration.
     pub(super) calibration_tracker: Mutex<BudgetCalibrationTracker>,
+    /// Sink for domain-level observability events emitted by the engine.
+    ///
+    /// Defaults to [`TracingEventSink`] which preserves the pre-port
+    /// `tracing::{info,warn}` output verbatim. Tests that want to silence
+    /// events can swap in [`NullEventSink`] via [`Self::with_event_sink`].
+    pub(super) event_sink: Arc<dyn ConvergenceEventSink>,
 }
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
@@ -129,7 +138,17 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             budget_tracker: None,
             cost_window_service: None,
             calibration_tracker: Mutex::new(BudgetCalibrationTracker::default()),
+            event_sink: Arc::new(TracingEventSink),
         }
+    }
+
+    /// Override the domain event sink (builder-style).
+    ///
+    /// Defaults to [`TracingEventSink`] so callers that don't override get
+    /// the pre-port `tracing::{info,warn}` output automatically.
+    pub fn with_event_sink(mut self, sink: Arc<dyn ConvergenceEventSink>) -> Self {
+        self.event_sink = sink;
+        self
     }
 
     /// Set the global budget tracker for pressure-aware convergence.

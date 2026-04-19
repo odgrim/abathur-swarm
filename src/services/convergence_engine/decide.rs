@@ -9,7 +9,7 @@ use crate::domain::models::convergence::*;
 use crate::domain::models::task::Complexity;
 use crate::domain::ports::{MemoryRepository, TrajectoryRepository};
 
-use super::{ConvergenceEngine, OverseerMeasurer};
+use super::{ConvergenceDomainEvent, ConvergenceEngine, OverseerMeasurer};
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
     // -----------------------------------------------------------------------
@@ -67,11 +67,12 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
 
             // 5. If any child fails, return Exhausted immediately
             if !matches!(&child_outcome, ConvergenceOutcome::Converged { .. }) {
-                tracing::warn!(
-                    parent_trajectory_id = %trajectory.id,
-                    child_subtask = %subtask.subtask_id,
-                    "Decomposition: child subtask did not converge, aborting coordination",
-                );
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::DecompositionChildFailed {
+                        parent_trajectory_id: trajectory.id.to_string(),
+                        child_subtask: subtask.subtask_id.to_string(),
+                    })
+                    .await;
                 return Ok(ConvergenceOutcome::Exhausted {
                     trajectory_id: trajectory.id.to_string(),
                     best_observation_sequence: trajectory.best_observation().map(|o| o.sequence),
@@ -94,10 +95,11 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             }
             _ => {
                 // Integration failed
-                tracing::warn!(
-                    parent_trajectory_id = %trajectory.id,
-                    "Decomposition: integration trajectory did not converge",
-                );
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::DecompositionIntegrationFailed {
+                        parent_trajectory_id: trajectory.id.to_string(),
+                    })
+                    .await;
                 Ok(ConvergenceOutcome::Exhausted {
                     trajectory_id: trajectory.id.to_string(),
                     best_observation_sequence: trajectory.best_observation().map(|o| o.sequence),

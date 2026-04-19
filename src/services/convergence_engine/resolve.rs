@@ -10,7 +10,7 @@ use crate::domain::models::convergence::*;
 use crate::domain::models::{Memory, MemoryQuery, MemoryType};
 use crate::domain::ports::{MemoryRepository, TrajectoryRepository};
 
-use super::{ConvergenceEngine, OverseerMeasurer};
+use super::{ConvergenceDomainEvent, ConvergenceEngine, OverseerMeasurer};
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
     // -----------------------------------------------------------------------
@@ -437,16 +437,21 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                     match serde_json::from_str::<StrategyBandit>(&memory.content) {
                         Ok(bandit) => return bandit,
                         Err(e) => {
-                            tracing::warn!(
-                                "Failed to deserialize bandit state: {}; using defaults",
-                                e
-                            );
+                            self.event_sink
+                                .emit(ConvergenceDomainEvent::BanditDeserializationFailed {
+                                    error: e.to_string(),
+                                })
+                                .await;
                         }
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to query bandit memory: {}; using defaults", e);
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::BanditQueryFailed {
+                        error: e.to_string(),
+                    })
+                    .await;
             }
         }
 

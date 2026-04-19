@@ -12,7 +12,7 @@ use crate::domain::models::intent_verification::{GapCategory, GapSeverity, Inten
 use crate::domain::models::task::Complexity;
 use crate::domain::ports::{MemoryRepository, TrajectoryRepository};
 
-use super::{ConvergenceEngine, OverseerMeasurer, StrategyContext};
+use super::{ConvergenceDomainEvent, ConvergenceEngine, OverseerMeasurer, StrategyContext};
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
     // -----------------------------------------------------------------------
@@ -44,7 +44,9 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                 .generate_acceptance_tests(&trajectory, infrastructure)
                 .await?;
             if !tests.is_empty() {
-                tracing::info!("Generated {} acceptance tests", tests.len());
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::AcceptanceTestsGenerated { count: tests.len() })
+                    .await;
             }
         }
 
@@ -131,10 +133,11 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             if let Some(ref tracker) = self.budget_tracker
                 && tracker.should_pause_new_work().await
             {
-                tracing::warn!(
-                    trajectory_id = %trajectory.id,
-                    "Global budget critical — terminating convergence early",
-                );
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::BudgetCriticalTerminating {
+                        trajectory_id: trajectory.id.to_string(),
+                    })
+                    .await;
                 return Ok(ConvergenceOutcome::BudgetDenied {
                     trajectory_id: trajectory.id.to_string(),
                 });
@@ -213,12 +216,12 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
 
                         if should_rotate_strategy(current, consecutive_uses, &recent_deltas) {
                             let current_name = current.kind_name();
-                            tracing::info!(
-                                strategy = current_name,
-                                consecutive_uses = consecutive_uses,
-                                "Strategy rotation triggered: filtering out {}",
-                                current_name
-                            );
+                            self.event_sink
+                                .emit(ConvergenceDomainEvent::StrategyRotationTriggered {
+                                    strategy: current_name,
+                                    consecutive_uses,
+                                })
+                                .await;
                             eligible.retain(|s| s.kind_name() != current_name);
                         }
                     }
@@ -459,14 +462,13 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
         let prev_name = self.attractor_type_name(&previous_classification);
         let new_name = self.attractor_type_name(&trajectory.attractor_state.classification);
         if prev_name != new_name {
-            tracing::info!(
-                trajectory_id = %trajectory.id,
-                from = prev_name,
-                to = new_name,
-                "AttractorTransition intervention point: attractor changed from {} to {}",
-                prev_name,
-                new_name
-            );
+            self.event_sink
+                .emit(ConvergenceDomainEvent::AttractorTransition {
+                    trajectory_id: trajectory.id.to_string(),
+                    from: prev_name,
+                    to: new_name,
+                })
+                .await;
         }
 
         // Update bandit
@@ -778,11 +780,11 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                     &trajectories[i].attractor_state.classification
                     && trajectories[i].observations.len() >= 3
                 {
-                    tracing::info!(
-                        trajectory_id = %trajectories[i].id,
-                        "Parallel convergence: filtering out divergent \
-                         trajectory",
-                    );
+                    self.event_sink
+                        .emit(ConvergenceDomainEvent::ParallelDivergentFiltered {
+                            trajectory_id: trajectories[i].id.to_string(),
+                        })
+                        .await;
                     active[i] = false;
                 }
             }
@@ -1182,11 +1184,12 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
         let _context = self.build_strategy_context(strategy, trajectory);
 
         // Log the strategy execution
-        tracing::info!(
-            strategy = strategy.kind_name(),
-            trajectory_id = %trajectory.id,
-            "Executing convergence strategy"
-        );
+        self.event_sink
+            .emit(ConvergenceDomainEvent::StrategyExecutionStarted {
+                strategy: strategy.kind_name(),
+                trajectory_id: trajectory.id.to_string(),
+            })
+            .await;
 
         // For strategies that modify the specification or trajectory state,
         // handle their side effects (spec 4.1).
@@ -1216,32 +1219,33 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                     amendment_summary: amendment_description,
                 });
 
-                tracing::info!(
-                    trajectory_id = %trajectory.id,
-                    "ArchitectReview: specification amended, {} total amendments",
-                    trajectory.specification.amendments.len(),
-                );
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::ArchitectReviewAmended {
+                        trajectory_id: trajectory.id.to_string(),
+                        total_amendments: trajectory.specification.amendments.len(),
+                    })
+                    .await;
             }
             StrategyKind::FreshStart { carry_forward } => {
                 // Fresh start resets context but preserves filesystem and
                 // trajectory metadata
-                tracing::info!(
-                    trajectory_id = %trajectory.id,
-                    "Fresh start: carrying forward {} hints, best level \
-                     from {} observations",
-                    carry_forward.hints.len(),
-                    trajectory.observations.len(),
-                );
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::FreshStartInitiated {
+                        trajectory_id: trajectory.id.to_string(),
+                        carry_forward_hints: carry_forward.hints.len(),
+                        observation_count: trajectory.observations.len(),
+                    })
+                    .await;
             }
             StrategyKind::RevertAndBranch { target } => {
                 // Spec 4.1: RevertAndBranch finds the target observation
                 // and uses its artifact as the starting point.
-                tracing::info!(
-                    trajectory_id = %trajectory.id,
-                    target = %target,
-                    "Reverting to observation {} and branching",
-                    target,
-                );
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::RevertAndBranchInitiated {
+                        trajectory_id: trajectory.id.to_string(),
+                        target: target.to_string(),
+                    })
+                    .await;
 
                 // Find the target observation and return its artifact
                 if let Some(target_obs) =
@@ -1253,12 +1257,12 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                     return Ok((artifact, estimated_tokens, elapsed.as_millis() as u64));
                 }
                 // If target not found, fall through to default artifact
-                tracing::warn!(
-                    trajectory_id = %trajectory.id,
-                    target = %target,
-                    "RevertAndBranch target observation not found; \
-                     using latest artifact",
-                );
+                self.event_sink
+                    .emit(ConvergenceDomainEvent::RevertAndBranchTargetMissing {
+                        trajectory_id: trajectory.id.to_string(),
+                        target: target.to_string(),
+                    })
+                    .await;
             }
             _ => {}
         }
