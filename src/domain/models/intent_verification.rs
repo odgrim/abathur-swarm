@@ -1836,9 +1836,62 @@ impl EmbeddedGapFingerprint {
     }
 
     /// Merge another similar gap into this fingerprint.
-    pub fn merge(&mut self, _gap: &IntentGap) {
+    ///
+    /// Updates the embedding via weighted average `E' = (E*n + I) / (n+1)`
+    /// so that repeated merges converge the fingerprint toward the centroid
+    /// of the gaps it represents. If the existing embedding was approximately
+    /// unit-length (as OpenAI `text-embedding-3-small` returns), the result
+    /// is renormalized so cosine similarity stays stable across merges.
+    pub fn merge(&mut self, gap: &IntentGap) {
+        match (self.embedding.as_mut(), gap.embedding.as_ref()) {
+            (Some(existing), Some(incoming)) => {
+                if existing.len() != incoming.len() {
+                    tracing::warn!(
+                        existing_dim = existing.len(),
+                        incoming_dim = incoming.len(),
+                        "gap fingerprint embedding dimension mismatch; skipping embedding merge"
+                    );
+                } else {
+                    let n = self.occurrence_count as f32;
+                    if n == 0.0 {
+                        // First occurrence: adopt incoming directly.
+                        for (e, i) in existing.iter_mut().zip(incoming.iter()) {
+                            *e = *i;
+                        }
+                    } else {
+                        // Check whether the inputs were approximately unit-length
+                        // BEFORE averaging so we can preserve that invariant.
+                        let existing_norm_sq: f32 = existing.iter().map(|x| x * x).sum();
+                        let incoming_norm_sq: f32 = incoming.iter().map(|x| x * x).sum();
+                        let inputs_unit = (existing_norm_sq - 1.0).abs() < 1e-3
+                            && (incoming_norm_sq - 1.0).abs() < 1e-3;
+                        // Weighted average: E' = (E*n + I) / (n+1)
+                        for (e, i) in existing.iter_mut().zip(incoming.iter()) {
+                            *e = (*e * n + *i) / (n + 1.0);
+                        }
+                        // Re-normalize only if the inputs carried the unit-length
+                        // invariant, keeping cosine similarity stable across merges.
+                        if inputs_unit {
+                            let norm_sq: f32 = existing.iter().map(|x| x * x).sum();
+                            let norm = norm_sq.sqrt();
+                            if norm > 0.0 && norm.is_finite() {
+                                for e in existing.iter_mut() {
+                                    *e /= norm;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (None, Some(incoming)) => {
+                // Existing had no embedding; adopt incoming wholesale.
+                self.embedding = Some(incoming.clone());
+            }
+            _ => {
+                // Either both None or incoming is None: nothing to update.
+            }
+        }
         self.occurrence_count += 1;
-        // Could update embedding to be a weighted average, but for now just count
     }
 }
 
@@ -2492,5 +2545,89 @@ mod tests {
             "constraintviolation".parse::<GapCategory>(),
             Ok(GapCategory::ConstraintViolation)
         );
+    }
+
+    fn make_gap_with_embedding(embedding: Vec<f32>) -> IntentGap {
+        let mut gap = IntentGap::new("test gap", GapSeverity::Moderate);
+        gap.embedding = Some(embedding);
+        gap
+    }
+
+    #[test]
+    fn test_merge_identical_vectors_yields_same_vector() {
+        let initial = vec![1.0_f32, 0.0, 0.0];
+        let mut fp = EmbeddedGapFingerprint::from_gap(
+            &make_gap_with_embedding(initial.clone()),
+            0,
+        );
+        // Occurrence count starts at 1 after from_gap; merging identical vector
+        // at any n should yield the same vector.
+        fp.merge(&make_gap_with_embedding(initial.clone()));
+        let merged = fp.embedding.as_ref().expect("embedding present");
+        for (a, b) in merged.iter().zip(initial.iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "expected identical vectors after merge, got {:?}",
+                merged
+            );
+        }
+        assert_eq!(fp.occurrence_count, 2);
+    }
+
+    #[test]
+    fn test_merge_divergent_vectors_shifts_proportionally() {
+        let mut fp = EmbeddedGapFingerprint::from_gap(
+            &make_gap_with_embedding(vec![1.0_f32, 0.0]),
+            0,
+        );
+        // n=1; weighted avg of (1,0) and (0,1) is (0.5, 0.5), then renormalize
+        // (existing was unit-length) to (1/sqrt(2), 1/sqrt(2)).
+        fp.merge(&make_gap_with_embedding(vec![0.0_f32, 1.0]));
+        let merged = fp.embedding.as_ref().expect("embedding present");
+        let expected = 1.0_f32 / 2.0_f32.sqrt();
+        assert!((merged[0] - expected).abs() < 1e-5, "got {:?}", merged);
+        assert!((merged[1] - expected).abs() < 1e-5, "got {:?}", merged);
+        // Unit length preserved.
+        let norm: f32 = merged.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+        assert_eq!(fp.occurrence_count, 2);
+    }
+
+    #[test]
+    fn test_merge_preserves_unit_normalization() {
+        let mut fp = EmbeddedGapFingerprint::from_gap(
+            &make_gap_with_embedding(vec![1.0_f32, 0.0, 0.0]),
+            0,
+        );
+        // Three unit vectors in R^3.
+        let inv_sqrt2 = 1.0_f32 / 2.0_f32.sqrt();
+        fp.merge(&make_gap_with_embedding(vec![0.0_f32, 1.0, 0.0]));
+        fp.merge(&make_gap_with_embedding(vec![inv_sqrt2, inv_sqrt2, 0.0]));
+        fp.merge(&make_gap_with_embedding(vec![0.0_f32, 0.0, 1.0]));
+        let merged = fp.embedding.as_ref().expect("embedding present");
+        let norm: f32 = merged.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "expected ~unit norm after 3 merges, got norm={} vec={:?}",
+            norm,
+            merged
+        );
+        assert_eq!(fp.occurrence_count, 4);
+    }
+
+    #[test]
+    fn test_merge_dimension_mismatch_is_skipped() {
+        let initial = vec![1.0_f32, 0.0];
+        let mut fp = EmbeddedGapFingerprint::from_gap(
+            &make_gap_with_embedding(initial.clone()),
+            0,
+        );
+        fp.merge(&make_gap_with_embedding(vec![0.0_f32, 1.0, 0.0]));
+        let merged = fp.embedding.as_ref().expect("embedding present");
+        assert_eq!(
+            merged, &initial,
+            "embedding should be unchanged on dim mismatch"
+        );
+        assert_eq!(fp.occurrence_count, 2);
     }
 }
