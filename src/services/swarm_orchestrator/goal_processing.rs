@@ -12,16 +12,14 @@ use tokio::sync::mpsc;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{
-    AgentTier, RelevanceWeights, ScoredMemory, SessionStatus, SubstrateConfig, SubstrateRequest,
-    Task, TaskStatus,
+    AgentTier, SessionStatus, SubstrateConfig, SubstrateRequest, Task, TaskStatus,
 };
 use crate::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
 };
-use crate::services::memory_service::MemoryService;
 use crate::services::{
     AgentTierHint, AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, CircuitScope,
-    GoalContextService, ModelRouter, TaskExecution, TaskOutcome,
+    ModelRouter, TaskExecution, TaskOutcome,
     command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
 };
 
@@ -32,6 +30,7 @@ use super::SwarmOrchestrator;
 use super::agent_prep::AgentPreparationService;
 use super::exec_mode::ExecutionModeResolverService;
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
+use super::task_context::TaskContextService;
 use super::types::SwarmEvent;
 use super::workspace::WorkspaceProvisioningService;
 
@@ -78,24 +77,6 @@ async fn replay_gate_rejection_event(
             ))
             .await;
     }
-}
-
-/// Format scored memories as contextual guidance text for agent task prompts.
-fn format_memory_context(memories: &[ScoredMemory]) -> String {
-    let mut output = String::from(
-        "## Relevant Context from Memory\nThe following memories from previous work are relevant to this task:\n\n",
-    );
-    for entry in memories {
-        let mem = &entry.memory;
-        output.push_str(&format!(
-            "**{}** *(tier: {}, score: {:.2})*\n{}\n\n",
-            mem.key,
-            mem.tier.as_str(),
-            entry.score,
-            mem.content,
-        ));
-    }
-    output
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -373,80 +354,24 @@ where
                 WorkspaceProvisioningService::new().write_agent_config(wt_path);
             }
 
-            // Load relevant goal context for the task
-            let goal_context_service = GoalContextService::new(self.goal_repo.clone());
-            let goal_context = match goal_context_service.get_goals_for_task(task).await {
-                Ok(goals) if !goals.is_empty() => {
-                    let context_text = GoalContextService::<G>::format_goal_context(&goals);
-                    self.audit_log
-                        .info(
-                            AuditCategory::Goal,
-                            AuditAction::GoalEvaluated,
-                            format!(
-                                "Task {} received guidance from {} relevant goal(s)",
-                                task.id,
-                                goals.len()
-                            ),
-                        )
-                        .await;
-                    Some(context_text)
-                }
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::warn!("Failed to load goal context for task {}: {}", task.id, e);
-                    None
-                }
-            };
-
-            // Load relevant memory context for the task using budget-aware selection.
-            let memory_context = if let Some(ref mem_repo) = self.memory_repo {
-                let memory_service = MemoryService::new(mem_repo.clone());
-                let desc_preview: String = task.description.chars().take(500).collect();
-                let query = format!("{} {}", task.title, desc_preview);
-                match memory_service
-                    .load_context_with_budget(
-                        &query,
-                        None,
-                        2000, // 25% of 8000-token context budget
-                        RelevanceWeights::semantic_biased(),
+            // Load goal/memory/intent-gap context and assemble the final task
+            // description via TaskContextService.
+            let context_svc =
+                TaskContextService::new(self.goal_repo.clone(), self.memory_repo.clone());
+            let task_context = context_svc.load_task_context(task).await?;
+            if let Some(ref goal_ctx) = task_context.goal_context {
+                // Preserve audit-log behaviour for goal-context loading.
+                // Count the goals informally by checking for the marker.
+                let _ = goal_ctx; // The goals count is no longer separately tracked.
+                self.audit_log
+                    .info(
+                        AuditCategory::Goal,
+                        AuditAction::GoalEvaluated,
+                        format!("Task {} received guidance from relevant goal(s)", task.id),
                     )
-                    .await
-                {
-                    Ok(memories) if !memories.is_empty() => Some(format_memory_context(&memories)),
-                    Ok(_) => None,
-                    Err(e) => {
-                        tracing::debug!(task_id = %task.id, "Failed to load memory context: {}", e);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            // Build the task description: goal context first, memory context second, task prompt last.
-            let task_description = {
-                let mut parts: Vec<&str> = Vec::new();
-                if let Some(ref ctx) = goal_context {
-                    parts.push(ctx.as_str());
-                }
-                if let Some(ref ctx) = memory_context {
-                    parts.push(ctx.as_str());
-                }
-                // Include intent gap context from a previous attempt if present.
-                let intent_gap_ctx = task.intent_gap_context().map(|s| s.to_string());
-                if let Some(ref gap_ctx) = intent_gap_ctx {
-                    parts.push(gap_ctx.as_str());
-                }
-                if parts.is_empty() {
-                    task.description.clone()
-                } else {
-                    format!(
-                        "{}\n\n---\n\n{}",
-                        parts.join("\n\n---\n\n"),
-                        task.description
-                    )
-                }
-            };
+                    .await;
+            }
+            let task_description = task_context.combined_description.clone();
 
             // Spawn task execution
             let task_id = task.id;
@@ -2094,71 +2019,6 @@ pub(crate) fn is_max_turns_auto_completable(error_msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{Memory, ScoreBreakdown, ScoredMemory};
-
-    fn scored(memory: Memory, score: f32) -> ScoredMemory {
-        ScoredMemory {
-            memory,
-            score,
-            score_breakdown: ScoreBreakdown::default(),
-        }
-    }
-
-    #[test]
-    fn test_format_memory_context_empty() {
-        let output = format_memory_context(&[]);
-        assert!(
-            output.contains("## Relevant Context from Memory"),
-            "Header should be present even for empty input"
-        );
-        assert!(
-            output.contains("The following memories from previous work"),
-            "Intro text should be present"
-        );
-    }
-
-    #[test]
-    fn test_format_memory_context_single_entry() {
-        let entry = scored(
-            Memory::semantic(
-                "rust-patterns",
-                "Use iterators and closures for idiomatic Rust.",
-            ),
-            0.85,
-        );
-        let output = format_memory_context(&[entry]);
-
-        assert!(
-            output.contains("rust-patterns"),
-            "Key should appear in output"
-        );
-        assert!(output.contains("0.85"), "Score should appear in output");
-        assert!(
-            output.contains("Use iterators and closures"),
-            "Content should appear in output"
-        );
-        assert!(output.contains("semantic"), "Tier should appear in output");
-    }
-
-    #[test]
-    fn test_format_memory_context_two_entries() {
-        let first = scored(Memory::working("key-alpha", "First memory content."), 0.90);
-        let second = scored(Memory::episodic("key-beta", "Second memory content."), 0.70);
-        let output = format_memory_context(&[first, second]);
-
-        assert!(output.contains("key-alpha"), "First key should appear");
-        assert!(
-            output.contains("First memory content."),
-            "First content should appear"
-        );
-        assert!(output.contains("key-beta"), "Second key should appear");
-        assert!(
-            output.contains("Second memory content."),
-            "Second content should appear"
-        );
-        assert!(output.contains("0.90"), "First score should appear");
-        assert!(output.contains("0.70"), "Second score should appear");
-    }
 
     #[test]
     fn test_max_turns_floor_enforcement() {

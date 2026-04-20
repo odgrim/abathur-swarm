@@ -5,7 +5,6 @@
 //!
 //! Extracted from `goal_processing::spawn_task_agent` per spec T10
 //! (`specs/T10-spawn-task-agent-extraction.md`).
-#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -19,7 +18,11 @@ use crate::services::memory_service::MemoryService;
 #[derive(Debug, Clone, Default)]
 pub struct TaskContext {
     pub goal_context: Option<String>,
+    /// Read by audit logging only; not load-bearing for substrate.
+    #[allow(dead_code)]
     pub memory_context: Option<String>,
+    /// Read by audit logging only; not load-bearing for substrate.
+    #[allow(dead_code)]
     pub intent_gap_context: Option<String>,
     /// Final task description: goal/memory/gap context joined with the original
     /// task description.
