@@ -61,7 +61,7 @@ where
 {
     /// Get the EventBus.
     pub fn event_bus(&self) -> &Arc<crate::services::event_bus::EventBus> {
-        &self.event_bus
+        &self.subsystem_services.event_bus
     }
 
     // ========================================================================
@@ -94,7 +94,7 @@ where
         tracing::warn!("CommandBus not initialized — building ephemeral instance");
         let task_service = Arc::new(
             TaskService::new(self.task_repo.clone())
-                .with_event_bus(self.event_bus.clone())
+                .with_event_bus(self.subsystem_services.event_bus.clone())
                 .with_default_execution_mode(self.config.default_execution_mode.clone()),
         );
         let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
@@ -107,7 +107,7 @@ where
                 task_service,
                 goal_service,
                 maintenance_service,
-                self.event_bus.clone(),
+                self.subsystem_services.event_bus.clone(),
             );
             if let Some(ref pool) = self.pool {
                 bus = bus.with_pool(pool.clone());
@@ -124,7 +124,7 @@ where
                 task_service,
                 goal_service,
                 null_maintenance,
-                self.event_bus.clone(),
+                self.subsystem_services.event_bus.clone(),
             );
             if let Some(ref pool) = self.pool {
                 bus = bus.with_pool(pool.clone());
@@ -227,7 +227,7 @@ where
                     self.task_repo.update(&updated).await?;
 
                     // Emit description update event via EventBus
-                    self.event_bus
+                    self.subsystem_services.event_bus
                         .publish(crate::services::event_factory::task_event(
                             crate::services::event_bus::EventSeverity::Info,
                             None,
@@ -279,7 +279,7 @@ where
                     self.goal_repo.update(&goal).await?;
 
                     // Emit description update event via EventBus
-                    self.event_bus
+                    self.subsystem_services.event_bus
                         .publish(crate::services::event_factory::goal_event(
                             crate::services::event_bus::EventSeverity::Info,
                             goal_id,
@@ -341,7 +341,7 @@ where
 
         // (Bridge forwards EventBus→event_tx automatically)
 
-        self.event_bus
+        self.subsystem_services.event_bus
             .publish(crate::services::event_factory::make_event(
                 crate::services::event_bus::EventSeverity::Info,
                 crate::services::event_bus::EventCategory::Escalation,
@@ -355,7 +355,7 @@ where
             ))
             .await;
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::Goal,
                 AuditAction::GoalEvaluated,
@@ -445,7 +445,7 @@ where
         let message = A2AMessage::new(message_type, from_agent, to_agent, subject, content);
 
         // Log the A2A message
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::Agent,
                 AuditAction::AgentSpawned, // Could add A2AMessageSent action

@@ -147,9 +147,9 @@ where
             task_repo,
             agent_repo,
             goal_repo,
-            audit_log: self.audit_log.clone(),
-            circuit_breaker: self.circuit_breaker.clone(),
-            guardrails: self.guardrails.clone(),
+            audit_log: self.subsystem_services.audit_log.clone(),
+            circuit_breaker: self.subsystem_services.circuit_breaker.clone(),
+            guardrails: self.subsystem_services.guardrails.clone(),
             cost_window_service: self.cost_window_service.clone(),
             budget_tracker: self.budget_tracker.clone(),
             agent_semaphore: self.runtime_state.agent_semaphore.clone(),
@@ -205,10 +205,10 @@ where
                 }
                 Ok(Some(_)) => {
                     // Register agent spawn with guardrails using unique task_id
-                    self.guardrails.register_agent_spawn(&agent_unique_id).await;
+                    self.subsystem_services.guardrails.register_agent_spawn(&agent_unique_id).await;
 
                     // Successfully claimed — publish event and continue to spawn
-                    self.event_bus
+                    self.subsystem_services.event_bus
                         .publish(crate::services::event_factory::task_event(
                             crate::services::event_bus::EventSeverity::Info,
                             None,
@@ -258,7 +258,7 @@ where
             }
 
             // Publish TaskSpawned via EventBus (bridge forwards to event_tx)
-            self.event_bus
+            self.subsystem_services.event_bus
                 .publish(crate::services::event_factory::task_event(
                     crate::services::event_bus::EventSeverity::Info,
                     None,
@@ -295,7 +295,7 @@ where
                         let _ = self.task_repo.update(&t).await;
                     }
 
-                    self.audit_log.log(
+                    self.subsystem_services.audit_log.log(
                         crate::services::AuditEntry::new(
                             AuditLevel::Error,
                             AuditCategory::Task,
@@ -309,7 +309,7 @@ where
                         .with_entity(task.id, "task"),
                     ).await;
 
-                    self.event_bus.publish(crate::services::event_factory::task_event(
+                    self.subsystem_services.event_bus.publish(crate::services::event_factory::task_event(
                         crate::services::event_bus::EventSeverity::Error,
                         None,
                         task.id,
@@ -320,7 +320,7 @@ where
                         },
                     )).await;
 
-                    self.guardrails.register_agent_end(&agent_unique_id).await;
+                    self.subsystem_services.guardrails.register_agent_end(&agent_unique_id).await;
                     drop(permit);
                     return Ok(());
                 }
@@ -353,7 +353,7 @@ where
                 // Preserve audit-log behaviour for goal-context loading.
                 // Count the goals informally by checking for the marker.
                 let _ = goal_ctx; // The goals count is no longer separately tracked.
-                self.audit_log
+                self.subsystem_services.audit_log
                     .info(
                         AuditCategory::Goal,
                         AuditAction::GoalEvaluated,
@@ -456,13 +456,13 @@ where
                 repo_path: self.config.repo_path.clone(),
                 default_base_ref: self.config.default_base_ref.clone(),
                 agent_semaphore: self.runtime_state.agent_semaphore.clone(),
-                guardrails: self.guardrails.clone(),
+                guardrails: self.subsystem_services.guardrails.clone(),
                 require_commits: agent_can_write && !is_read_only_role,
                 verify_on_completion: self.config.verify_on_completion,
                 use_merge_queue,
                 prefer_pull_requests,
                 track_evolution: self.config.track_evolution,
-                evolution_loop: self.evolution_loop.clone(),
+                evolution_loop: self.subsystem_services.evolution_loop.clone(),
                 fetch_on_sync: self.config.fetch_on_sync,
                 output_delivery: task_output_delivery.clone(),
                 merge_request_repo: self.merge_request_repo.clone(),
@@ -505,10 +505,10 @@ where
                 task_repo: task_repo_dyn,
                 worktree_repo: worktree_repo_dyn,
                 goal_repo: goal_repo_dyn,
-                event_bus: self.event_bus.clone(),
+                event_bus: self.subsystem_services.event_bus.clone(),
                 event_tx: event_tx.clone(),
-                audit_log: self.audit_log.clone(),
-                circuit_breaker: self.circuit_breaker.clone(),
+                audit_log: self.subsystem_services.audit_log.clone(),
+                circuit_breaker: self.subsystem_services.circuit_breaker.clone(),
                 command_bus: self.command_bus.read().await.clone(),
                 total_tokens: self.runtime_state.total_tokens.clone(),
                 permit,

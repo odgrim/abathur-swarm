@@ -99,7 +99,7 @@ where
 
         for attempt in 1..=max_attempts {
             if self.check_mcp_readiness().await {
-                self.audit_log
+                self.subsystem_services.audit_log
                     .info(
                         AuditCategory::System,
                         AuditAction::SwarmStarted,
@@ -120,7 +120,7 @@ where
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .log(AuditEntry::new(
                 AuditLevel::Error,
                 AuditCategory::System,
@@ -165,7 +165,7 @@ where
 
         // Log verification result
         if result.passed {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .info(
                     AuditCategory::Task,
                     AuditAction::TaskCompleted,
@@ -176,7 +176,7 @@ where
                 )
                 .await;
         } else {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .log(
                     AuditEntry::new(
                         AuditLevel::Warning,
@@ -213,7 +213,7 @@ where
         let stats = memory_service.get_stats().await?;
         let total_memories = stats.total();
         if total_memories > 0 {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .info(
                     AuditCategory::System,
                     AuditAction::SwarmStarted,
@@ -227,7 +227,7 @@ where
         }
 
         // Run cold start
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
@@ -241,7 +241,7 @@ where
             ..Default::default()
         };
         let cold_start_service = ColdStartService::new(memory_service, cold_start_config)
-            .with_event_bus(self.event_bus.clone());
+            .with_event_bus(self.subsystem_services.event_bus.clone());
         let cold_start_service = if self.overmind.is_some() {
             cold_start_service.with_substrate(self.substrate.clone())
         } else {
@@ -250,7 +250,7 @@ where
 
         let report = cold_start_service.gather_context().await?;
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::Memory,
                 AuditAction::MemoryStored,
@@ -304,7 +304,7 @@ where
 
         // Idempotency check: skip if codebase-profile already exists
         if let Ok(Some(_)) = memory_repo.get_by_key("codebase-profile", "triage").await {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .info(
                     AuditCategory::System,
                     AuditAction::SwarmStarted,
@@ -314,7 +314,7 @@ where
             return Ok(false);
         }
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
@@ -451,7 +451,7 @@ where
             federation_service.clone(),
             a2a_client,
             federated_goal_repo,
-            self.event_bus.clone(),
+            self.subsystem_services.event_bus.clone(),
             ConvergencePollerConfig::default(),
         );
 
@@ -462,7 +462,7 @@ where
             *stored = Some(handle);
         }
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
@@ -512,7 +512,7 @@ where
             *stored = Some(handle);
         }
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
@@ -536,7 +536,7 @@ where
         let maintenance_service =
             Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
         let daemon = MemoryDecayDaemon::new(maintenance_service, DecayDaemonConfig::default())
-            .with_event_bus(self.event_bus.clone());
+            .with_event_bus(self.subsystem_services.event_bus.clone());
 
         // Get the handle before running
         let handle = daemon.handle();
@@ -548,8 +548,8 @@ where
         }
 
         // Run daemon and log events in background, publishing to EventBus
-        let audit_log = self.audit_log.clone();
-        let event_bus = self.event_bus.clone();
+        let audit_log = self.subsystem_services.audit_log.clone();
+        let event_bus = self.subsystem_services.event_bus.clone();
         supervise("memory_decay_event_listener", async move {
             let mut event_rx = daemon.run().await;
             while let Some(event) = event_rx.recv().await {
@@ -710,7 +710,7 @@ where
 
         let poller = crate::services::outbox_poller::OutboxPoller::new(
             outbox.clone(),
-            self.event_bus.clone(),
+            self.subsystem_services.event_bus.clone(),
             crate::services::outbox_poller::OutboxPollerConfig::default(),
         );
 
@@ -803,7 +803,7 @@ where
             .await?;
 
         // Publish via EventBus (bridge forwards to event_tx automatically)
-        self.event_bus
+        self.subsystem_services.event_bus
             .publish(crate::services::event_factory::task_event(
                 crate::services::event_bus::EventSeverity::Info,
                 None,
@@ -1415,10 +1415,10 @@ where
         }
 
         // Recover InProgress refinement requests from previous process run
-        self.evolution_loop.recover_in_progress_refinements().await;
+        self.subsystem_services.evolution_loop.recover_in_progress_refinements().await;
 
         // Restore persisted template stats and version changes
-        self.evolution_loop.load_persisted_state().await;
+        self.subsystem_services.evolution_loop.load_persisted_state().await;
 
         Ok(corrections)
     }

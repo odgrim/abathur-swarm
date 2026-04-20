@@ -34,6 +34,7 @@ pub(crate) mod workspace;
 
 use middleware_bundle::Middleware;
 use runtime_state::RuntimeState;
+use subsystem_services::SubsystemServices;
 
 // Re-export public types
 pub use types::{
@@ -54,7 +55,6 @@ use crate::services::{
     AuditLogService, CircuitBreakerConfig, CircuitBreakerService, DaemonHandle, EvolutionLoop,
     IntentVerifierConfig, IntentVerifierService,
     command_bus::CommandBus,
-    dag_restructure::DagRestructureService,
     event_reactor::EventReactor,
     event_scheduler::EventScheduler,
     guardrails::{Guardrails, GuardrailsConfig},
@@ -83,17 +83,11 @@ where
     /// escalation store, and the ready-task / specialist mpsc channels.
     pub(crate) runtime_state: RuntimeState,
 
-    // ---------------- Core services (always present) ----------------
-    pub(super) audit_log: Arc<AuditLogService>,
-    pub(super) circuit_breaker: Arc<CircuitBreakerService>,
-    pub(super) evolution_loop: Arc<EvolutionLoop>,
-    pub(super) restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
-    pub(super) guardrails: Arc<Guardrails>,
-
-    // ---------------- Event plumbing ----------------
-    pub(super) event_bus: Arc<crate::services::event_bus::EventBus>,
-    pub(super) event_reactor: Arc<EventReactor>,
-    pub(super) event_scheduler: Arc<EventScheduler>,
+    // ---------------- Subsystem services (always present) ----------------
+    /// Long-lived services always wired up at construction: audit log,
+    /// circuit breaker, evolution loop, restructure, guardrails, and the
+    /// event-bus triple (bus + reactor + scheduler).
+    pub(crate) subsystem_services: SubsystemServices,
 
     // ---------------- Daemon handles ----------------
     pub(super) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
@@ -196,19 +190,8 @@ where
             // ---------------- Runtime state ----------------
             runtime_state: RuntimeState::new(max_agents),
 
-            // ---------------- Core services (always present) ----------------
-            audit_log: Arc::new(AuditLogService::with_defaults()),
-            circuit_breaker: Arc::new(CircuitBreakerService::with_defaults()),
-            evolution_loop: Arc::new(EvolutionLoop::with_default_config()),
-            restructure_service: Arc::new(tokio::sync::Mutex::new(
-                DagRestructureService::with_defaults(),
-            )),
-            guardrails: Arc::new(Guardrails::with_defaults()),
-
-            // ---------------- Event plumbing ----------------
-            event_bus,
-            event_reactor,
-            event_scheduler,
+            // ---------------- Subsystem services (always present) ----------------
+            subsystem_services: SubsystemServices::new(event_bus, event_reactor, event_scheduler),
 
             // ---------------- Daemon handles ----------------
             decay_daemon_handle: Arc::new(RwLock::new(None)),
@@ -383,7 +366,7 @@ where
 
     /// Create orchestrator with custom guardrails configuration.
     pub fn with_guardrails(mut self, config: GuardrailsConfig) -> Self {
-        self.guardrails = Arc::new(Guardrails::new(config));
+        self.subsystem_services.guardrails = Arc::new(Guardrails::new(config));
         self
     }
 
@@ -404,13 +387,13 @@ where
 
     /// Create orchestrator with custom audit log configuration.
     pub fn with_audit_log(mut self, config: AuditLogConfig) -> Self {
-        self.audit_log = Arc::new(AuditLogService::new(config));
+        self.subsystem_services.audit_log = Arc::new(AuditLogService::new(config));
         self
     }
 
     /// Create orchestrator with custom circuit breaker configuration.
     pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
-        self.circuit_breaker = Arc::new(CircuitBreakerService::new(config));
+        self.subsystem_services.circuit_breaker = Arc::new(CircuitBreakerService::new(config));
         self
     }
 
@@ -423,7 +406,7 @@ where
         use crate::services::evolution_loop::EvolutionConfig;
 
         let refinement_repo = Arc::new(SqliteRefinementRepository::new(pool.clone()));
-        self.evolution_loop = Arc::new(
+        self.subsystem_services.evolution_loop = Arc::new(
             EvolutionLoop::new(EvolutionConfig::default())
                 .with_repo(refinement_repo)
                 .with_agent_repo(self.agent_repo.clone()),
@@ -476,7 +459,7 @@ where
     pub fn with_overmind(mut self, overmind: Arc<crate::services::OvermindService>) -> Self {
         // Propagate Overmind to restructure service for LLM-powered recovery
         let overmind_clone = overmind.clone();
-        if let Ok(mut svc) = self.restructure_service.try_lock() {
+        if let Ok(mut svc) = self.subsystem_services.restructure_service.try_lock() {
             svc.set_overmind(overmind_clone);
         }
         self.overmind = Some(overmind);
@@ -525,22 +508,22 @@ where
 
     /// Get the guardrails service for external use.
     pub fn guardrails(&self) -> &Arc<Guardrails> {
-        &self.guardrails
+        &self.subsystem_services.guardrails
     }
 
     /// Get the audit log service for external use.
     pub fn audit_log(&self) -> &Arc<AuditLogService> {
-        &self.audit_log
+        &self.subsystem_services.audit_log
     }
 
     /// Get the circuit breaker service for external use.
     pub fn circuit_breaker(&self) -> &Arc<CircuitBreakerService> {
-        &self.circuit_breaker
+        &self.subsystem_services.circuit_breaker
     }
 
     /// Get the evolution loop service for external use.
     pub fn evolution_loop(&self) -> &Arc<EvolutionLoop> {
-        &self.evolution_loop
+        &self.subsystem_services.evolution_loop
     }
 
     // ========================================================================
@@ -648,7 +631,7 @@ where
             *status = OrchestratorStatus::Running;
         }
         let _ = event_tx.send(SwarmEvent::Started).await;
-        self.event_bus
+        self.subsystem_services.event_bus
             .publish(crate::services::event_factory::orchestrator_event(
                 crate::services::event_bus::EventSeverity::Info,
                 crate::services::event_bus::EventPayload::OrchestratorStarted,
@@ -657,7 +640,7 @@ where
 
         // Spawn bridge: forward EventBus events to legacy event_tx channel for TUI/logging
         {
-            let mut bus_rx = self.event_bus.subscribe();
+            let mut bus_rx = self.subsystem_services.event_bus.subscribe();
             let bridge_tx = event_tx.clone();
             supervise("eventbus_swarm_bridge", async move {
                 loop {
@@ -681,7 +664,7 @@ where
         }
 
         // Log swarm startup
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
@@ -699,7 +682,7 @@ where
         if self.memory_repo.is_some() {
             match self.cold_start().await {
                 Ok(Some(report)) => {
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .info(
                             AuditCategory::Memory,
                             AuditAction::MemoryStored,
@@ -714,7 +697,7 @@ where
                     // Memory already populated, skip cold start
                 }
                 Err(e) => {
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .log(AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::System,
@@ -731,7 +714,7 @@ where
         if self.memory_repo.is_some()
             && let Err(e) = self.start_decay_daemon().await
         {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .log(AuditEntry::new(
                     AuditLevel::Warning,
                     AuditCategory::System,
@@ -745,7 +728,7 @@ where
         // Start hourly token counter reset task
         {
             let cancel = tokio_util::sync::CancellationToken::new();
-            let _hourly_reset_handle = self.guardrails.spawn_hourly_reset(cancel.clone());
+            let _hourly_reset_handle = self.subsystem_services.guardrails.spawn_hourly_reset(cancel.clone());
             *self.hourly_reset_cancel.write().await = Some(cancel);
             tracing::info!("hourly token reset daemon started");
         }
@@ -755,7 +738,7 @@ where
 
         // Refresh active goals cache for agent context
         if let Err(e) = self.refresh_active_goals_cache().await {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .log(AuditEntry::new(
                     AuditLevel::Warning,
                     AuditCategory::System,
@@ -769,7 +752,7 @@ where
         // Seed baseline agent templates (DB is sole source, hardcoded as bootstrap)
         {
             use crate::services::AgentService;
-            let agent_service = AgentService::new(self.agent_repo.clone(), self.event_bus.clone());
+            let agent_service = AgentService::new(self.agent_repo.clone(), self.subsystem_services.event_bus.clone());
             // Use routing-aware seeding when all_workflows is populated; otherwise fall
             // back to single-workflow seeding (legacy / empty config path).
             let seed_result = if !self.config.all_workflows.is_empty() {
@@ -789,7 +772,7 @@ where
             };
             match seed_result {
                 Ok(seeded) if !seeded.is_empty() => {
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .info(
                             AuditCategory::Agent,
                             AuditAction::AgentSpawned,
@@ -805,7 +788,7 @@ where
                     // All agents already exist
                 }
                 Err(e) => {
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .log(AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::Agent,
@@ -822,7 +805,7 @@ where
         if self.memory_repo.is_some() {
             match self.run_startup_triage().await {
                 Ok(true) => {
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .info(
                             AuditCategory::Memory,
                             AuditAction::MemoryStored,
@@ -834,7 +817,7 @@ where
                     // Codebase profile already exists, skip triage
                 }
                 Err(e) => {
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .log(AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::System,
@@ -851,7 +834,7 @@ where
         if self.config.mcp_servers.a2a_gateway.is_some()
             && let Err(e) = self.register_all_agent_templates().await
         {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .log(AuditEntry::new(
                     AuditLevel::Warning,
                     AuditCategory::System,
@@ -866,7 +849,7 @@ where
         // If servers never come up, abort startup rather than spawning agents
         // into an environment where they can't reach the orchestration APIs.
         if let Err(e) = self.await_mcp_readiness().await {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .log(AuditEntry::new(
                     AuditLevel::Error,
                     AuditCategory::System,
@@ -876,7 +859,7 @@ where
                 ))
                 .await;
             let _ = event_tx.send(SwarmEvent::Stopped).await;
-            self.event_bus
+            self.subsystem_services.event_bus
                 .publish(crate::services::event_factory::orchestrator_event(
                     crate::services::event_bus::EventSeverity::Info,
                     crate::services::event_bus::EventPayload::OrchestratorStopped,
@@ -886,12 +869,12 @@ where
         }
 
         // Initialize EventBus sequence from store to prevent overlap after restart
-        self.event_bus.initialize_sequence_from_store().await;
+        self.subsystem_services.event_bus.initialize_sequence_from_store().await;
 
         // Register built-in event handlers and schedules BEFORE starting
         // the reactor, so handlers are ready when it begins subscribing.
         self.register_builtin_handlers().await;
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
@@ -905,7 +888,7 @@ where
         // that registered extra middleware via `with_*_middleware` keep those
         // (they were registered earlier and retain their position).
         self.register_builtin_middleware().await;
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
@@ -914,10 +897,10 @@ where
             .await;
 
         // Load persisted circuit breaker states (after handler registration)
-        self.event_reactor.load_circuit_breaker_states().await;
+        self.subsystem_services.event_reactor.load_circuit_breaker_states().await;
 
         self.register_builtin_schedules().await;
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
@@ -926,32 +909,32 @@ where
             .await;
 
         // Start EventReactor (handlers are already registered)
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
                 "Starting EventReactor for reactive event handling",
             )
             .await;
-        let reactor_handle = self.event_reactor.start();
+        let reactor_handle = self.subsystem_services.event_reactor.start();
 
         // Load persistent scheduler state from DB before starting
-        self.event_scheduler.initialize_from_store().await;
+        self.subsystem_services.event_scheduler.initialize_from_store().await;
 
         // Start EventScheduler
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStarted,
                 "Starting EventScheduler for time-based events",
             )
             .await;
-        let scheduler_handle = self.event_scheduler.start();
+        let scheduler_handle = self.subsystem_services.event_scheduler.start();
 
         // Replay missed events from the event store
-        match self.event_reactor.replay_missed_events().await {
+        match self.subsystem_services.event_reactor.replay_missed_events().await {
             Ok(count) if count > 0 => {
-                self.audit_log
+                self.subsystem_services.audit_log
                     .info(
                         AuditCategory::System,
                         AuditAction::SwarmStarted,
@@ -961,7 +944,7 @@ where
             }
             Ok(_) => {}
             Err(e) => {
-                self.audit_log
+                self.subsystem_services.audit_log
                     .log(AuditEntry::new(
                         AuditLevel::Warning,
                         AuditCategory::System,
@@ -976,7 +959,7 @@ where
         // Run startup reconciliation to fix inconsistent state
         match self.run_startup_reconciliation().await {
             Ok(count) if count > 0 => {
-                self.audit_log
+                self.subsystem_services.audit_log
                     .info(
                         AuditCategory::System,
                         AuditAction::SwarmStarted,
@@ -986,7 +969,7 @@ where
             }
             Ok(_) => {}
             Err(e) => {
-                self.audit_log
+                self.subsystem_services.audit_log
                     .log(AuditEntry::new(
                         AuditLevel::Warning,
                         AuditCategory::System,
@@ -1071,7 +1054,7 @@ where
                     task_id = %task_id,
                     "spawn_task_agent (primed) subsystem error (isolated)"
                 );
-                self.event_bus
+                self.subsystem_services.event_bus
                     .publish(crate::services::event_factory::orchestrator_event(
                         crate::services::event_bus::EventSeverity::Error,
                         crate::services::event_bus::EventPayload::SubsystemError {
@@ -1091,7 +1074,7 @@ where
                 && let Err(e) = self.process_specialist_triggers(&event_tx).await
             {
                 tracing::error!(error = %e, "process_specialist_triggers (primed) subsystem error (isolated)");
-                self.event_bus
+                self.subsystem_services.event_bus
                     .publish(crate::services::event_factory::orchestrator_event(
                         crate::services::event_bus::EventSeverity::Error,
                         crate::services::event_bus::EventPayload::SubsystemError {
@@ -1106,7 +1089,7 @@ where
             // inside drain_ready_tasks). Cheap when the channels are empty.
             if let Err(e) = self.drain_ready_tasks(&event_tx).await {
                 tracing::error!(error = %e, "drain_ready_tasks subsystem error (isolated)");
-                self.event_bus
+                self.subsystem_services.event_bus
                     .publish(crate::services::event_factory::orchestrator_event(
                         crate::services::event_bus::EventSeverity::Error,
                         crate::services::event_bus::EventPayload::SubsystemError {
@@ -1119,7 +1102,7 @@ where
 
             if let Err(e) = self.drain_specialist_tasks(&event_tx).await {
                 tracing::error!(error = %e, "drain_specialist_tasks subsystem error (isolated)");
-                self.event_bus
+                self.subsystem_services.event_bus
                     .publish(crate::services::event_factory::orchestrator_event(
                         crate::services::event_bus::EventSeverity::Error,
                         crate::services::event_bus::EventPayload::SubsystemError {
@@ -1142,7 +1125,7 @@ where
                 && let Err(e) = self.process_evolution_refinements(&event_tx).await
             {
                 tracing::error!(error = %e, "process_evolution_refinements subsystem error (isolated)");
-                self.event_bus
+                self.subsystem_services.event_bus
                     .publish(crate::services::event_factory::orchestrator_event(
                         crate::services::event_bus::EventSeverity::Error,
                         crate::services::event_bus::EventPayload::SubsystemError {
@@ -1206,18 +1189,18 @@ where
         }
 
         // Flush pending watermarks before stopping the reactor
-        self.event_reactor.flush_watermarks().await;
+        self.subsystem_services.event_reactor.flush_watermarks().await;
 
         // Stop EventReactor
-        self.event_reactor.stop();
+        self.subsystem_services.event_reactor.stop();
         reactor_handle.abort();
 
         // Stop EventScheduler
-        self.event_scheduler.stop();
+        self.subsystem_services.event_scheduler.stop();
         scheduler_handle.abort();
 
         // Log swarm shutdown
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::System,
                 AuditAction::SwarmStopped,
@@ -1238,7 +1221,7 @@ where
         self.stop_embedded_mcp_servers().await;
 
         let _ = event_tx.send(SwarmEvent::Stopped).await;
-        self.event_bus
+        self.subsystem_services.event_bus
             .publish(crate::services::event_factory::orchestrator_event(
                 crate::services::event_bus::EventSeverity::Info,
                 crate::services::event_bus::EventPayload::OrchestratorStopped,
@@ -1254,7 +1237,7 @@ where
         // Drain ready-task channel and spawn agents
         if let Err(e) = self.drain_ready_tasks(&tx).await {
             tracing::error!(error = %e, "tick: drain_ready_tasks subsystem error (isolated)");
-            self.event_bus
+            self.subsystem_services.event_bus
                 .publish(crate::services::event_factory::orchestrator_event(
                     crate::services::event_bus::EventSeverity::Error,
                     crate::services::event_bus::EventPayload::SubsystemError {
@@ -1268,7 +1251,7 @@ where
         // Update stats
         if let Err(e) = self.update_stats(&tx).await {
             tracing::error!(error = %e, "tick: update_stats subsystem error (isolated)");
-            self.event_bus
+            self.subsystem_services.event_bus
                 .publish(crate::services::event_factory::orchestrator_event(
                     crate::services::event_bus::EventSeverity::Error,
                     crate::services::event_bus::EventPayload::SubsystemError {

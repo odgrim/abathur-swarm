@@ -43,7 +43,7 @@ where
         }
 
         // Log the registration
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::Agent,
                 AuditAction::AgentSpawned,
@@ -104,7 +104,7 @@ where
             .await?;
 
         if templates.is_empty() {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .info(
                     AuditCategory::Agent,
                     AuditAction::AgentSpawned,
@@ -135,7 +135,7 @@ where
             }
         }
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::Agent,
                 AuditAction::AgentSpawned,
@@ -159,7 +159,7 @@ where
     ) -> DomainResult<()> {
         // First, evaluate all templates to detect any that need refinement
         // This checks success rates, goal violations, and regression patterns
-        let evolution_events = self.evolution_loop.evaluate().await;
+        let evolution_events = self.subsystem_services.evolution_loop.evaluate().await;
 
         // Emit events for any evolution triggers detected
         for event in &evolution_events {
@@ -170,7 +170,7 @@ where
                 })
                 .await;
 
-            self.audit_log
+            self.subsystem_services.audit_log
                 .info(
                     AuditCategory::Agent,
                     AuditAction::AgentSpawned,
@@ -217,7 +217,7 @@ where
                         restored.updated_at = chrono::Utc::now();
 
                         if self.agent_repo.update_template(&restored).await.is_ok() {
-                            self.evolution_loop
+                            self.subsystem_services.evolution_loop
                                 .record_version_change(&event.template_name, *to_version)
                                 .await;
 
@@ -231,7 +231,7 @@ where
                                 })
                                 .await;
 
-                            self.audit_log.info(
+                            self.subsystem_services.audit_log.info(
                                 AuditCategory::Agent,
                                 AuditAction::AgentSpawned,
                                 format!(
@@ -243,7 +243,7 @@ where
                     }
                     _ => {
                         // Previous version not found in DB — log and skip
-                        self.audit_log
+                        self.subsystem_services.audit_log
                             .log(AuditEntry::new(
                                 AuditLevel::Warning,
                                 AuditCategory::Agent,
@@ -261,16 +261,16 @@ where
         }
 
         // Get pending refinement requests from evolution loop
-        let pending_refinements = self.evolution_loop.get_pending_refinements().await;
+        let pending_refinements = self.subsystem_services.evolution_loop.get_pending_refinements().await;
 
         for request in pending_refinements {
             // Mark as in progress
-            if !self.evolution_loop.start_refinement(request.id).await {
+            if !self.subsystem_services.evolution_loop.start_refinement(request.id).await {
                 continue; // Already being processed
             }
 
             // Log the refinement attempt
-            self.audit_log
+            self.subsystem_services.audit_log
                 .info(
                     AuditCategory::Agent,
                     AuditAction::AgentSpawned,
@@ -289,7 +289,7 @@ where
             {
                 Ok(Some(t)) => t,
                 _ => {
-                    self.evolution_loop
+                    self.subsystem_services.evolution_loop
                         .complete_refinement(request.id, false)
                         .await;
                     continue;
@@ -371,12 +371,12 @@ where
             match self.agent_repo.create_template(&new_template).await {
                 Ok(_) => {
                     // Record version change for regression detection
-                    self.evolution_loop
+                    self.subsystem_services.evolution_loop
                         .record_version_change(&request.template_name, new_template.version)
                         .await;
 
                     // Complete the refinement
-                    self.evolution_loop
+                    self.subsystem_services.evolution_loop
                         .complete_refinement(request.id, true)
                         .await;
 
@@ -387,7 +387,7 @@ where
                         })
                         .await;
 
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .info(
                             AuditCategory::Agent,
                             AuditAction::AgentSpawned,
@@ -399,10 +399,10 @@ where
                         .await;
                 }
                 Err(e) => {
-                    self.evolution_loop
+                    self.subsystem_services.evolution_loop
                         .complete_refinement(request.id, false)
                         .await;
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .log(AuditEntry::new(
                             AuditLevel::Warning,
                             AuditCategory::Agent,

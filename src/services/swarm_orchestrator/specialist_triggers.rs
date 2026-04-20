@@ -62,7 +62,7 @@ where
                     // Restructuring not possible, fall through to diagnostic
                 }
                 Err(e) => {
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .log(
                             AuditEntry::new(
                                 AuditLevel::Warning,
@@ -106,7 +106,7 @@ where
             if !diagnostic_exists
                 && let Err(e) = self.spawn_specialist_for_failure(task, event_tx).await
             {
-                self.audit_log
+                self.subsystem_services.audit_log
                     .log(
                         AuditEntry::new(
                             AuditLevel::Warning,
@@ -128,7 +128,7 @@ where
         if self.config.use_merge_queue
             && let Err(e) = self.process_merge_conflict_specialists(event_tx).await
         {
-            self.audit_log
+            self.subsystem_services.audit_log
                 .log(AuditEntry::new(
                     AuditLevel::Warning,
                     AuditCategory::Agent,
@@ -155,7 +155,7 @@ where
         };
 
         // Check if restructuring should be attempted
-        let mut restructure_svc = self.restructure_service.lock().await;
+        let mut restructure_svc = self.subsystem_services.restructure_service.lock().await;
 
         if !restructure_svc.should_restructure(&trigger) {
             return Ok(false);
@@ -184,7 +184,7 @@ where
         let decision = restructure_svc.analyze_and_decide(&context).await?;
 
         // Log the decision
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::Task,
                 AuditAction::TaskCreated,
@@ -196,7 +196,7 @@ where
             .await;
 
         // Emit event via EventBus (journaled)
-        self.event_bus
+        self.subsystem_services.event_bus
             .publish(crate::services::event_factory::make_event(
                 crate::services::event_bus::EventSeverity::Warning,
                 crate::services::event_bus::EventCategory::Execution,
@@ -229,7 +229,7 @@ where
                 self.task_repo.update(&updated_task).await?;
 
                 // Emit description update event via EventBus
-                self.event_bus
+                self.subsystem_services.event_bus
                     .publish(crate::services::event_factory::task_event(
                         crate::services::event_bus::EventSeverity::Info,
                         None,
@@ -277,7 +277,7 @@ where
                 self.create_restructure_subtasks(failed_task, &new_tasks, false, event_tx)
                     .await?;
 
-                self.audit_log
+                self.subsystem_services.audit_log
                     .info(
                         AuditCategory::Task,
                         AuditAction::TaskCreated,
@@ -288,7 +288,7 @@ where
                 Ok(true)
             }
             RestructureDecision::WaitAndRetry { delay, reason } => {
-                self.audit_log
+                self.subsystem_services.audit_log
                     .info(
                         AuditCategory::Task,
                         AuditAction::TaskFailed,
@@ -312,7 +312,7 @@ where
                         );
                         match federation.delegate_task(&peer.id, &task_desc).await {
                             Ok(a2a_task) => {
-                                self.audit_log
+                                self.subsystem_services.audit_log
                                     .info(
                                         AuditCategory::Task,
                                         AuditAction::TaskCompleted,
@@ -335,7 +335,7 @@ where
                     }
                 }
 
-                self.audit_log
+                self.subsystem_services.audit_log
                     .log(
                         AuditEntry::new(
                             AuditLevel::Warning,
@@ -353,7 +353,7 @@ where
                 Ok(false)
             }
             RestructureDecision::AcceptFailure { reason } => {
-                self.audit_log
+                self.subsystem_services.audit_log
                     .log(
                         AuditEntry::new(
                             AuditLevel::Error,
@@ -535,7 +535,7 @@ where
         };
 
         // Publish specialist spawned event via EventBus
-        self.event_bus
+        self.subsystem_services.event_bus
             .publish(crate::services::event_factory::agent_event(
                 crate::services::event_bus::EventSeverity::Info,
                 Some(diagnostic_task_id),
@@ -548,7 +548,7 @@ where
             .await;
         // (Bridge forwards EventBus→event_tx automatically)
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::Agent,
                 AuditAction::AgentSpawned,
@@ -742,7 +742,7 @@ where
         };
 
         // Publish events via EventBus
-        self.event_bus
+        self.subsystem_services.event_bus
             .publish(crate::services::event_factory::agent_event(
                 crate::services::event_bus::EventSeverity::Info,
                 Some(eval_task_id),
@@ -757,7 +757,7 @@ where
             ))
             .await;
 
-        self.event_bus
+        self.subsystem_services.event_bus
             .publish(crate::services::event_factory::agent_event(
                 crate::services::event_bus::EventSeverity::Warning,
                 Some(parent_task.id),
@@ -772,7 +772,7 @@ where
 
         // (Bridge forwards EventBus→event_tx automatically)
 
-        self.audit_log
+        self.subsystem_services.audit_log
             .info(
                 AuditCategory::Agent,
                 AuditAction::AgentSpawned,
@@ -1007,7 +1007,7 @@ where
 
                 if let Some(task_id) = task_id {
                     // Publish via EventBus
-                    self.event_bus
+                    self.subsystem_services.event_bus
                         .publish(crate::services::event_factory::agent_event(
                             crate::services::event_bus::EventSeverity::Info,
                             Some(task_id),
@@ -1023,7 +1023,7 @@ where
                         .await;
                     // (Bridge forwards EventBus→event_tx automatically)
 
-                    self.audit_log
+                    self.subsystem_services.audit_log
                         .info(
                             AuditCategory::Agent,
                             AuditAction::AgentSpawned,
@@ -1066,7 +1066,7 @@ where
 
             match overmind.resolve_conflict(request).await {
                 Ok(decision) => {
-                    self.audit_log.info(
+                    self.subsystem_services.audit_log.info(
                         AuditCategory::System,
                         AuditAction::TaskCompleted,
                         format!(
@@ -1119,7 +1119,7 @@ where
 
             match overmind.evaluate_escalation(request).await {
                 Ok(decision) => {
-                    self.audit_log.info(
+                    self.subsystem_services.audit_log.info(
                         AuditCategory::System,
                         AuditAction::TaskCompleted,
                         format!(

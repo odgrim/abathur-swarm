@@ -53,13 +53,13 @@ where
     ///
     /// Called in `run()` after reactor start but before the main loop.
     pub(super) async fn register_builtin_handlers(&self) {
-        let reactor = &self.event_reactor;
+        let reactor = &self.subsystem_services.event_reactor;
         let p = &self.config.polling;
 
         // Create a TaskService for SYSTEM handlers that need validated state transitions.
         // This ensures all mutations go through TaskService (validation + event emission).
         let handler_task_service = Arc::new(
-            TaskService::new(self.task_repo.clone()).with_event_bus(self.event_bus.clone()),
+            TaskService::new(self.task_repo.clone()).with_event_bus(self.subsystem_services.event_bus.clone()),
         );
 
         // TaskCompletedReadinessHandler (SYSTEM) — cascade readiness on completion
@@ -75,7 +75,7 @@ where
         reactor
             .register(Arc::new(WorkflowSubtaskCompletionHandler::new(
                 self.task_repo.clone(),
-                self.event_bus.clone(),
+                self.subsystem_services.event_bus.clone(),
                 verification_enabled,
             )))
             .await;
@@ -85,7 +85,7 @@ where
             reactor
                 .register(Arc::new(WorkflowVerificationHandler::new(
                     self.task_repo.clone(),
-                    self.event_bus.clone(),
+                    self.subsystem_services.event_bus.clone(),
                     Arc::clone(verifier) as Arc<dyn crate::services::swarm_orchestrator::convergent_execution::ConvergentIntentVerifier>,
                     true,
                 )))
@@ -107,7 +107,7 @@ where
         reactor
             .register(Arc::new(AgentTerminationHandler::new(
                 self.substrate.clone(),
-                self.guardrails.clone(),
+                self.subsystem_services.guardrails.clone(),
             )))
             .await;
 
@@ -329,7 +329,7 @@ where
 
             let task_service = Arc::new(
                 TaskService::new(self.task_repo.clone())
-                    .with_event_bus(self.event_bus.clone())
+                    .with_event_bus(self.subsystem_services.event_bus.clone())
                     .with_default_execution_mode(self.config.default_execution_mode.clone()),
             );
             let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
@@ -342,7 +342,7 @@ where
                     task_service,
                     goal_service,
                     maintenance_service,
-                    self.event_bus.clone(),
+                    self.subsystem_services.event_bus.clone(),
                 );
                 if let Some(ref pool) = self.pool {
                     bus = bus.with_pool(pool.clone());
@@ -360,7 +360,7 @@ where
                     task_service,
                     goal_service,
                     null_maintenance,
-                    self.event_bus.clone(),
+                    self.subsystem_services.event_bus.clone(),
                 );
                 if let Some(ref pool) = self.pool {
                     bus = bus.with_pool(pool.clone());
@@ -410,8 +410,8 @@ where
         // TriggerRuleEngine (NORMAL) — declarative event-driven automation
         let trigger_engine = {
             let mut engine_builder = TriggerRuleEngine::new(command_bus.clone())
-                .with_event_bus(self.event_bus.clone())
-                .with_event_scheduler(self.event_scheduler.clone());
+                .with_event_bus(self.subsystem_services.event_bus.clone())
+                .with_event_scheduler(self.subsystem_services.event_scheduler.clone());
 
             if let Some(ref repo) = self.trigger_rule_repo {
                 engine_builder = engine_builder.with_rule_repo(repo.clone());
@@ -491,7 +491,7 @@ where
         };
 
         // WatermarkAuditHandler + TriggerCatchupHandler + Poller/DLQ/Pruning (LOW) — require event store
-        if let Some(event_store) = self.event_bus.store() {
+        if let Some(event_store) = self.subsystem_services.event_bus.store() {
             // Collect handler names for watermark auditing
             let handler_names: Vec<String> = reactor.handler_names().await;
 
@@ -512,7 +512,7 @@ where
             // EventStorePollerHandler (SYSTEM) — cross-process event propagation
             let poller = Arc::new(EventStorePollerHandler::new(
                 event_store.clone(),
-                self.event_bus.process_id(),
+                self.subsystem_services.event_bus.process_id(),
             ));
             poller
                 .initialize_watermark_with_replay(p.startup_max_replay_events)
@@ -671,7 +671,7 @@ where
             // Register all active task schedules with the EventScheduler
             let schedule_service = TaskScheduleService::new(schedule_repo);
             match schedule_service
-                .register_active_schedules(&self.event_scheduler)
+                .register_active_schedules(&self.subsystem_services.event_scheduler)
                 .await
             {
                 Ok(count) => {
@@ -772,7 +772,7 @@ where
     /// Called in `run()` after handler registration.
     /// All intervals are configurable via `SwarmConfig.polling`.
     pub(super) async fn register_builtin_schedules(&self) {
-        let scheduler = &self.event_scheduler;
+        let scheduler = &self.subsystem_services.event_scheduler;
         let p = &self.config.polling;
 
         // Use explicit override if set, otherwise fall back to PollingConfig
@@ -993,7 +993,7 @@ where
         }
 
         // Event store polling — cross-process event propagation
-        if self.event_bus.store().is_some() {
+        if self.subsystem_services.event_bus.store().is_some() {
             scheduler
                 .register(interval_schedule(
                     "event-store-poll",

@@ -20,27 +20,24 @@ use crate::services::{
 /// Core services that are always wired up at construction (no `Option`),
 /// shared across orchestrator subsystems. Does not own optional features —
 /// those live in `AdvancedServices`.
-// dead_code: introduced in T11 step 1; wired in step 2, fields used in step 7.
-#[allow(dead_code)]
-pub(super) struct SubsystemServices {
-    pub(super) audit_log: Arc<AuditLogService>,
-    pub(super) circuit_breaker: Arc<CircuitBreakerService>,
-    pub(super) evolution_loop: Arc<EvolutionLoop>,
-    pub(super) restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
-    pub(super) guardrails: Arc<Guardrails>,
+pub(crate) struct SubsystemServices {
+    pub(crate) audit_log: Arc<AuditLogService>,
+    pub(crate) circuit_breaker: Arc<CircuitBreakerService>,
+    pub(crate) evolution_loop: Arc<EvolutionLoop>,
+    pub(crate) restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
+    pub(crate) guardrails: Arc<Guardrails>,
 
-    pub(super) event_bus: Arc<EventBus>,
-    pub(super) event_reactor: Arc<EventReactor>,
-    pub(super) event_scheduler: Arc<EventScheduler>,
+    pub(crate) event_bus: Arc<EventBus>,
+    pub(crate) event_reactor: Arc<EventReactor>,
+    pub(crate) event_scheduler: Arc<EventScheduler>,
 }
 
-#[allow(dead_code)]
 impl SubsystemServices {
     /// Construct subsystem services with default configurations for the
     /// non-injected ones. The event-bus triple is injected from the caller
     /// because it must be shared with other process-wide consumers (TUI,
     /// CLI, MCP servers).
-    pub(super) fn new(
+    pub(crate) fn new(
         event_bus: Arc<EventBus>,
         event_reactor: Arc<EventReactor>,
         event_scheduler: Arc<EventScheduler>,
