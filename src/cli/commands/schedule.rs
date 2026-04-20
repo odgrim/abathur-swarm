@@ -24,51 +24,56 @@ pub struct ScheduleArgs {
     pub command: ScheduleCommands,
 }
 
+/// Arguments for `schedule create`. Extracted into a named [`Args`] struct
+/// so the large payload lives behind a pointer once — keeps `ScheduleCommands`
+/// lean for pattern matches and codegen.
+#[derive(Args, Debug)]
+pub struct ScheduleCreateArgs {
+    /// Schedule name (unique identifier)
+    #[arg(long)]
+    pub name: String,
+
+    /// Description of the schedule
+    #[arg(long, default_value = "")]
+    pub description: String,
+
+    /// Cron expression (5-field: min hour dom month dow)
+    #[arg(long, group = "schedule_type")]
+    pub cron: Option<String>,
+
+    /// Interval in seconds
+    #[arg(long, group = "schedule_type")]
+    pub interval: Option<u64>,
+
+    /// One-shot at a specific time (RFC3339)
+    #[arg(long, group = "schedule_type")]
+    pub at: Option<String>,
+
+    /// Title for created tasks
+    #[arg(long)]
+    pub task_title: String,
+
+    /// Description/prompt for created tasks
+    #[arg(long)]
+    pub task_description: String,
+
+    /// Priority for created tasks (low, normal, high, critical)
+    #[arg(long, default_value = "normal")]
+    pub priority: String,
+
+    /// Agent type to assign created tasks to
+    #[arg(long)]
+    pub agent_type: Option<String>,
+
+    /// Overlap policy (skip, allow, cancel_previous)
+    #[arg(long, default_value = "skip")]
+    pub overlap: String,
+}
+
 #[derive(Subcommand, Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum ScheduleCommands {
     /// Create a new periodic task schedule
-    Create {
-        /// Schedule name (unique identifier)
-        #[arg(long)]
-        name: String,
-
-        /// Description of the schedule
-        #[arg(long, default_value = "")]
-        description: String,
-
-        /// Cron expression (5-field: min hour dom month dow)
-        #[arg(long, group = "schedule_type")]
-        cron: Option<String>,
-
-        /// Interval in seconds
-        #[arg(long, group = "schedule_type")]
-        interval: Option<u64>,
-
-        /// One-shot at a specific time (RFC3339)
-        #[arg(long, group = "schedule_type")]
-        at: Option<String>,
-
-        /// Title for created tasks
-        #[arg(long)]
-        task_title: String,
-
-        /// Description/prompt for created tasks
-        #[arg(long)]
-        task_description: String,
-
-        /// Priority for created tasks (low, normal, high, critical)
-        #[arg(long, default_value = "normal")]
-        priority: String,
-
-        /// Agent type to assign created tasks to
-        #[arg(long)]
-        agent_type: Option<String>,
-
-        /// Overlap policy (skip, allow, cancel_previous)
-        #[arg(long, default_value = "skip")]
-        overlap: String,
-    },
+    Create(Box<ScheduleCreateArgs>),
 
     /// List all task schedules
     List {
@@ -319,18 +324,19 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
     let service = TaskScheduleService::new(repo.clone());
 
     match args.command {
-        ScheduleCommands::Create {
-            name,
-            description,
-            cron,
-            interval,
-            at,
-            task_title,
-            task_description,
-            priority,
-            agent_type,
-            overlap,
-        } => {
+        ScheduleCommands::Create(args) => {
+            let ScheduleCreateArgs {
+                name,
+                description,
+                cron,
+                interval,
+                at,
+                task_title,
+                task_description,
+                priority,
+                agent_type,
+                overlap,
+            } = *args;
             // Parse schedule type
             let schedule_type = if let Some(expr) = cron {
                 TaskScheduleType::Cron { expression: expr }

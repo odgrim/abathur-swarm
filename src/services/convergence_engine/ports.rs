@@ -453,7 +453,6 @@ pub enum IterationGate {
 /// pre-exhaustion advisor hooks. Covers every outcome the orchestrator's
 /// `run_convergent_execution_inner` post-processing currently produces.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum AdvisorDirective {
     /// Finalize the trajectory as converged. Engine maps this to
     /// [`ConvergenceRunOutcome::Converged`].
@@ -462,8 +461,9 @@ pub enum AdvisorDirective {
     /// reason. Engine maps to [`ConvergenceRunOutcome::Exhausted`].
     FinalizeExhausted(String),
     /// Finalize with overseer convergence but intent gaps found. Engine maps
-    /// to [`ConvergenceRunOutcome::IntentGapsFound`].
-    FinalizeIntentGaps(IntentVerificationResult),
+    /// to [`ConvergenceRunOutcome::IntentGapsFound`]. Boxed: the
+    /// `IntentVerificationResult` payload dominates variant size.
+    FinalizeIntentGaps(Box<IntentVerificationResult>),
     /// Finalize on partial satisfaction at high confidence. Engine maps to
     /// [`ConvergenceRunOutcome::PartialAccepted`].
     FinalizePartialAccepted,
@@ -531,14 +531,14 @@ pub trait ConvergenceAdvisor: Send + Sync {
 /// Mirrors the orchestrator's `ConvergentOutcome` variant-for-variant so the
 /// orchestrator's wrapper in PR 4b can translate directly.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum ConvergenceRunOutcome {
     /// The trajectory converged normally.
     Converged,
     /// Convergence budget / iterations exhausted; see message for details.
     Exhausted(String),
     /// Overseers confirmed convergence but intent verification found gaps.
-    IntentGapsFound(IntentVerificationResult),
+    /// Boxed: `IntentVerificationResult` dominates this variant's size.
+    IntentGapsFound(Box<IntentVerificationResult>),
     /// Partial satisfaction accepted at high confidence.
     PartialAccepted,
     /// Overseer-strength acceptance after the 3-strike indeterminate fallback.
@@ -546,8 +546,9 @@ pub enum ConvergenceRunOutcome {
     /// Cancellation token fired mid-run.
     Cancelled,
     /// The engine decomposed the trajectory into subtasks; the caller must
-    /// coordinate the children.
-    Decomposed(Trajectory),
+    /// coordinate the children. Boxed: `Trajectory` is ~several hundred
+    /// bytes of in-memory state.
+    Decomposed(Box<Trajectory>),
     /// A terminal failure distinct from `Exhausted` -- trapped, budget denied,
     /// etc. Message describes the condition.
     Failed(String),

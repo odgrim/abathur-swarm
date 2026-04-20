@@ -820,7 +820,7 @@ impl From<ExecutionEvent> for UnifiedEvent {
                 None,
                 EventPayload::ExecutionCompleted {
                     status: status.into(),
-                    results: results.into(),
+                    results: (*results).into(),
                 },
             ),
             ExecutionEvent::WaveStarted {
@@ -875,7 +875,7 @@ impl From<ExecutionEvent> for UnifiedEvent {
                 Some(task_id),
                 EventPayload::TaskCompletedWithResult {
                     task_id,
-                    result: result.into(),
+                    result: (*result).into(),
                 },
             ),
             ExecutionEvent::TaskFailed {

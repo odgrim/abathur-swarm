@@ -25,51 +25,56 @@ pub struct TriggerArgs {
     pub command: TriggerCommands,
 }
 
+/// Arguments for `trigger create`. Extracted into a named [`Args`] struct so
+/// the large payload lives behind a pointer once — keeps `TriggerCommands`
+/// lean for pattern matches and codegen.
+#[derive(Args, Debug)]
+pub struct TriggerCreateArgs {
+    /// Trigger name (unique identifier)
+    #[arg(long)]
+    pub name: String,
+
+    /// Description of the trigger
+    #[arg(long, default_value = "")]
+    pub description: String,
+
+    /// Cron expression (5-field: min hour dom month dow)
+    #[arg(long, group = "trigger_type")]
+    pub cron: Option<String>,
+
+    /// Event type to trigger on (e.g., "TaskFailed", "GoalStarted")
+    #[arg(long, group = "trigger_type")]
+    pub on_event: Option<String>,
+
+    /// Event category filter (task, goal, memory, scheduler, etc.)
+    #[arg(long)]
+    pub category: Option<String>,
+
+    /// Prompt / task description to run when triggered
+    #[arg(long, alias = "task-description")]
+    pub prompt: String,
+
+    /// Title for created tasks (defaults to trigger name)
+    #[arg(long)]
+    pub task_title: Option<String>,
+
+    /// Priority for created tasks (low, normal, high, critical)
+    #[arg(long, default_value = "normal")]
+    pub priority: String,
+
+    /// Agent type to assign to created tasks
+    #[arg(long)]
+    pub agent_type: Option<String>,
+
+    /// Minimum seconds between firings
+    #[arg(long)]
+    pub cooldown: Option<u64>,
+}
+
 #[derive(Subcommand, Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum TriggerCommands {
     /// Create a new trigger rule
-    Create {
-        /// Trigger name (unique identifier)
-        #[arg(long)]
-        name: String,
-
-        /// Description of the trigger
-        #[arg(long, default_value = "")]
-        description: String,
-
-        /// Cron expression (5-field: min hour dom month dow)
-        #[arg(long, group = "trigger_type")]
-        cron: Option<String>,
-
-        /// Event type to trigger on (e.g., "TaskFailed", "GoalStarted")
-        #[arg(long, group = "trigger_type")]
-        on_event: Option<String>,
-
-        /// Event category filter (task, goal, memory, scheduler, etc.)
-        #[arg(long)]
-        category: Option<String>,
-
-        /// Prompt / task description to run when triggered
-        #[arg(long, alias = "task-description")]
-        prompt: String,
-
-        /// Title for created tasks (defaults to trigger name)
-        #[arg(long)]
-        task_title: Option<String>,
-
-        /// Priority for created tasks (low, normal, high, critical)
-        #[arg(long, default_value = "normal")]
-        priority: String,
-
-        /// Agent type to assign to created tasks
-        #[arg(long)]
-        agent_type: Option<String>,
-
-        /// Minimum seconds between firings
-        #[arg(long)]
-        cooldown: Option<u64>,
-    },
+    Create(Box<TriggerCreateArgs>),
     /// List all trigger rules
     List {
         /// Only show enabled rules
@@ -286,18 +291,19 @@ pub async fn execute(args: TriggerArgs, json_mode: bool) -> Result<()> {
     let repo = Arc::new(SqliteTriggerRuleRepository::new(pool.clone()));
 
     match args.command {
-        TriggerCommands::Create {
-            name,
-            description,
-            cron,
-            on_event,
-            category,
-            prompt,
-            task_title,
-            priority,
-            agent_type,
-            cooldown,
-        } => {
+        TriggerCommands::Create(args) => {
+            let TriggerCreateArgs {
+                name,
+                description,
+                cron,
+                on_event,
+                category,
+                prompt,
+                task_title,
+                priority,
+                agent_type,
+                cooldown,
+            } = *args;
             // Validate and normalize cron expression if provided
             let cron = if let Some(expr) = cron {
                 validate_cron_expression(&expr).map_err(|e| anyhow::anyhow!(e))?;

@@ -96,7 +96,6 @@ pub struct TaskResult {
 
 /// Event emitted during execution.
 #[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)]
 pub enum ExecutionEvent {
     /// Execution started.
     Started {
@@ -110,8 +109,12 @@ pub enum ExecutionEvent {
     },
     /// Task started.
     TaskStarted { task_id: Uuid, task_title: String },
-    /// Task completed.
-    TaskCompleted { task_id: Uuid, result: TaskResult },
+    /// Task completed. Boxed because `TaskResult` carries an optional
+    /// `SubstrateSession`, which dominates the variant size.
+    TaskCompleted {
+        task_id: Uuid,
+        result: Box<TaskResult>,
+    },
     /// Task failed.
     TaskFailed {
         task_id: Uuid,
@@ -130,10 +133,11 @@ pub enum ExecutionEvent {
         succeeded: usize,
         failed: usize,
     },
-    /// Execution completed.
+    /// Execution completed. Boxed because `ExecutionResults` aggregates
+    /// every task's result + session.
     Completed {
         status: ExecutionStatus,
-        results: ExecutionResults,
+        results: Box<ExecutionResults>,
     },
     /// DAG restructure decision made for a permanently failed task.
     RestructureDecision { task_id: Uuid, decision: String },
@@ -537,7 +541,7 @@ where
         let _ = event_tx
             .send(ExecutionEvent::Completed {
                 status: final_status,
-                results: final_results.clone(),
+                results: Box::new(final_results.clone()),
             })
             .await;
 
@@ -1285,7 +1289,7 @@ where
                     let _ = event_tx
                         .send(ExecutionEvent::TaskCompleted {
                             task_id,
-                            result: result.clone(),
+                            result: Box::new(result.clone()),
                         })
                         .await;
 

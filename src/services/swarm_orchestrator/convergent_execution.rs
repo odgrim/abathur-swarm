@@ -88,7 +88,6 @@ pub trait ConvergentIntentVerifier: Send + Sync {
 /// Outcome of convergent execution, consumed by the orchestrator to decide
 /// the task's terminal status.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum ConvergentOutcome {
     /// The trajectory converged to a satisfactory result.
     Converged,
@@ -104,11 +103,12 @@ pub enum ConvergentOutcome {
     /// Overseers confirmed convergence but intent verification found gaps.
     /// The orchestrator should re-enqueue the task with the gap context
     /// so the next execution attempt can address the outstanding issues.
-    IntentGapsFound(IntentVerificationResult),
+    /// Boxed: `IntentVerificationResult` dominates this variant's size.
+    IntentGapsFound(Box<IntentVerificationResult>),
     /// The engine determined the task should be decomposed into subtasks.
     /// The orchestrator creates child tasks from the trajectory's
-    /// decomposition plan.
-    Decomposed(Trajectory),
+    /// decomposition plan. Boxed: `Trajectory` is large.
+    Decomposed(Box<Trajectory>),
     /// Convergence failed. The message describes the terminal condition
     /// (trapped, exhausted, budget denied, etc.).
     Failed(String),
@@ -555,7 +555,7 @@ impl ConvergenceAdvisor for OrchestratorConvergenceAdvisor {
                 match ivr.satisfaction {
                     IntentSatisfaction::Satisfied => Ok(AdvisorDirective::FinalizeConverged),
                     IntentSatisfaction::Partial | IntentSatisfaction::Unsatisfied => {
-                        Ok(AdvisorDirective::FinalizeIntentGaps(ivr))
+                        Ok(AdvisorDirective::FinalizeIntentGaps(Box::new(ivr)))
                     }
                     IntentSatisfaction::Indeterminate => {
                         Ok(AdvisorDirective::FinalizeIndeterminateAccepted)

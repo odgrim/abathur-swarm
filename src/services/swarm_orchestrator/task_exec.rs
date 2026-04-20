@@ -516,7 +516,7 @@ pub async fn execute_task(params: TaskExecutionParams) {
 
                 Ok(ConvergentOutcome::IntentGapsFound(ivr)) => {
                     handle_intent_gaps_with_retry(
-                        ivr,
+                        *ivr,
                         task_id,
                         &task_repo,
                         &event_bus,

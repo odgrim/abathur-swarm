@@ -425,7 +425,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                     )));
                 }
                 LoopControl::Decompose => {
-                    return Ok(ConvergenceRunOutcome::Decomposed(trajectory));
+                    return Ok(ConvergenceRunOutcome::Decomposed(Box::new(trajectory)));
                 }
                 LoopControl::OverseerConverged => {
                     let directive = advisor.on_overseer_converged(&trajectory).await?;
