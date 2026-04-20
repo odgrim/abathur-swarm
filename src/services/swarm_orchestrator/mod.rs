@@ -1494,4 +1494,40 @@ mod tests {
             msg
         );
     }
+
+    // ------------------------------------------------------------------------
+    // Public API stability regression (T11)
+    // ------------------------------------------------------------------------
+
+    /// Smoke-check that the public accessor surface of `SwarmOrchestrator`
+    /// behaves the same after the T11 decomposition. Per
+    /// `specs/T11-swarm-orchestrator-decomposition.md` §7
+    /// (test_public_api_unchanged): exercise every accessor that external
+    /// callers (CLI, TUI, integration tests) depend on, so that removing or
+    /// renaming any of them breaks this test.
+    #[tokio::test]
+    async fn test_public_api_unchanged() {
+        let orchestrator = setup_orchestrator().await;
+
+        // Lifecycle / status accessors (now delegate to RuntimeState).
+        assert_eq!(orchestrator.status().await, OrchestratorStatus::Idle);
+        let _stats = orchestrator.stats().await;
+        orchestrator.pause().await;
+        orchestrator.resume().await;
+        assert_eq!(orchestrator.total_tokens(), 0);
+
+        // Service accessors (now delegate to SubsystemServices /
+        // AdvancedServices). Just check they're addressable; the references
+        // themselves prove the methods exist with the right signatures.
+        let _: &Arc<Guardrails> = orchestrator.guardrails();
+        let _: &Arc<AuditLogService> = orchestrator.audit_log();
+        let _: &Arc<CircuitBreakerService> = orchestrator.circuit_breaker();
+        let _: &Arc<EvolutionLoop> = orchestrator.evolution_loop();
+        let _: Option<&Arc<crate::services::OvermindService>> = orchestrator.overmind();
+        let _: Option<&Arc<crate::services::federation::FederationService>> =
+            orchestrator.federation_service();
+
+        // Dependency validation entry-point.
+        let _: DomainResult<()> = orchestrator.validate_dependencies();
+    }
 }
