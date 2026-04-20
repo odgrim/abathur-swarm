@@ -32,6 +32,7 @@ pub(crate) mod task_exec;
 pub mod types;
 pub(crate) mod workspace;
 
+use daemon_handles::DaemonHandles;
 use middleware_bundle::Middleware;
 use runtime_state::RuntimeState;
 use subsystem_services::SubsystemServices;
@@ -52,7 +53,7 @@ use crate::domain::ports::{
 };
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogConfig,
-    AuditLogService, CircuitBreakerConfig, CircuitBreakerService, DaemonHandle, EvolutionLoop,
+    AuditLogService, CircuitBreakerConfig, CircuitBreakerService, EvolutionLoop,
     IntentVerifierConfig, IntentVerifierService,
     command_bus::CommandBus,
     event_reactor::EventReactor,
@@ -90,22 +91,11 @@ where
     pub(crate) subsystem_services: SubsystemServices,
 
     // ---------------- Daemon handles ----------------
-    pub(super) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
-    /// Cancellation token for the hourly token-counter reset daemon.
-    pub(super) hourly_reset_cancel: Arc<RwLock<Option<tokio_util::sync::CancellationToken>>>,
-    pub(super) mcp_shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
-    /// Optional handle to the outbox poller daemon.
-    pub(super) outbox_poller_handle:
-        Arc<RwLock<Option<crate::services::outbox_poller::OutboxPollerHandle>>>,
-    /// Optional handle to the convergence poller daemon (federation).
-    pub(super) convergence_poller_handle:
-        Arc<RwLock<Option<crate::services::federation::ConvergencePollerHandle>>>,
-    /// Optional handle to the convergence publisher daemon (federation).
-    pub(super) convergence_publisher_handle: Arc<
-        RwLock<
-            Option<crate::services::federation::convergence_publisher::ConvergencePublisherHandle>,
-        >,
-    >,
+    /// Lifecycle handles for every long-running background daemon: decay,
+    /// hourly reset, MCP shutdown, outbox poller, federation convergence
+    /// poller, federation convergence publisher. Has an explicit `Drop` that
+    /// cancels tokens before signalling stops; see `daemon_handles.rs`.
+    pub(crate) daemon_handles: DaemonHandles,
 
     // ---------------- Optional services (progressive enhancement) ----------------
     pub(super) memory_repo: Option<Arc<M>>,
@@ -194,12 +184,7 @@ where
             subsystem_services: SubsystemServices::new(event_bus, event_reactor, event_scheduler),
 
             // ---------------- Daemon handles ----------------
-            decay_daemon_handle: Arc::new(RwLock::new(None)),
-            hourly_reset_cancel: Arc::new(RwLock::new(None)),
-            mcp_shutdown_tx: Arc::new(RwLock::new(None)),
-            outbox_poller_handle: Arc::new(RwLock::new(None)),
-            convergence_poller_handle: Arc::new(RwLock::new(None)),
-            convergence_publisher_handle: Arc::new(RwLock::new(None)),
+            daemon_handles: DaemonHandles::new(),
 
             // ---------------- Optional services (progressive enhancement) ----------------
             memory_repo: None,
@@ -729,7 +714,7 @@ where
         {
             let cancel = tokio_util::sync::CancellationToken::new();
             let _hourly_reset_handle = self.subsystem_services.guardrails.spawn_hourly_reset(cancel.clone());
-            *self.hourly_reset_cancel.write().await = Some(cancel);
+            *self.daemon_handles.hourly_reset_cancel.write().await = Some(cancel);
             tracing::info!("hourly token reset daemon started");
         }
 
@@ -1208,17 +1193,13 @@ where
             )
             .await;
 
-        // Stop hourly token reset daemon if running
-        if let Some(cancel) = self.hourly_reset_cancel.read().await.as_ref() {
-            cancel.cancel();
-            tracing::info!("hourly token reset daemon stopped");
-        }
-
-        // Stop decay daemon if running
-        self.stop_decay_daemon().await;
-
-        // Stop embedded MCP servers if running
-        self.stop_embedded_mcp_servers().await;
+        // Stop background daemons via the DaemonHandles bundle. Each helper
+        // is idempotent and safe to call when the underlying daemon was never
+        // started.
+        self.daemon_handles.stop_hourly_reset().await;
+        tracing::info!("hourly token reset daemon stopped");
+        self.daemon_handles.stop_decay_daemon().await;
+        self.daemon_handles.stop_embedded_mcp_servers().await;
 
         let _ = event_tx.send(SwarmEvent::Stopped).await;
         self.subsystem_services.event_bus

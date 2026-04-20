@@ -29,23 +29,20 @@ use crate::services::outbox_poller::OutboxPollerHandle;
 
 /// Background-daemon lifecycle handles. Each field is independently optional
 /// so the orchestrator can be configured with only the daemons it needs.
-// dead_code: introduced in T11 step 1; methods/fields wired in steps 2-7.
-#[allow(dead_code)]
-pub(super) struct DaemonHandles {
-    pub(super) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
+pub(crate) struct DaemonHandles {
+    pub(crate) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
     /// Cancellation token for the hourly token-counter reset daemon.
-    pub(super) hourly_reset_cancel: Arc<RwLock<Option<CancellationToken>>>,
-    pub(super) mcp_shutdown_tx: Arc<RwLock<Option<broadcast::Sender<()>>>>,
-    pub(super) outbox_poller_handle: Arc<RwLock<Option<OutboxPollerHandle>>>,
-    pub(super) convergence_poller_handle: Arc<RwLock<Option<ConvergencePollerHandle>>>,
-    pub(super) convergence_publisher_handle: Arc<RwLock<Option<ConvergencePublisherHandle>>>,
+    pub(crate) hourly_reset_cancel: Arc<RwLock<Option<CancellationToken>>>,
+    pub(crate) mcp_shutdown_tx: Arc<RwLock<Option<broadcast::Sender<()>>>>,
+    pub(crate) outbox_poller_handle: Arc<RwLock<Option<OutboxPollerHandle>>>,
+    pub(crate) convergence_poller_handle: Arc<RwLock<Option<ConvergencePollerHandle>>>,
+    pub(crate) convergence_publisher_handle: Arc<RwLock<Option<ConvergencePublisherHandle>>>,
 }
 
-#[allow(dead_code)]
 impl DaemonHandles {
     /// Construct an empty handle bundle; daemons are wired in later via the
     /// `start_*` helpers as the orchestrator boots.
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             decay_daemon_handle: Arc::new(RwLock::new(None)),
             hourly_reset_cancel: Arc::new(RwLock::new(None)),
@@ -57,7 +54,7 @@ impl DaemonHandles {
     }
 
     /// Stop the memory decay daemon if running.
-    pub(super) async fn stop_decay_daemon(&self) {
+    pub(crate) async fn stop_decay_daemon(&self) {
         let daemon_handle = self.decay_daemon_handle.read().await;
         if let Some(ref handle) = *daemon_handle {
             handle.stop();
@@ -65,7 +62,7 @@ impl DaemonHandles {
     }
 
     /// Stop the outbox poller if running.
-    pub(super) async fn stop_outbox_poller(&self) {
+    pub(crate) async fn stop_outbox_poller(&self) {
         let handle = self.outbox_poller_handle.read().await;
         if let Some(ref h) = *handle {
             h.stop();
@@ -73,7 +70,7 @@ impl DaemonHandles {
     }
 
     /// Stop the federation convergence poller if running.
-    pub(super) async fn stop_convergence_poller(&self) {
+    pub(crate) async fn stop_convergence_poller(&self) {
         let handle = self.convergence_poller_handle.read().await;
         if let Some(ref h) = *handle {
             h.stop();
@@ -81,7 +78,7 @@ impl DaemonHandles {
     }
 
     /// Stop the federation convergence publisher if running.
-    pub(super) async fn stop_convergence_publisher(&self) {
+    pub(crate) async fn stop_convergence_publisher(&self) {
         let handle = self.convergence_publisher_handle.read().await;
         if let Some(ref h) = *handle {
             h.stop();
@@ -90,7 +87,7 @@ impl DaemonHandles {
 
     /// Stop the embedded MCP servers (broadcast a shutdown signal) if a
     /// handle was set.
-    pub(super) async fn stop_embedded_mcp_servers(&self) {
+    pub(crate) async fn stop_embedded_mcp_servers(&self) {
         let handle = self.mcp_shutdown_tx.read().await;
         if let Some(ref tx) = *handle {
             let _ = tx.send(());
@@ -98,7 +95,7 @@ impl DaemonHandles {
     }
 
     /// Cancel the hourly token-counter reset daemon if running.
-    pub(super) async fn stop_hourly_reset(&self) {
+    pub(crate) async fn stop_hourly_reset(&self) {
         if let Some(cancel) = self.hourly_reset_cancel.read().await.as_ref() {
             cancel.cancel();
         }

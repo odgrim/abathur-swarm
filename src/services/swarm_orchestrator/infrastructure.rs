@@ -418,16 +418,14 @@ where
 
     /// Store MCP server shutdown handle for external management.
     pub async fn set_mcp_shutdown_handle(&self, tx: tokio::sync::broadcast::Sender<()>) {
-        let mut handle = self.mcp_shutdown_tx.write().await;
+        let mut handle = self.daemon_handles.mcp_shutdown_tx.write().await;
         *handle = Some(tx);
     }
 
     /// Stop embedded MCP servers if a shutdown handle was set.
+    /// Delegates to `DaemonHandles::stop_embedded_mcp_servers()` (T11).
     pub async fn stop_embedded_mcp_servers(&self) {
-        let handle = self.mcp_shutdown_tx.read().await;
-        if let Some(ref tx) = *handle {
-            let _ = tx.send(());
-        }
+        self.daemon_handles.stop_embedded_mcp_servers().await;
     }
 
     /// Start the convergence polling daemon for federation.
@@ -458,7 +456,7 @@ where
         let handle = daemon.start();
 
         {
-            let mut stored = self.convergence_poller_handle.write().await;
+            let mut stored = self.daemon_handles.convergence_poller_handle.write().await;
             *stored = Some(handle);
         }
 
@@ -508,7 +506,7 @@ where
         let handle = publisher.spawn();
 
         {
-            let mut stored = self.convergence_publisher_handle.write().await;
+            let mut stored = self.daemon_handles.convergence_publisher_handle.write().await;
             *stored = Some(handle);
         }
 
@@ -543,7 +541,7 @@ where
 
         // Store the handle
         {
-            let mut daemon_handle = self.decay_daemon_handle.write().await;
+            let mut daemon_handle = self.daemon_handles.decay_daemon_handle.write().await;
             *daemon_handle = Some(handle);
         }
 
@@ -690,12 +688,9 @@ where
         Ok(())
     }
 
-    /// Stop the memory decay daemon.
+    /// Stop the memory decay daemon. Delegates to `DaemonHandles` (T11).
     pub async fn stop_decay_daemon(&self) {
-        let daemon_handle = self.decay_daemon_handle.read().await;
-        if let Some(ref handle) = *daemon_handle {
-            handle.stop();
-        }
+        self.daemon_handles.stop_decay_daemon().await;
     }
 
     /// Start the outbox poller background daemon.
@@ -717,35 +712,26 @@ where
         let handle = poller.start();
 
         {
-            let mut stored = self.outbox_poller_handle.write().await;
+            let mut stored = self.daemon_handles.outbox_poller_handle.write().await;
             *stored = Some(handle);
         }
 
         tracing::info!("Outbox poller started");
     }
 
-    /// Stop the outbox poller.
+    /// Stop the outbox poller. Delegates to `DaemonHandles` (T11).
     pub async fn stop_outbox_poller(&self) {
-        let handle = self.outbox_poller_handle.read().await;
-        if let Some(ref h) = *handle {
-            h.stop();
-        }
+        self.daemon_handles.stop_outbox_poller().await;
     }
 
-    /// Stop the convergence poller daemon.
+    /// Stop the convergence poller daemon. Delegates to `DaemonHandles` (T11).
     pub async fn stop_convergence_poller(&self) {
-        let handle = self.convergence_poller_handle.read().await;
-        if let Some(ref h) = *handle {
-            h.stop();
-        }
+        self.daemon_handles.stop_convergence_poller().await;
     }
 
-    /// Stop the convergence publisher daemon.
+    /// Stop the convergence publisher daemon. Delegates to `DaemonHandles` (T11).
     pub async fn stop_convergence_publisher(&self) {
-        let handle = self.convergence_publisher_handle.read().await;
-        if let Some(ref h) = *handle {
-            h.stop();
-        }
+        self.daemon_handles.stop_convergence_publisher().await;
     }
 
     /// Create or reuse a worktree for task execution.
