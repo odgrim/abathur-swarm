@@ -240,4 +240,68 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "non-retryable errors should not retry");
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn successful_first_attempt_does_not_retry() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let result: Result<u32> = retry_with_backoff_opts(
+            "test_op",
+            5,
+            Duration::from_millis(0),
+            Duration::from_millis(0),
+            false,
+            move || {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(42)
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "success on first attempt must not retry");
+        assert_eq!(result.expect("success path returns Ok"), 42);
+    }
+
+    #[tokio::test]
+    async fn permanent_http_error_returns_immediately_after_one_attempt() {
+        // A non-retryable HTTP error (e.g. 400/404) is surfaced as a plain
+        // anyhow error from check_response — verify the retry layer treats
+        // it as terminal and does not loop.
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+
+        let result: Result<()> = retry_with_backoff_opts(
+            "test_op",
+            5,
+            Duration::from_millis(0),
+            Duration::from_millis(0),
+            false,
+            move || {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    // Mirrors the bail!() in check_response for a 4xx body.
+                    Err(anyhow::anyhow!("ClickUp API error: HTTP 400 Bad Request: bad input"))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "permanent (non-retryable) HTTP error must not be retried"
+        );
+        let err = result.expect_err("permanent error must surface as Err");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("HTTP 400"), "error must propagate the original message verbatim, got: {msg}");
+        assert!(
+            !msg.contains("attempts failed"),
+            "non-retryable errors should NOT be wrapped with the exhaustion context, got: {msg}"
+        );
+    }
 }

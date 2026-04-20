@@ -278,6 +278,86 @@ async fn handle_reconcile(state: &AppState) -> Result<Value, (i32, String)> {
     }))
 }
 
+// ---- Helpers ----
+
+fn format_clickup_description(
+    envelope: &FederationTaskEnvelope,
+    deadline: &chrono::DateTime<chrono::Utc>,
+) -> String {
+    let parent_goal = envelope
+        .context
+        .parent_goal_summary
+        .as_deref()
+        .unwrap_or("N/A");
+
+    let constraints = if envelope.constraints.is_empty() {
+        "None".to_string()
+    } else {
+        envelope
+            .constraints
+            .iter()
+            .map(|c| format!("- {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let hints = if envelope.context.hints.is_empty() {
+        "None".to_string()
+    } else {
+        envelope
+            .context
+            .hints
+            .iter()
+            .map(|h| format!("- {h}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let related = if envelope.context.related_artifacts.is_empty() {
+        "None".to_string()
+    } else {
+        envelope
+            .context
+            .related_artifacts
+            .iter()
+            .map(|a| format!("- {} : {}", a.artifact_type, a.value))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let deadline_str = deadline.format("%Y-%m-%d %H:%M UTC").to_string();
+
+    format!(
+        r#"## Federation Task: {title}
+
+**Task ID**: {task_id}
+**Priority**: {priority:?}
+**Parent Goal**: {parent_goal}
+**Deadline**: {deadline_str}
+
+### Description
+{description}
+
+### Constraints
+{constraints}
+
+### Context
+{hints}
+
+### Related Artifacts
+{related}
+
+---
+**Instructions**: Complete this task and change the status to "complete".
+Add a comment with your results. Include any URLs, account numbers,
+or relevant details. You can use a ```json block for structured data."#,
+        title = envelope.title,
+        task_id = envelope.task_id,
+        priority = envelope.priority,
+        description = envelope.description,
+    )
+}
+
 // ---- Tests ----
 
 #[cfg(test)]
@@ -550,84 +630,4 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
-}
-
-// ---- Helpers ----
-
-fn format_clickup_description(
-    envelope: &FederationTaskEnvelope,
-    deadline: &chrono::DateTime<chrono::Utc>,
-) -> String {
-    let parent_goal = envelope
-        .context
-        .parent_goal_summary
-        .as_deref()
-        .unwrap_or("N/A");
-
-    let constraints = if envelope.constraints.is_empty() {
-        "None".to_string()
-    } else {
-        envelope
-            .constraints
-            .iter()
-            .map(|c| format!("- {c}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let hints = if envelope.context.hints.is_empty() {
-        "None".to_string()
-    } else {
-        envelope
-            .context
-            .hints
-            .iter()
-            .map(|h| format!("- {h}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let related = if envelope.context.related_artifacts.is_empty() {
-        "None".to_string()
-    } else {
-        envelope
-            .context
-            .related_artifacts
-            .iter()
-            .map(|a| format!("- {} : {}", a.artifact_type, a.value))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let deadline_str = deadline.format("%Y-%m-%d %H:%M UTC").to_string();
-
-    format!(
-        r#"## Federation Task: {title}
-
-**Task ID**: {task_id}
-**Priority**: {priority:?}
-**Parent Goal**: {parent_goal}
-**Deadline**: {deadline_str}
-
-### Description
-{description}
-
-### Constraints
-{constraints}
-
-### Context
-{hints}
-
-### Related Artifacts
-{related}
-
----
-**Instructions**: Complete this task and change the status to "complete".
-Add a comment with your results. Include any URLs, account numbers,
-or relevant details. You can use a ```json block for structured data."#,
-        title = envelope.title,
-        task_id = envelope.task_id,
-        priority = envelope.priority,
-        description = envelope.description,
-    )
 }
