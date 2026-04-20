@@ -748,8 +748,8 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
             task_id,
             gateway,
         } => {
-            send_a2a_message(
-                &pool,
+            send_a2a_message(SendA2aMessageParams {
+                pool: &pool,
                 to,
                 message_type,
                 subject,
@@ -758,7 +758,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
                 task_id,
                 gateway,
                 json_mode,
-            )
+            })
             .await?;
         }
 
@@ -825,9 +825,8 @@ fn parse_message_type(s: &str) -> Option<MessageType> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn send_a2a_message(
-    pool: &SqlitePool,
+struct SendA2aMessageParams<'a> {
+    pool: &'a SqlitePool,
     to: String,
     message_type: String,
     subject: String,
@@ -836,7 +835,20 @@ async fn send_a2a_message(
     task_id: Option<String>,
     gateway: String,
     json_mode: bool,
-) -> Result<()> {
+}
+
+async fn send_a2a_message(params: SendA2aMessageParams<'_>) -> Result<()> {
+    let SendA2aMessageParams {
+        pool,
+        to,
+        message_type,
+        subject,
+        body,
+        from,
+        task_id,
+        gateway,
+        json_mode,
+    } = params;
     let msg_type = parse_message_type(&message_type)
         .ok_or_else(|| anyhow::anyhow!("Invalid message type: {}", message_type))?;
 

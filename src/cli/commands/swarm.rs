@@ -390,6 +390,11 @@ struct McpServerUrls {
     events_server: Option<String>,
 }
 
+// reason: thin CLI plumbing that fans out to `run_swarm_foreground` and
+// `start_swarm_background` with the same arg list; each arg is a clap-derived
+// flag value, so a parameter struct would be reconstructed from the clap
+// match arm immediately above and add no clarity. The match arm is the
+// natural construction point.
 #[allow(clippy::too_many_arguments)]
 async fn start_swarm(
     max_agents: usize,
@@ -473,6 +478,9 @@ async fn start_swarm(
     }
 }
 
+// reason: see start_swarm above; this is its background-spawn sibling and
+// receives the same args one-for-one before forwarding them to the
+// re-exec'd `abathur swarm start --foreground` process.
 #[allow(clippy::too_many_arguments)]
 fn start_swarm_background(
     max_agents: usize,
@@ -640,6 +648,9 @@ async fn stop_swarm(json_mode: bool) -> Result<()> {
     Ok(())
 }
 
+// reason: see start_swarm above; this is the foreground sibling and shares
+// the same args one-for-one. A struct would be reconstructed from the same
+// clap-derived locals.
 #[allow(clippy::too_many_arguments)]
 async fn run_swarm_foreground(
     max_agents: usize,

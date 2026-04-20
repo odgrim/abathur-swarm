@@ -146,7 +146,7 @@ impl WorktreeRepository for SqliteWorktreeRepository {
 
         let mut counts = HashMap::new();
         for (status_str, count) in rows {
-            if let Some(status) = WorktreeStatus::from_str(&status_str) {
+            if let Some(status) = WorktreeStatus::parse(&status_str) {
                 counts.insert(status, count as u64);
             }
         }
@@ -176,7 +176,7 @@ impl TryFrom<WorktreeRow> for Worktree {
         let id = super::parse_uuid(&row.id)?;
         let task_id = super::parse_uuid(&row.task_id)?;
 
-        let status = WorktreeStatus::from_str(&row.status).ok_or_else(|| {
+        let status = WorktreeStatus::parse(&row.status).ok_or_else(|| {
             DomainError::SerializationError(format!("Invalid status: {}", row.status))
         })?;
 

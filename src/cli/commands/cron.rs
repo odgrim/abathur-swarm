@@ -224,8 +224,8 @@ pub async fn execute(args: CronArgs, json_mode: bool) -> Result<()> {
                 );
             }
 
-            let priority = TaskPriority::from_str(&priority).unwrap_or(TaskPriority::Normal);
-            let overlap_policy = OverlapPolicy::from_str(&overlap).unwrap_or(OverlapPolicy::Skip);
+            let priority = TaskPriority::parse(&priority).unwrap_or(TaskPriority::Normal);
+            let overlap_policy = OverlapPolicy::parse(&overlap).unwrap_or(OverlapPolicy::Skip);
 
             // Use the prompt as both title (truncated) and description
             let task_title = if prompt.len() > 60 {

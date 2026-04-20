@@ -556,34 +556,6 @@ impl AuditLogService {
         .await;
     }
 
-    /// Log a state change.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn log_state_change(
-        &self,
-        category: AuditCategory,
-        action: AuditAction,
-        actor: AuditActor,
-        entity_id: Uuid,
-        entity_type: impl Into<String>,
-        previous_state: impl Into<String>,
-        new_state: impl Into<String>,
-    ) {
-        let prev = previous_state.into();
-        let new = new_state.into();
-        self.log(
-            AuditEntry::new(
-                AuditLevel::Info,
-                category,
-                action,
-                actor,
-                format!("State changed from {} to {}", prev, new),
-            )
-            .with_entity(entity_id, entity_type)
-            .with_state_change(prev, new),
-        )
-        .await;
-    }
-
     /// Log a warning.
     pub async fn warn(
         &self,

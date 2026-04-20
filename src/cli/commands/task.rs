@@ -671,11 +671,11 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 service.get_ready_tasks(limit).await?
             } else {
                 let filter = TaskFilter {
-                    status: status.as_ref().and_then(|s| TaskStatus::from_str(s)),
-                    priority: priority.as_ref().and_then(|p| TaskPriority::from_str(p)),
+                    status: status.as_ref().and_then(|s| TaskStatus::parse(s)),
+                    priority: priority.as_ref().and_then(|p| TaskPriority::parse(p)),
                     agent_type: agent,
                     parent_id,
-                    task_type: task_type.as_ref().and_then(|t| TaskType::from_str(t)),
+                    task_type: task_type.as_ref().and_then(|t| TaskType::parse(t)),
                     limit: Some(limit),
                     created_before: None,
                 };
@@ -817,7 +817,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 status
                     .iter()
                     .map(|s| {
-                        TaskStatus::from_str(s)
+                        TaskStatus::parse(s)
                             .ok_or_else(|| anyhow::anyhow!("unknown status '{}'. Valid: pending, ready, blocked, running, complete, failed, canceled", s))
                     })
                     .collect::<Result<Vec<_>>>()?
@@ -858,7 +858,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
         TaskCommands::ForceTransition { id, status, reason } => {
             let uuid = resolve_task_id(&pool, &id).await?;
-            let new_status = TaskStatus::from_str(&status)
+            let new_status = TaskStatus::parse(&status)
                 .ok_or_else(|| anyhow::anyhow!(
                     "unknown status '{}'. Valid: pending, ready, blocked, running, validating, complete, failed, canceled",
                     status

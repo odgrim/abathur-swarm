@@ -39,8 +39,7 @@ impl AdapterType {
     }
 
     /// Parse an adapter type from a string.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "prompt" => Some(Self::Prompt),
             "native" => Some(Self::Native),
@@ -78,8 +77,7 @@ impl AdapterDirection {
     }
 
     /// Parse a direction from a string.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "ingestion" | "ingest" => Some(Self::Ingestion),
             "egress" => Some(Self::Egress),
@@ -138,8 +136,7 @@ impl AdapterCapability {
     }
 
     /// Parse a capability from a string.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "poll_items" => Some(Self::PollItems),
             "update_status" => Some(Self::UpdateStatus),
@@ -485,9 +482,9 @@ mod tests {
 
     #[test]
     fn test_adapter_type_round_trip() {
-        assert_eq!(AdapterType::from_str("prompt"), Some(AdapterType::Prompt));
-        assert_eq!(AdapterType::from_str("native"), Some(AdapterType::Native));
-        assert_eq!(AdapterType::from_str("unknown"), None);
+        assert_eq!(AdapterType::parse("prompt"), Some(AdapterType::Prompt));
+        assert_eq!(AdapterType::parse("native"), Some(AdapterType::Native));
+        assert_eq!(AdapterType::parse("unknown"), None);
         assert_eq!(AdapterType::Prompt.as_str(), "prompt");
         assert_eq!(AdapterType::Native.as_str(), "native");
     }
@@ -495,22 +492,22 @@ mod tests {
     #[test]
     fn test_adapter_direction_round_trip() {
         assert_eq!(
-            AdapterDirection::from_str("ingestion"),
+            AdapterDirection::parse("ingestion"),
             Some(AdapterDirection::Ingestion)
         );
         assert_eq!(
-            AdapterDirection::from_str("egress"),
+            AdapterDirection::parse("egress"),
             Some(AdapterDirection::Egress)
         );
         assert_eq!(
-            AdapterDirection::from_str("bidirectional"),
+            AdapterDirection::parse("bidirectional"),
             Some(AdapterDirection::Bidirectional)
         );
         assert_eq!(
-            AdapterDirection::from_str("both"),
+            AdapterDirection::parse("both"),
             Some(AdapterDirection::Bidirectional)
         );
-        assert_eq!(AdapterDirection::from_str("unknown"), None);
+        assert_eq!(AdapterDirection::parse("unknown"), None);
     }
 
     #[test]
@@ -538,9 +535,9 @@ mod tests {
         ];
         for (cap, s) in caps {
             assert_eq!(cap.as_str(), s);
-            assert_eq!(AdapterCapability::from_str(s), Some(cap));
+            assert_eq!(AdapterCapability::parse(s), Some(cap));
         }
-        assert_eq!(AdapterCapability::from_str("nonexistent"), None);
+        assert_eq!(AdapterCapability::parse("nonexistent"), None);
     }
 
     #[test]

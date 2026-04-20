@@ -14,7 +14,9 @@ use uuid::Uuid;
 use crate::domain::errors::DomainResult;
 use crate::services::{IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig};
 
-use super::super::helpers::{MergeBackOutcome, merge_subtask_into_feature_branch};
+use super::super::helpers::{
+    MergeBackOutcome, MergeSubtaskParams, merge_subtask_into_feature_branch,
+};
 use super::{PostCompletionContext, PostCompletionMiddleware};
 
 pub struct SubtaskMergeBackMiddleware;
@@ -124,17 +126,17 @@ impl PostCompletionMiddleware for SubtaskMergeBackMiddleware {
             }
             // Don't merge-back again; fall through so autoship still runs.
         } else if ctx.verification_passed && ctx.require_commits {
-            let merge_result = merge_subtask_into_feature_branch(
+            let merge_result = merge_subtask_into_feature_branch(MergeSubtaskParams {
                 task_id,
-                ctx.task_repo.clone(),
-                ctx.goal_repo.clone(),
-                ctx.worktree_repo.clone(),
-                &ctx.event_tx,
-                &ctx.audit_log,
-                &ctx.repo_path,
-                &ctx.default_base_ref,
-                ctx.merge_request_repo.clone(),
-            )
+                task_repo: ctx.task_repo.clone(),
+                goal_repo: ctx.goal_repo.clone(),
+                worktree_repo: ctx.worktree_repo.clone(),
+                event_tx: &ctx.event_tx,
+                audit_log: &ctx.audit_log,
+                repo_path: &ctx.repo_path,
+                default_base_ref: &ctx.default_base_ref,
+                merge_request_repo: ctx.merge_request_repo.clone(),
+            })
             .await;
 
             match merge_result {

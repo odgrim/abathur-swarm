@@ -56,35 +56,37 @@ pub(super) struct DelegationManager {
     a2a_client: Option<Arc<dyn A2AClient>>,
 }
 
+/// Inputs for [`DelegationManager::new`].
+pub(super) struct DelegationManagerParams {
+    pub config: FederationConfig,
+    pub cerebrates: Arc<RwLock<HashMap<String, CerebrateStatus>>>,
+    pub in_flight: Arc<RwLock<HashMap<Uuid, String>>>,
+    pub delegated_envelopes: Arc<RwLock<HashMap<Uuid, FederationTaskEnvelope>>>,
+    pub rejection_history: Arc<RwLock<HashMap<Uuid, Vec<String>>>>,
+    pub last_activity: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
+    pub task_to_federated_goal: Arc<RwLock<HashMap<String, Uuid>>>,
+    pub event_bus: Arc<EventBus>,
+    pub http_client: FederationHttpClient,
+    pub delegation_strategy: Arc<dyn FederationDelegationStrategy>,
+    pub task_transformer: Arc<dyn FederationTaskTransformer>,
+    pub a2a_client: Option<Arc<dyn A2AClient>>,
+}
+
 impl DelegationManager {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        config: FederationConfig,
-        cerebrates: Arc<RwLock<HashMap<String, CerebrateStatus>>>,
-        in_flight: Arc<RwLock<HashMap<Uuid, String>>>,
-        delegated_envelopes: Arc<RwLock<HashMap<Uuid, FederationTaskEnvelope>>>,
-        rejection_history: Arc<RwLock<HashMap<Uuid, Vec<String>>>>,
-        last_activity: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
-        task_to_federated_goal: Arc<RwLock<HashMap<String, Uuid>>>,
-        event_bus: Arc<EventBus>,
-        http_client: FederationHttpClient,
-        delegation_strategy: Arc<dyn FederationDelegationStrategy>,
-        task_transformer: Arc<dyn FederationTaskTransformer>,
-        a2a_client: Option<Arc<dyn A2AClient>>,
-    ) -> Self {
+    pub(super) fn new(params: DelegationManagerParams) -> Self {
         Self {
-            config,
-            cerebrates,
-            in_flight,
-            delegated_envelopes,
-            rejection_history,
-            last_activity,
-            task_to_federated_goal,
-            event_bus,
-            http_client,
-            delegation_strategy,
-            task_transformer,
-            a2a_client,
+            config: params.config,
+            cerebrates: params.cerebrates,
+            in_flight: params.in_flight,
+            delegated_envelopes: params.delegated_envelopes,
+            rejection_history: params.rejection_history,
+            last_activity: params.last_activity,
+            task_to_federated_goal: params.task_to_federated_goal,
+            event_bus: params.event_bus,
+            http_client: params.http_client,
+            delegation_strategy: params.delegation_strategy,
+            task_transformer: params.task_transformer,
+            a2a_client: params.a2a_client,
         }
     }
 

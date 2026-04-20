@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::domain::errors::DomainResult;
 
-use super::super::helpers::try_auto_ship;
+use super::super::helpers::{AutoShipParams, try_auto_ship};
 use super::{PostCompletionContext, PostCompletionMiddleware};
 
 pub struct AutoshipMiddleware;
@@ -59,17 +59,17 @@ impl PostCompletionMiddleware for AutoshipMiddleware {
             return Ok(());
         }
 
-        try_auto_ship(
-            task_id,
-            ctx.task_repo.clone(),
-            ctx.worktree_repo.clone(),
-            &ctx.event_tx,
-            &ctx.audit_log,
-            &ctx.repo_path,
-            &ctx.default_base_ref,
-            ctx.output_delivery.clone(),
-            ctx.fetch_on_sync,
-        )
+        try_auto_ship(AutoShipParams {
+            triggering_task_id: task_id,
+            task_repo: ctx.task_repo.clone(),
+            worktree_repo: ctx.worktree_repo.clone(),
+            event_tx: &ctx.event_tx,
+            audit_log: &ctx.audit_log,
+            repo_path: &ctx.repo_path,
+            default_base_ref: &ctx.default_base_ref,
+            output_delivery: ctx.output_delivery.clone(),
+            fetch_on_sync: ctx.fetch_on_sync,
+        })
         .await;
 
         // Either way, the per-task PR / merge-queue flow is not appropriate

@@ -168,6 +168,12 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Submit a new task. Returns the task and events to be journaled.
+    // reason: TaskService::submit_task is a load-bearing public API with 30+
+    // call sites in tests and the dispatcher. Each caller already constructs
+    // the args inline alongside in-context locals; a parameter struct here
+    // would force every caller to either build a builder (lots of churn for
+    // no clarity win) or use a struct-literal (no better than named args).
+    // Revisiting once the dispatcher path consolidates.
     #[allow(clippy::too_many_arguments)]
     pub async fn submit_task(
         &self,

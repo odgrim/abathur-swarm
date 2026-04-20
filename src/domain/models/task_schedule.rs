@@ -70,8 +70,7 @@ impl TaskScheduleStatus {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "active" => Some(Self::Active),
             "paused" => Some(Self::Paused),
@@ -108,8 +107,7 @@ impl OverlapPolicy {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "skip" => Some(Self::Skip),
             "allow" => Some(Self::Allow),

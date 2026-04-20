@@ -718,68 +718,90 @@ pub async fn find_root_ancestor_id<T: TaskRepository + ?Sized>(
 /// middleware preserve the previous semantics exactly; callers can register
 /// additional middleware via
 /// [`SwarmOrchestrator::with_post_completion_middleware`].
-#[allow(clippy::too_many_arguments)]
+/// Inputs for [`run_post_completion_workflow`]. Bundling these into a struct
+/// keeps the orchestrator's spawn block readable; field-by-field call sites
+/// were arrow-pattern unreadable.
+pub struct PostCompletionWorkflowParams<'a> {
+    pub task_id: Uuid,
+    pub task_repo: Arc<dyn TaskRepository>,
+    pub goal_repo: Arc<dyn GoalRepository>,
+    pub worktree_repo: Arc<dyn WorktreeRepository>,
+    pub event_tx: &'a mpsc::Sender<SwarmEvent>,
+    pub event_bus: &'a Arc<EventBus>,
+    pub audit_log: &'a Arc<AuditLogService>,
+    pub verify_on_completion: bool,
+    pub use_merge_queue: bool,
+    pub prefer_pull_requests: bool,
+    pub repo_path: &'a std::path::Path,
+    pub default_base_ref: &'a str,
+    pub require_commits: bool,
+    pub intent_satisfied: bool,
+    pub output_delivery: OutputDelivery,
+    pub merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
+    pub fetch_on_sync: bool,
+    pub post_completion_chain:
+        Arc<tokio::sync::RwLock<super::middleware::PostCompletionChain>>,
+}
+
 pub async fn run_post_completion_workflow(
-    task_id: Uuid,
-    task_repo: Arc<dyn TaskRepository>,
-    goal_repo: Arc<dyn GoalRepository>,
-    worktree_repo: Arc<dyn WorktreeRepository>,
-    event_tx: &mpsc::Sender<SwarmEvent>,
-    event_bus: &Arc<EventBus>,
-    audit_log: &Arc<AuditLogService>,
-    verify_on_completion: bool,
-    use_merge_queue: bool,
-    prefer_pull_requests: bool,
-    repo_path: &std::path::Path,
-    default_base_ref: &str,
-    require_commits: bool,
-    intent_satisfied: bool,
-    output_delivery: OutputDelivery,
-    merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
-    fetch_on_sync: bool,
-    post_completion_chain: Arc<tokio::sync::RwLock<super::middleware::PostCompletionChain>>,
+    params: PostCompletionWorkflowParams<'_>,
 ) -> DomainResult<()> {
     use super::middleware::PostCompletionContext;
 
     let mut ctx = PostCompletionContext {
-        task_id,
-        task_repo,
-        goal_repo,
-        worktree_repo,
-        merge_request_repo,
-        audit_log: audit_log.clone(),
-        event_bus: event_bus.clone(),
-        event_tx: event_tx.clone(),
-        verify_on_completion,
-        use_merge_queue,
-        prefer_pull_requests,
-        require_commits,
-        intent_satisfied,
-        output_delivery,
-        repo_path: repo_path.to_path_buf(),
-        default_base_ref: default_base_ref.to_string(),
-        fetch_on_sync,
+        task_id: params.task_id,
+        task_repo: params.task_repo,
+        goal_repo: params.goal_repo,
+        worktree_repo: params.worktree_repo,
+        merge_request_repo: params.merge_request_repo,
+        audit_log: params.audit_log.clone(),
+        event_bus: params.event_bus.clone(),
+        event_tx: params.event_tx.clone(),
+        verify_on_completion: params.verify_on_completion,
+        use_merge_queue: params.use_merge_queue,
+        prefer_pull_requests: params.prefer_pull_requests,
+        require_commits: params.require_commits,
+        intent_satisfied: params.intent_satisfied,
+        output_delivery: params.output_delivery,
+        repo_path: params.repo_path.to_path_buf(),
+        default_base_ref: params.default_base_ref.to_string(),
+        fetch_on_sync: params.fetch_on_sync,
         verification_passed: false,
         tree_handled: false,
     };
 
-    let chain = post_completion_chain.read().await;
+    let chain = params.post_completion_chain.read().await;
     chain.run(&mut ctx).await
 }
 
+/// Inputs for [`merge_subtask_into_feature_branch`].
+pub(crate) struct MergeSubtaskParams<'a> {
+    pub task_id: Uuid,
+    pub task_repo: Arc<dyn TaskRepository>,
+    pub goal_repo: Arc<dyn GoalRepository>,
+    pub worktree_repo: Arc<dyn WorktreeRepository>,
+    pub event_tx: &'a mpsc::Sender<SwarmEvent>,
+    pub audit_log: &'a Arc<AuditLogService>,
+    pub repo_path: &'a std::path::Path,
+    pub default_base_ref: &'a str,
+    pub merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
+}
+
 /// Merge a subtask's branch into the root ancestor's feature branch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn merge_subtask_into_feature_branch(
-    task_id: Uuid,
-    task_repo: Arc<dyn TaskRepository>,
-    goal_repo: Arc<dyn GoalRepository>,
-    worktree_repo: Arc<dyn WorktreeRepository>,
-    event_tx: &mpsc::Sender<SwarmEvent>,
-    audit_log: &Arc<AuditLogService>,
-    repo_path: &std::path::Path,
-    default_base_ref: &str,
-    merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
+    params: MergeSubtaskParams<'_>,
 ) -> DomainResult<MergeBackOutcome> {
+    let MergeSubtaskParams {
+        task_id,
+        task_repo,
+        goal_repo,
+        worktree_repo,
+        event_tx,
+        audit_log,
+        repo_path,
+        default_base_ref,
+        merge_request_repo,
+    } = params;
     use tokio::process::Command;
 
     let subtask_wt = match worktree_repo.get_by_task(task_id).await? {
@@ -942,19 +964,32 @@ async fn ship_lock_for(repo_path: &Path) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+/// Inputs for [`try_auto_ship`].
+pub(crate) struct AutoShipParams<'a> {
+    pub triggering_task_id: Uuid,
+    pub task_repo: Arc<dyn TaskRepository>,
+    pub worktree_repo: Arc<dyn WorktreeRepository>,
+    pub event_tx: &'a mpsc::Sender<SwarmEvent>,
+    pub audit_log: &'a Arc<AuditLogService>,
+    pub repo_path: &'a std::path::Path,
+    pub default_base_ref: &'a str,
+    pub output_delivery: OutputDelivery,
+    pub fetch_on_sync: bool,
+}
+
 /// Check if all tasks in a tree are terminal and, if so, create a single PR.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn try_auto_ship(
-    triggering_task_id: Uuid,
-    task_repo: Arc<dyn TaskRepository>,
-    worktree_repo: Arc<dyn WorktreeRepository>,
-    event_tx: &mpsc::Sender<SwarmEvent>,
-    audit_log: &Arc<AuditLogService>,
-    repo_path: &std::path::Path,
-    default_base_ref: &str,
-    output_delivery: OutputDelivery,
-    fetch_on_sync: bool,
-) -> Option<String> {
+pub(crate) async fn try_auto_ship(params: AutoShipParams<'_>) -> Option<String> {
+    let AutoShipParams {
+        triggering_task_id,
+        task_repo,
+        worktree_repo,
+        event_tx,
+        audit_log,
+        repo_path,
+        default_base_ref,
+        output_delivery,
+        fetch_on_sync,
+    } = params;
     // Serialize auto-ship operations *per repo path*. The git checkout → merge --squash → commit
     // sequence operates on the shared repo working directory and must not run concurrently for
     // the same repo; but ships targeting different repos are independent and may run in parallel.

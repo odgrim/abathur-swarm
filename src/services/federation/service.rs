@@ -33,8 +33,8 @@ use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory;
 
 use super::config::FederationConfig;
-use super::delegation_manager::DelegationManager;
-use super::result_processor::ResultProcessor;
+use super::delegation_manager::{DelegationManager, DelegationManagerParams};
+use super::result_processor::{ResultProcessor, ResultProcessorParams};
 use super::traits::{
     DefaultDelegationStrategy, DefaultResultProcessor, DefaultTaskTransformer,
     DelegationDecision, FederationDelegationStrategy, FederationReaction,
@@ -410,30 +410,30 @@ impl FederationService {
             Arc::new(DefaultTaskTransformer);
         let a2a_client: Option<Arc<dyn A2AClient>> = None;
 
-        let delegation = Arc::new(DelegationManager::new(
-            config.clone(),
-            Arc::clone(&cerebrates),
-            Arc::clone(&in_flight),
-            Arc::clone(&delegated_envelopes),
-            Arc::clone(&rejection_history),
-            Arc::clone(&last_activity),
-            Arc::clone(&task_to_federated_goal),
-            Arc::clone(&event_bus),
-            http_client.clone(),
-            Arc::clone(&delegation_strategy),
-            Arc::clone(&task_transformer),
-            a2a_client.clone(),
-        ));
-        let results = Arc::new(ResultProcessor::new(
-            Arc::clone(&cerebrates),
-            Arc::clone(&in_flight),
-            Arc::clone(&delegated_envelopes),
-            Arc::clone(&rejection_history),
-            Arc::clone(&last_activity),
-            Arc::clone(&event_bus),
-            Arc::clone(&result_processor),
-            Arc::clone(&schemas),
-        ));
+        let delegation = Arc::new(DelegationManager::new(DelegationManagerParams {
+            config: config.clone(),
+            cerebrates: Arc::clone(&cerebrates),
+            in_flight: Arc::clone(&in_flight),
+            delegated_envelopes: Arc::clone(&delegated_envelopes),
+            rejection_history: Arc::clone(&rejection_history),
+            last_activity: Arc::clone(&last_activity),
+            task_to_federated_goal: Arc::clone(&task_to_federated_goal),
+            event_bus: Arc::clone(&event_bus),
+            http_client: http_client.clone(),
+            delegation_strategy: Arc::clone(&delegation_strategy),
+            task_transformer: Arc::clone(&task_transformer),
+            a2a_client: a2a_client.clone(),
+        }));
+        let results = Arc::new(ResultProcessor::new(ResultProcessorParams {
+            cerebrates: Arc::clone(&cerebrates),
+            in_flight: Arc::clone(&in_flight),
+            delegated_envelopes: Arc::clone(&delegated_envelopes),
+            rejection_history: Arc::clone(&rejection_history),
+            last_activity: Arc::clone(&last_activity),
+            event_bus: Arc::clone(&event_bus),
+            result_processor: Arc::clone(&result_processor),
+            schemas: Arc::clone(&schemas),
+        }));
 
         Self {
             config,
@@ -461,30 +461,30 @@ impl FederationService {
     /// `with_*` builder swaps out a strategy. Called only from the builder
     /// methods — the shared `Arc<RwLock<_>>` state handles survive.
     fn rebuild_collaborators(&mut self) {
-        self.delegation = Arc::new(DelegationManager::new(
-            self.config.clone(),
-            Arc::clone(&self.cerebrates),
-            Arc::clone(&self.in_flight),
-            Arc::clone(&self.delegated_envelopes),
-            Arc::clone(&self.rejection_history),
-            Arc::clone(&self.last_activity),
-            Arc::clone(&self.task_to_federated_goal),
-            Arc::clone(&self.event_bus),
-            self.http_client.clone(),
-            Arc::clone(&self.delegation_strategy),
-            Arc::clone(&self.task_transformer),
-            self.a2a_client.clone(),
-        ));
-        self.results = Arc::new(ResultProcessor::new(
-            Arc::clone(&self.cerebrates),
-            Arc::clone(&self.in_flight),
-            Arc::clone(&self.delegated_envelopes),
-            Arc::clone(&self.rejection_history),
-            Arc::clone(&self.last_activity),
-            Arc::clone(&self.event_bus),
-            Arc::clone(&self.result_processor),
-            Arc::clone(&self.schemas),
-        ));
+        self.delegation = Arc::new(DelegationManager::new(DelegationManagerParams {
+            config: self.config.clone(),
+            cerebrates: Arc::clone(&self.cerebrates),
+            in_flight: Arc::clone(&self.in_flight),
+            delegated_envelopes: Arc::clone(&self.delegated_envelopes),
+            rejection_history: Arc::clone(&self.rejection_history),
+            last_activity: Arc::clone(&self.last_activity),
+            task_to_federated_goal: Arc::clone(&self.task_to_federated_goal),
+            event_bus: Arc::clone(&self.event_bus),
+            http_client: self.http_client.clone(),
+            delegation_strategy: Arc::clone(&self.delegation_strategy),
+            task_transformer: Arc::clone(&self.task_transformer),
+            a2a_client: self.a2a_client.clone(),
+        }));
+        self.results = Arc::new(ResultProcessor::new(ResultProcessorParams {
+            cerebrates: Arc::clone(&self.cerebrates),
+            in_flight: Arc::clone(&self.in_flight),
+            delegated_envelopes: Arc::clone(&self.delegated_envelopes),
+            rejection_history: Arc::clone(&self.rejection_history),
+            last_activity: Arc::clone(&self.last_activity),
+            event_bus: Arc::clone(&self.event_bus),
+            result_processor: Arc::clone(&self.result_processor),
+            schemas: Arc::clone(&self.schemas),
+        }));
     }
 
     /// Set an A2A wire-protocol client for outbound federation calls.

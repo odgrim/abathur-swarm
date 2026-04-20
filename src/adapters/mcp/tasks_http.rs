@@ -288,7 +288,7 @@ async fn list_tasks<T: TaskRepository + Clone + Send + Sync + 'static>(
 
             // Filter by status if specified
             if let Some(status_str) = &params.status
-                && let Some(status) = TaskStatus::from_str(status_str)
+                && let Some(status) = TaskStatus::parse(status_str)
             {
                 tasks.retain(|t| t.status == status.as_str());
             }
@@ -332,7 +332,7 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static>(
     let priority = req
         .priority
         .as_ref()
-        .and_then(|p| TaskPriority::from_str(p))
+        .and_then(|p| TaskPriority::parse(p))
         .unwrap_or(TaskPriority::Normal);
 
     let cmd = DomainCommand::Task(TaskCommand::Submit {

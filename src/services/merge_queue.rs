@@ -36,8 +36,7 @@ impl MergeStage {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "AgentToTask" => Some(Self::AgentToTask),
             "TaskToMain" => Some(Self::TaskToMain),
@@ -75,8 +74,7 @@ impl MergeStatus {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Queued" => Some(Self::Queued),
             "InProgress" => Some(Self::InProgress),
@@ -1491,9 +1489,9 @@ mod tests {
     fn test_merge_stage_str_roundtrip() {
         for stage in [MergeStage::AgentToTask, MergeStage::TaskToMain] {
             let s = stage.as_str();
-            assert_eq!(MergeStage::from_str(s), Some(stage));
+            assert_eq!(MergeStage::parse(s), Some(stage));
         }
-        assert_eq!(MergeStage::from_str("invalid"), None);
+        assert_eq!(MergeStage::parse("invalid"), None);
     }
 
     #[test]
@@ -1507,9 +1505,9 @@ mod tests {
             MergeStatus::VerificationFailed,
         ] {
             let s = status.as_str();
-            assert_eq!(MergeStatus::from_str(s), Some(status));
+            assert_eq!(MergeStatus::parse(s), Some(status));
         }
-        assert_eq!(MergeStatus::from_str("invalid"), None);
+        assert_eq!(MergeStatus::parse("invalid"), None);
     }
 
     #[test]

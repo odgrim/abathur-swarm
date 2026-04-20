@@ -1035,8 +1035,8 @@ impl TriggerRuleEngine {
                 tier,
                 memory_type,
             } => {
-                let tier = MemoryTier::from_str(tier).unwrap_or(MemoryTier::Episodic);
-                let mtype = MemoryType::from_str(memory_type).unwrap_or(MemoryType::Fact);
+                let tier = MemoryTier::parse(tier).unwrap_or(MemoryTier::Episodic);
+                let mtype = MemoryType::parse(memory_type).unwrap_or(MemoryType::Fact);
                 DomainCommand::Memory(MemoryCommand::Store {
                     key: key.clone(),
                     content: content.clone(),
@@ -1057,7 +1057,7 @@ impl TriggerRuleEngine {
                 goal_id,
                 new_status,
             } => {
-                let status = GoalStatus::from_str(new_status).unwrap_or(GoalStatus::Paused);
+                let status = GoalStatus::parse(new_status).unwrap_or(GoalStatus::Paused);
                 DomainCommand::Goal(GoalCommand::TransitionStatus {
                     goal_id: *goal_id,
                     new_status: status,
@@ -1094,7 +1094,7 @@ impl TriggerRuleEngine {
                 priority,
                 agent_type,
             } => {
-                let priority = TaskPriority::from_str(priority).unwrap_or(TaskPriority::Normal);
+                let priority = TaskPriority::parse(priority).unwrap_or(TaskPriority::Normal);
                 DomainCommand::Task(TaskCommand::Submit {
                     title: Some(title.clone()),
                     description: description.clone(),

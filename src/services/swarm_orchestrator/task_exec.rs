@@ -55,7 +55,9 @@ use super::convergent_execution::{ConvergentIntentVerifier, ConvergentOutcome};
 use super::goal_processing::{
     can_safely_auto_complete, is_max_turns_auto_completable, replay_gate_rejection_event,
 };
-use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
+use super::helpers::{
+    PostCompletionWorkflowParams, auto_commit_worktree, run_post_completion_workflow,
+};
 use super::middleware::PostCompletionChain;
 use super::types::SwarmEvent;
 
@@ -461,26 +463,26 @@ pub async fn execute_task(params: TaskExecutionParams) {
                     }
 
                     if verify_on_completion || use_merge_queue || prefer_pull_requests {
-                        let _ = run_post_completion_workflow(
+                        let _ = run_post_completion_workflow(PostCompletionWorkflowParams {
                             task_id,
-                            post_task_repo.clone(),
-                            post_goal_repo.clone(),
-                            post_worktree_repo.clone(),
-                            &event_tx,
-                            &event_bus,
-                            &audit_log,
+                            task_repo: post_task_repo.clone(),
+                            goal_repo: post_goal_repo.clone(),
+                            worktree_repo: post_worktree_repo.clone(),
+                            event_tx: &event_tx,
+                            event_bus: &event_bus,
+                            audit_log: &audit_log,
                             verify_on_completion,
                             use_merge_queue,
                             prefer_pull_requests,
-                            &repo_path,
-                            &default_base_ref,
+                            repo_path: &repo_path,
+                            default_base_ref: &default_base_ref,
                             require_commits,
                             intent_satisfied,
-                            output_delivery.clone(),
-                            merge_request_repo.clone(),
+                            output_delivery: output_delivery.clone(),
+                            merge_request_repo: merge_request_repo.clone(),
                             fetch_on_sync,
-                            post_completion_chain.clone(),
-                        )
+                            post_completion_chain: post_completion_chain.clone(),
+                        })
                         .await;
                     }
 
@@ -984,27 +986,28 @@ pub async fn execute_task(params: TaskExecutionParams) {
                 }
 
                 if verify_on_completion || use_merge_queue || prefer_pull_requests {
-                    let workflow_result = run_post_completion_workflow(
-                        task_id,
-                        post_task_repo.clone(),
-                        post_goal_repo.clone(),
-                        post_worktree_repo.clone(),
-                        &event_tx,
-                        &event_bus,
-                        &audit_log,
-                        verify_on_completion,
-                        use_merge_queue,
-                        prefer_pull_requests,
-                        &repo_path,
-                        &default_base_ref,
-                        require_commits,
-                        false,
-                        output_delivery.clone(),
-                        merge_request_repo.clone(),
-                        fetch_on_sync,
-                        post_completion_chain.clone(),
-                    )
-                    .await;
+                    let workflow_result =
+                        run_post_completion_workflow(PostCompletionWorkflowParams {
+                            task_id,
+                            task_repo: post_task_repo.clone(),
+                            goal_repo: post_goal_repo.clone(),
+                            worktree_repo: post_worktree_repo.clone(),
+                            event_tx: &event_tx,
+                            event_bus: &event_bus,
+                            audit_log: &audit_log,
+                            verify_on_completion,
+                            use_merge_queue,
+                            prefer_pull_requests,
+                            repo_path: &repo_path,
+                            default_base_ref: &default_base_ref,
+                            require_commits,
+                            intent_satisfied: false,
+                            output_delivery: output_delivery.clone(),
+                            merge_request_repo: merge_request_repo.clone(),
+                            fetch_on_sync,
+                            post_completion_chain: post_completion_chain.clone(),
+                        })
+                        .await;
 
                     if let Err(e) = workflow_result {
                         audit_log
@@ -1601,26 +1604,26 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
 
         let task_id = uuid::Uuid::new_v4();
-        let _ = run_post_completion_workflow(
+        let _ = run_post_completion_workflow(PostCompletionWorkflowParams {
             task_id,
-            task_repo_dyn,
-            goal_repo_dyn,
-            worktree_repo_dyn,
-            &event_tx,
-            &event_bus,
-            &audit_log,
-            true, // verify_on_completion
-            false,
-            false,
-            std::path::Path::new("."),
-            "main",
-            false,
-            false,
-            OutputDelivery::PullRequest,
-            None,
-            false,
-            chain_arc.clone(),
-        )
+            task_repo: task_repo_dyn,
+            goal_repo: goal_repo_dyn,
+            worktree_repo: worktree_repo_dyn,
+            event_tx: &event_tx,
+            event_bus: &event_bus,
+            audit_log: &audit_log,
+            verify_on_completion: true,
+            use_merge_queue: false,
+            prefer_pull_requests: false,
+            repo_path: std::path::Path::new("."),
+            default_base_ref: "main",
+            require_commits: false,
+            intent_satisfied: false,
+            output_delivery: OutputDelivery::PullRequest,
+            merge_request_repo: None,
+            fetch_on_sync: false,
+            post_completion_chain: chain_arc.clone(),
+        })
         .await;
 
         assert!(

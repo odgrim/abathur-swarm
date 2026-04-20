@@ -81,8 +81,7 @@ impl MemoryTier {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "working" => Some(Self::Working),
             "episodic" => Some(Self::Episodic),
@@ -140,8 +139,7 @@ impl MemoryType {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "fact" => Some(Self::Fact),
             "code" => Some(Self::Code),

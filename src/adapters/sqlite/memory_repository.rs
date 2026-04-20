@@ -347,7 +347,7 @@ impl MemoryRepository for SqliteMemoryRepository {
 
         let mut counts = HashMap::new();
         for (tier_str, count) in rows {
-            if let Some(tier) = MemoryTier::from_str(&tier_str) {
+            if let Some(tier) = MemoryTier::parse(&tier_str) {
                 counts.insert(tier, count as u64);
             }
         }
@@ -409,10 +409,10 @@ impl TryFrom<MemoryRow> for Memory {
         let tier = row
             .tier
             .as_deref()
-            .and_then(MemoryTier::from_str)
+            .and_then(MemoryTier::parse)
             .unwrap_or(MemoryTier::Working);
 
-        let memory_type = MemoryType::from_str(&row.memory_type).unwrap_or(MemoryType::Fact);
+        let memory_type = MemoryType::parse(&row.memory_type).unwrap_or(MemoryType::Fact);
 
         let metadata: MemoryMetadata = super::parse_json_or_default(row.metadata)?;
 

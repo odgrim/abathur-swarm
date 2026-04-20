@@ -281,7 +281,7 @@ async fn list_memories<M: MemoryRepository + Clone + Send + Sync + 'static>(
         query = query.namespace(ns);
     }
     if let Some(t) = &params.tier
-        && let Some(tier) = MemoryTier::from_str(t)
+        && let Some(tier) = MemoryTier::parse(t)
     {
         query = query.tier(tier);
     }
@@ -322,12 +322,12 @@ async fn store_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     let tier = req
         .tier
         .as_ref()
-        .and_then(|t| MemoryTier::from_str(t))
+        .and_then(|t| MemoryTier::parse(t))
         .unwrap_or(MemoryTier::Working);
     let memory_type = req
         .memory_type
         .as_ref()
-        .and_then(|t| MemoryType::from_str(t))
+        .and_then(|t| MemoryType::parse(t))
         .unwrap_or(MemoryType::Fact);
 
     let cmd = DomainCommand::Memory(MemoryCommand::Store {

@@ -1110,14 +1110,16 @@ async fn run_engine_ports(
     engine.trajectory_store.save(&trajectory).await.unwrap();
     engine
         .run_with_ports(
-            submission,
-            task_id,
-            Some(trajectory_id),
-            Arc::new(NullStrategyExecutor),
-            Some(Arc::new(NullStrategyEffects)),
-            Arc::new(NullConvergenceAdvisor),
-            None,
-            None,
+            crate::services::convergence_engine::ConvergenceRunWithPortsParams {
+                submission,
+                task_id,
+                resume: Some(trajectory_id),
+                executor: Arc::new(NullStrategyExecutor),
+                effects: Some(Arc::new(NullStrategyEffects)),
+                advisor: Arc::new(NullConvergenceAdvisor),
+                prompt_builder: None,
+                event_sink: None,
+            },
         )
         .await
         .unwrap()

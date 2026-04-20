@@ -184,7 +184,7 @@ impl GoalRepository for SqliteGoalRepository {
 
         let mut counts = HashMap::new();
         for (status_str, count) in rows {
-            if let Some(status) = GoalStatus::from_str(&status_str) {
+            if let Some(status) = GoalStatus::parse(&status_str) {
                 counts.insert(status, count as u64);
             }
         }
@@ -229,11 +229,11 @@ impl TryFrom<GoalRow> for Goal {
         let id = super::parse_uuid(&row.id)?;
         let parent_id = super::parse_optional_uuid(row.parent_id)?;
 
-        let status = GoalStatus::from_str(&row.status).ok_or_else(|| {
+        let status = GoalStatus::parse(&row.status).ok_or_else(|| {
             DomainError::SerializationError(format!("Invalid status: {}", row.status))
         })?;
 
-        let priority = GoalPriority::from_str(&row.priority).ok_or_else(|| {
+        let priority = GoalPriority::parse(&row.priority).ok_or_else(|| {
             DomainError::SerializationError(format!("Invalid priority: {}", row.priority))
         })?;
 

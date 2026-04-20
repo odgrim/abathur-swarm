@@ -740,6 +740,13 @@ impl PromptBuilder for OrchestratorPromptBuilder {
 ///   when cancelled, the trajectory is persisted and `Cancelled` is returned.
 /// * `deadline` - Optional SLA deadline; caps the trajectory budget's
 ///   `max_wall_time` so convergent tasks never breach the SLA.
+// reason: this is the orchestrator's per-task convergent entrypoint and is
+// generic over four trait-bound type parameters (T, Tr, M, O). Bundling the
+// args into a struct would either erase those generics behind dyn (losing
+// substrate/repo specialisation) or require a `Params<T, Tr, M, O>` struct
+// that doesn't read more cleanly than the current named-arg call sites in
+// task_exec.rs. Three callers in task_exec.rs already use trailing-comma
+// formatting; further indirection harms grep-ability.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_convergent_execution<T, Tr, M, O>(
     task: &Task,
@@ -883,6 +890,12 @@ where
 /// * `parallel_samples` - Number of parallel trajectories to spawn in Phase 1.
 /// * `base_branch` - The git branch to create worktrees from.
 /// * `worktree_base_dir` - Base directory under which parallel worktrees are created.
+// reason: parallel-execution sibling of `run_convergent_execution`; same
+// 4-generic shape (T, Tr, M, O). Adding extra parallel-only knobs
+// (parallel_samples, base_branch, worktree_base_dir) on top of the shared
+// args inflates the count further; a single bundled struct would either
+// duplicate the convergent fields or require a layered struct that hurts
+// the call site rather than helps.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub async fn run_parallel_convergent_execution<T, Tr, M, O>(
     task: &Task,
@@ -1233,6 +1246,12 @@ where
 ///
 /// This function takes an already-prepared trajectory and bandit and runs the
 /// convergence loop until a terminal condition is reached.
+// reason: private helper called only from `run_convergent_execution` and
+// `run_parallel_convergent_execution` (both above) with the same 4-generic
+// shape; the args are forwarded one-for-one from the public entrypoint.
+// Introducing a struct here would force the public API above to either
+// adopt the same struct (covered separately) or unpack/re-pack at the
+// boundary, so the suppression rides on the public entrypoints' rationale.
 #[allow(clippy::too_many_arguments)]
 async fn run_convergent_execution_inner<T2, Tr, M, O>(
     task: &Task,
@@ -1334,16 +1353,16 @@ where
     // per-call arguments. PR 4b adds that indirection below.
     let submission = convergence_bridge::task_to_submission(task, goal_id);
     let outcome = engine
-        .run_with_ports(
+        .run_with_ports(crate::services::convergence_engine::ConvergenceRunWithPortsParams {
             submission,
-            task.id,
-            Some(resume_id),
+            task_id: task.id,
+            resume: Some(resume_id),
             executor,
-            Some(effects as Arc<dyn StrategyEffects>),
+            effects: Some(effects as Arc<dyn StrategyEffects>),
             advisor,
-            Some(prompt_builder as Arc<dyn PromptBuilder>),
-            Some(event_sink as Arc<dyn ConvergenceEventSink>),
-        )
+            prompt_builder: Some(prompt_builder as Arc<dyn PromptBuilder>),
+            event_sink: Some(event_sink as Arc<dyn ConvergenceEventSink>),
+        })
         .await?;
 
     // Translate the engine outcome to the orchestrator's ConvergentOutcome,

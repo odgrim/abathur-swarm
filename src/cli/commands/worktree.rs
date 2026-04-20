@@ -283,7 +283,7 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
             let worktrees = if active {
                 service.list_active().await?
             } else if let Some(status_str) = status {
-                let status = WorktreeStatus::from_str(&status_str)
+                let status = WorktreeStatus::parse(&status_str)
                     .ok_or_else(|| anyhow::anyhow!("Invalid status: {}", status_str))?;
                 service.list_by_status(status).await?
             } else {

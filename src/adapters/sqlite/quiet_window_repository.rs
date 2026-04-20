@@ -41,7 +41,7 @@ impl QuietWindowRow {
             start_cron: self.start_cron,
             end_cron: self.end_cron,
             timezone: self.timezone,
-            status: QuietWindowStatus::from_str(&self.status).unwrap_or(QuietWindowStatus::Enabled),
+            status: QuietWindowStatus::parse(&self.status).unwrap_or(QuietWindowStatus::Enabled),
             created_at: parse_datetime(&self.created_at)?,
             updated_at: parse_datetime(&self.updated_at)?,
         })

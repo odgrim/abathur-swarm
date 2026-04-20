@@ -345,8 +345,8 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
                 anyhow::bail!("Must specify one of: --cron, --interval, or --at");
             };
 
-            let priority = TaskPriority::from_str(&priority).unwrap_or(TaskPriority::Normal);
-            let overlap_policy = OverlapPolicy::from_str(&overlap).unwrap_or(OverlapPolicy::Skip);
+            let priority = TaskPriority::parse(&priority).unwrap_or(TaskPriority::Normal);
+            let overlap_policy = OverlapPolicy::parse(&overlap).unwrap_or(OverlapPolicy::Skip);
 
             let mut schedule = TaskSchedule::new(
                 name,
@@ -375,7 +375,7 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
 
         ScheduleCommands::List { status } => {
             let filter = TaskScheduleFilter {
-                status: status.and_then(|s| TaskScheduleStatus::from_str(&s)),
+                status: status.and_then(|s| TaskScheduleStatus::parse(&s)),
             };
             let schedules = service.list_schedules(filter).await?;
 
@@ -448,7 +448,7 @@ pub async fn execute(args: ScheduleArgs, json_mode: bool) -> Result<()> {
                 schedule.task_description = desc;
             }
             if let Some(p) = priority {
-                schedule.task_priority = TaskPriority::from_str(&p).unwrap_or(TaskPriority::Normal);
+                schedule.task_priority = TaskPriority::parse(&p).unwrap_or(TaskPriority::Normal);
             }
             if let Some(agent) = agent_type {
                 schedule.task_agent_type = Some(agent);

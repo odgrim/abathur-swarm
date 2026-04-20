@@ -318,9 +318,9 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
             tier,
             memory_type,
         } => {
-            let tier = MemoryTier::from_str(&tier)
+            let tier = MemoryTier::parse(&tier)
                 .ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", tier))?;
-            let mtype = MemoryType::from_str(&memory_type)
+            let mtype = MemoryType::parse(&memory_type)
                 .ok_or_else(|| anyhow::anyhow!("Invalid memory type: {}", memory_type))?;
 
             let cmd = DomainCommand::Memory(MemoryCommand::Store {
@@ -423,8 +423,8 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
         } => {
             let query = MemoryQuery {
                 namespace,
-                tier: tier.as_ref().and_then(|t| MemoryTier::from_str(t)),
-                memory_type: memory_type.as_ref().and_then(|t| MemoryType::from_str(t)),
+                tier: tier.as_ref().and_then(|t| MemoryTier::parse(t)),
+                memory_type: memory_type.as_ref().and_then(|t| MemoryType::parse(t)),
                 limit: Some(limit),
                 ..Default::default()
             };
@@ -447,7 +447,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
             let uuid = resolve_memory_id(&pool, &id).await?;
             let tier = tier
                 .map(|t| {
-                    MemoryTier::from_str(&t).ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", t))
+                    MemoryTier::parse(&t).ok_or_else(|| anyhow::anyhow!("Invalid tier: {}", t))
                 })
                 .transpose()?;
 

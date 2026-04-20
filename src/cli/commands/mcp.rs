@@ -253,13 +253,17 @@ pub async fn execute(args: McpArgs, json_mode: bool) -> Result<()> {
             max_stream_secs,
         } => {
             start_a2a_http(
-                host,
-                port,
-                !no_cors,
-                !no_streaming,
-                !no_push,
-                heartbeat_ms,
-                max_stream_secs,
+                A2AHttpConfig {
+                    host,
+                    port,
+                    enable_cors: !no_cors,
+                    enable_streaming: !no_streaming,
+                    enable_push_notifications: !no_push,
+                    heartbeat_interval_ms: heartbeat_ms,
+                    max_stream_duration_s: max_stream_secs,
+                    federation_tls: None,
+                    federation_jwt_secret: None,
+                },
                 json_mode,
             )
             .await
@@ -414,28 +418,12 @@ async fn start_agents_http(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn start_a2a_http(
-    host: String,
-    port: u16,
-    enable_cors: bool,
-    enable_streaming: bool,
-    enable_push: bool,
-    heartbeat_ms: u64,
-    max_stream_secs: u64,
-    json_mode: bool,
-) -> Result<()> {
-    let config = A2AHttpConfig {
-        host: host.clone(),
-        port,
-        enable_cors,
-        enable_streaming,
-        enable_push_notifications: enable_push,
-        heartbeat_interval_ms: heartbeat_ms,
-        max_stream_duration_s: max_stream_secs,
-        federation_tls: None,
-        federation_jwt_secret: None,
-    };
+async fn start_a2a_http(config: A2AHttpConfig, json_mode: bool) -> Result<()> {
+    let host = config.host.clone();
+    let port = config.port;
+    let enable_cors = config.enable_cors;
+    let enable_streaming = config.enable_streaming;
+    let enable_push = config.enable_push_notifications;
 
     if json_mode {
         let output = serde_json::json!({

@@ -28,8 +28,7 @@ impl SubstrateType {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "claude_code" | "claudecode" => Some(Self::ClaudeCode),
             "anthropic_api" | "anthropicapi" | "api" => Some(Self::AnthropicApi),

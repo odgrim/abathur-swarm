@@ -43,8 +43,7 @@ impl GoalStatus {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "active" => Some(Self::Active),
             "paused" => Some(Self::Paused),
@@ -107,8 +106,7 @@ impl GoalPriority {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "low" => Some(Self::Low),
             "normal" => Some(Self::Normal),
@@ -374,9 +372,9 @@ mod tests {
         assert!(GoalStatus::Retired.is_terminal());
 
         // Unknown statuses return None
-        assert!(GoalStatus::from_str("completed").is_none());
-        assert!(GoalStatus::from_str("suspended").is_none());
-        assert!(GoalStatus::from_str("failed").is_none());
+        assert!(GoalStatus::parse("completed").is_none());
+        assert!(GoalStatus::parse("suspended").is_none());
+        assert!(GoalStatus::parse("failed").is_none());
     }
 
     #[test]

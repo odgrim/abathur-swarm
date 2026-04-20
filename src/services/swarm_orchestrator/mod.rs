@@ -127,6 +127,12 @@ where
     A: AgentRepository + 'static,
     M: MemoryRepository + 'static,
 {
+    // reason: this is the orchestrator's primary constructor; bundling these
+    // 9 Arcs into a struct would not improve clarity at any of the production
+    // call sites in cli/commands/swarm.rs, which already pass each repo by
+    // name. The constructor is generic over four trait-bound type parameters
+    // so a single Params<G, T, W, A, M> struct would propagate all those
+    // bounds through any helper that wanted to forward construction.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         goal_repo: Arc<G>,

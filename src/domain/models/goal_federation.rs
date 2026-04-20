@@ -73,8 +73,7 @@ impl FederatedGoalState {
     }
 
     /// Parse from a string (case-insensitive).
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "pending" => Some(Self::Pending),
             "delegated" => Some(Self::Delegated),
@@ -502,13 +501,13 @@ mod tests {
     #[test]
     fn test_federated_goal_state_from_str() {
         assert_eq!(
-            FederatedGoalState::from_str("pending"),
+            FederatedGoalState::parse("pending"),
             Some(FederatedGoalState::Pending)
         );
         assert_eq!(
-            FederatedGoalState::from_str("ACTIVE"),
+            FederatedGoalState::parse("ACTIVE"),
             Some(FederatedGoalState::Active)
         );
-        assert_eq!(FederatedGoalState::from_str("invalid"), None);
+        assert_eq!(FederatedGoalState::parse("invalid"), None);
     }
 }

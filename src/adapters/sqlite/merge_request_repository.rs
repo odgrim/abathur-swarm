@@ -24,10 +24,10 @@ impl SqliteMergeRequestRepository {
     fn row_to_merge_request(&self, row: &MergeRequestRow) -> DomainResult<MergeRequest> {
         let id = parse_uuid(&row.id)?;
         let task_id = parse_uuid(&row.task_id)?;
-        let stage = MergeStage::from_str(&row.stage).ok_or_else(|| {
+        let stage = MergeStage::parse(&row.stage).ok_or_else(|| {
             DomainError::SerializationError(format!("Invalid merge stage: {}", row.stage))
         })?;
-        let status = MergeStatus::from_str(&row.status).ok_or_else(|| {
+        let status = MergeStatus::parse(&row.status).ok_or_else(|| {
             DomainError::SerializationError(format!("Invalid merge status: {}", row.status))
         })?;
         let created_at = parse_datetime(&row.created_at)?;

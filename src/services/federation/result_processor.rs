@@ -44,27 +44,29 @@ pub(super) struct ResultProcessor {
     schemas: Arc<RwLock<HashMap<String, Arc<dyn ResultSchema>>>>,
 }
 
+/// Inputs for [`ResultProcessor::new`].
+pub(super) struct ResultProcessorParams {
+    pub cerebrates: Arc<RwLock<HashMap<String, CerebrateStatus>>>,
+    pub in_flight: Arc<RwLock<HashMap<Uuid, String>>>,
+    pub delegated_envelopes: Arc<RwLock<HashMap<Uuid, FederationTaskEnvelope>>>,
+    pub rejection_history: Arc<RwLock<HashMap<Uuid, Vec<String>>>>,
+    pub last_activity: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
+    pub event_bus: Arc<EventBus>,
+    pub result_processor: Arc<dyn FederationResultProcessorTrait>,
+    pub schemas: Arc<RwLock<HashMap<String, Arc<dyn ResultSchema>>>>,
+}
+
 impl ResultProcessor {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        cerebrates: Arc<RwLock<HashMap<String, CerebrateStatus>>>,
-        in_flight: Arc<RwLock<HashMap<Uuid, String>>>,
-        delegated_envelopes: Arc<RwLock<HashMap<Uuid, FederationTaskEnvelope>>>,
-        rejection_history: Arc<RwLock<HashMap<Uuid, Vec<String>>>>,
-        last_activity: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
-        event_bus: Arc<EventBus>,
-        result_processor: Arc<dyn FederationResultProcessorTrait>,
-        schemas: Arc<RwLock<HashMap<String, Arc<dyn ResultSchema>>>>,
-    ) -> Self {
+    pub(super) fn new(params: ResultProcessorParams) -> Self {
         Self {
-            cerebrates,
-            in_flight,
-            delegated_envelopes,
-            rejection_history,
-            last_activity,
-            event_bus,
-            result_processor,
-            schemas,
+            cerebrates: params.cerebrates,
+            in_flight: params.in_flight,
+            delegated_envelopes: params.delegated_envelopes,
+            rejection_history: params.rejection_history,
+            last_activity: params.last_activity,
+            event_bus: params.event_bus,
+            result_processor: params.result_processor,
+            schemas: params.schemas,
         }
     }
 

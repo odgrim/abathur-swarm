@@ -356,7 +356,7 @@ where
         let priority = args
             .get("priority")
             .and_then(|p| p.as_str())
-            .and_then(TaskPriority::from_str)
+            .and_then(TaskPriority::parse)
             .unwrap_or(TaskPriority::Normal);
 
         let depends_on: Vec<Uuid> = args
@@ -426,7 +426,7 @@ where
         let task_type = args
             .get("task_type")
             .and_then(|t| t.as_str())
-            .and_then(TaskType::from_str);
+            .and_then(TaskType::parse);
 
         let execution_mode = args
             .get("execution_mode")
@@ -480,13 +480,13 @@ where
         let tasks = if has_any_filter {
             let status = match status_filter {
                 Some(s) => {
-                    Some(TaskStatus::from_str(s).ok_or_else(|| format!("Invalid status: {}", s))?)
+                    Some(TaskStatus::parse(s).ok_or_else(|| format!("Invalid status: {}", s))?)
                 }
                 None => None,
             };
             let task_type = match task_type_filter {
                 Some(t) => {
-                    Some(TaskType::from_str(t).ok_or_else(|| format!("Invalid task_type: {}", t))?)
+                    Some(TaskType::parse(t).ok_or_else(|| format!("Invalid task_type: {}", t))?)
                 }
                 None => None,
             };
@@ -865,12 +865,12 @@ where
         let memory_type = args
             .get("memory_type")
             .and_then(|t| t.as_str())
-            .and_then(MemoryType::from_str)
+            .and_then(MemoryType::parse)
             .unwrap_or(MemoryType::Fact);
         let tier = args
             .get("tier")
             .and_then(|t| t.as_str())
-            .and_then(MemoryTier::from_str)
+            .and_then(MemoryTier::parse)
             .unwrap_or(MemoryTier::Working);
 
         let cmd = DomainCommand::Memory(MemoryCommand::Store {

@@ -31,6 +31,12 @@ impl<R: AgentRepository> AgentService<R> {
     }
 
     /// Register a new agent template.
+    // reason: AgentService::register_template has 6+ call sites across the
+    // CLI, MCP HTTP server, and integration tests, each constructing the
+    // args inline from request payloads. A parameter struct would not improve
+    // those call sites — they would still need to populate every field, and
+    // the struct adds an extra named-symbol layer between the request DTO
+    // and this domain service.
     #[allow(clippy::too_many_arguments)]
     pub async fn register_template(
         &self,

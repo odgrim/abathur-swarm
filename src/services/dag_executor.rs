@@ -604,7 +604,7 @@ where
             // Per-task worker: one spawn per DAG task, joined via handles below.
             let handle = tokio::spawn(async move {
                 let _permit = permit;
-                execute_single_task(
+                execute_single_task(ExecuteSingleTaskParams {
                     task_id,
                     goal_id,
                     task_repo,
@@ -615,9 +615,9 @@ where
                     total_tokens,
                     guardrails,
                     circuit_breaker,
-                    goals_for_task,
-                    event_bus_clone,
-                )
+                    active_goals: goals_for_task,
+                    event_bus: event_bus_clone,
+                })
                 .await
             });
 
@@ -812,9 +812,12 @@ async fn build_upstream_artifacts_context<T: TaskRepository>(
     context
 }
 
-/// Execute a single task with retry logic and timeout.
-#[allow(clippy::too_many_arguments)]
-async fn execute_single_task<T, A>(
+/// Inputs for [`execute_single_task`].
+struct ExecuteSingleTaskParams<T, A>
+where
+    T: TaskRepository + 'static,
+    A: AgentRepository + 'static,
+{
     task_id: Uuid,
     goal_id: Option<Uuid>,
     task_repo: Arc<T>,
@@ -827,11 +830,28 @@ async fn execute_single_task<T, A>(
     circuit_breaker: Option<Arc<CircuitBreakerService>>,
     active_goals: Vec<Goal>,
     event_bus: Option<Arc<EventBus>>,
-) -> TaskResult
+}
+
+/// Execute a single task with retry logic and timeout.
+async fn execute_single_task<T, A>(params: ExecuteSingleTaskParams<T, A>) -> TaskResult
 where
     T: TaskRepository + 'static,
     A: AgentRepository + 'static,
 {
+    let ExecuteSingleTaskParams {
+        task_id,
+        goal_id,
+        task_repo,
+        agent_repo,
+        substrate,
+        config,
+        event_tx,
+        total_tokens,
+        guardrails,
+        circuit_breaker,
+        active_goals,
+        event_bus,
+    } = params;
     let start = std::time::Instant::now();
 
     // Check guardrails before starting

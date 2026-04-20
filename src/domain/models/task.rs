@@ -130,8 +130,7 @@ impl TaskStatus {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "pending" => Some(Self::Pending),
             "ready" => Some(Self::Ready),
@@ -240,8 +239,7 @@ impl TaskType {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "standard" => Some(Self::Standard),
             "verification" => Some(Self::Verification),
@@ -288,8 +286,7 @@ impl TaskPriority {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "low" => Some(Self::Low),
             "normal" => Some(Self::Normal),

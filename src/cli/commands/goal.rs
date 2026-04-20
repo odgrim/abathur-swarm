@@ -277,7 +277,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
             parent,
             constraint,
         } => {
-            let priority = GoalPriority::from_str(&priority)
+            let priority = GoalPriority::parse(&priority)
                 .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
 
             let parent_id = match parent {
@@ -330,8 +330,8 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
             tree: _,
         } => {
             let filter = GoalFilter {
-                status: status.as_ref().and_then(|s| GoalStatus::from_str(s)),
-                priority: priority.as_ref().and_then(|p| GoalPriority::from_str(p)),
+                status: status.as_ref().and_then(|s| GoalStatus::parse(s)),
+                priority: priority.as_ref().and_then(|p| GoalPriority::parse(p)),
                 parent_id: None,
             };
 
@@ -378,7 +378,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
             let uuid = resolve_goal_id(&pool, &id).await?;
             let priority = priority
                 .map(|p| {
-                    GoalPriority::from_str(&p)
+                    GoalPriority::parse(&p)
                         .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", p))
                 })
                 .transpose()?;

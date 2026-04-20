@@ -39,6 +39,30 @@ use super::ports::{
 };
 use super::{ConvergenceEngine, OverseerMeasurer};
 
+/// Inputs for [`ConvergenceEngine::run_with_ports`].
+pub struct ConvergenceRunWithPortsParams {
+    pub submission: TaskSubmission,
+    pub task_id: Uuid,
+    pub resume: Option<Uuid>,
+    pub executor: Arc<dyn StrategyExecutor>,
+    pub effects: Option<Arc<dyn super::ports::StrategyEffects>>,
+    pub advisor: Arc<dyn ConvergenceAdvisor>,
+    pub prompt_builder: Option<Arc<dyn PromptBuilder>>,
+    pub event_sink: Option<Arc<dyn super::ports::ConvergenceEventSink>>,
+}
+
+/// Internal inputs for `run_inner` (shared by `run` and `run_with_ports`).
+struct RunInnerParams {
+    submission: TaskSubmission,
+    task_id: Uuid,
+    resume: Option<Uuid>,
+    executor: Arc<dyn StrategyExecutor>,
+    effects: Option<Arc<dyn super::ports::StrategyEffects>>,
+    advisor: Arc<dyn ConvergenceAdvisor>,
+    prompt_builder: Option<Arc<dyn PromptBuilder>>,
+    event_sink_override: Option<Arc<dyn super::ports::ConvergenceEventSink>>,
+}
+
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> ConvergenceEngine<T, M, O> {
     /// Per-call variant of [`Self::run`] that takes the ports as arguments
     /// instead of reading them from the engine's installed builder fields.
@@ -50,19 +74,11 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
     /// `effects`, `prompt_builder`, and `event_sink` are optional; when
     /// `event_sink` is `None`, the engine's existing sink (default
     /// `TracingEventSink`) is used.
-    #[allow(clippy::too_many_arguments)]
     pub async fn run_with_ports(
         &self,
-        submission: TaskSubmission,
-        task_id: Uuid,
-        resume: Option<Uuid>,
-        executor: Arc<dyn StrategyExecutor>,
-        effects: Option<Arc<dyn super::ports::StrategyEffects>>,
-        advisor: Arc<dyn ConvergenceAdvisor>,
-        prompt_builder: Option<Arc<dyn PromptBuilder>>,
-        event_sink: Option<Arc<dyn super::ports::ConvergenceEventSink>>,
+        params: ConvergenceRunWithPortsParams,
     ) -> DomainResult<ConvergenceRunOutcome> {
-        self.run_inner(
+        let ConvergenceRunWithPortsParams {
             submission,
             task_id,
             resume,
@@ -71,7 +87,17 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
             advisor,
             prompt_builder,
             event_sink,
-        )
+        } = params;
+        self.run_inner(RunInnerParams {
+            submission,
+            task_id,
+            resume,
+            executor,
+            effects,
+            advisor,
+            prompt_builder,
+            event_sink_override: event_sink,
+        })
         .await
     }
 
@@ -112,7 +138,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
         let effects = self.effects.clone();
         let prompt_builder: Option<Arc<dyn PromptBuilder>> = self.prompt_builder.clone();
         let result = self
-            .run_inner(
+            .run_inner(RunInnerParams {
                 submission,
                 task_id,
                 resume,
@@ -120,8 +146,8 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
                 effects,
                 advisor,
                 prompt_builder,
-                None,
-            )
+                event_sink_override: None,
+            })
             .await;
 
         // Metrics: convergence outcome (bounded outcome labels; no trajectory
@@ -148,18 +174,20 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer> Converge
     }
 
     /// Shared implementation used by [`Self::run`] and [`Self::run_with_ports`].
-    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
-        submission: TaskSubmission,
-        task_id: Uuid,
-        resume: Option<Uuid>,
-        executor: Arc<dyn StrategyExecutor>,
-        effects: Option<Arc<dyn super::ports::StrategyEffects>>,
-        advisor: Arc<dyn ConvergenceAdvisor>,
-        prompt_builder: Option<Arc<dyn PromptBuilder>>,
-        event_sink_override: Option<Arc<dyn super::ports::ConvergenceEventSink>>,
+        params: RunInnerParams,
     ) -> DomainResult<ConvergenceRunOutcome> {
+        let RunInnerParams {
+            submission,
+            task_id,
+            resume,
+            executor,
+            effects,
+            advisor,
+            prompt_builder,
+            event_sink_override,
+        } = params;
         // When a per-call sink is supplied, route events through it; otherwise
         // use the engine's installed sink (default TracingEventSink).
         let event_sink: Arc<dyn super::ports::ConvergenceEventSink> =

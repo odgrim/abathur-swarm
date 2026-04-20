@@ -72,7 +72,7 @@ impl Default for SubstrateRegistry {
 
 impl SubstrateFactory for SubstrateRegistry {
     fn create(&self, substrate_type: &str) -> Option<Box<dyn Substrate>> {
-        SubstrateType::from_str(substrate_type).map(|t| self.create_by_type(t))
+        SubstrateType::parse(substrate_type).map(|t| self.create_by_type(t))
     }
 
     fn available_types(&self) -> Vec<&'static str> {

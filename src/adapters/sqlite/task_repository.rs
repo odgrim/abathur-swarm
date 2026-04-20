@@ -391,7 +391,7 @@ impl TaskRepository for SqliteTaskRepository {
 
         let mut counts = HashMap::new();
         for (status_str, count) in rows {
-            if let Some(status) = TaskStatus::from_str(&status_str) {
+            if let Some(status) = TaskStatus::parse(&status_str) {
                 counts.insert(status, count as u64);
             }
         }
@@ -563,11 +563,11 @@ impl TryFrom<TaskRow> for Task {
         let id = super::parse_uuid(&row.id)?;
         let parent_id = super::parse_optional_uuid(row.parent_id)?;
 
-        let status = TaskStatus::from_str(&row.status).ok_or_else(|| {
+        let status = TaskStatus::parse(&row.status).ok_or_else(|| {
             DomainError::SerializationError(format!("Invalid status: {}", row.status))
         })?;
 
-        let priority = TaskPriority::from_str(&row.priority).ok_or_else(|| {
+        let priority = TaskPriority::parse(&row.priority).ok_or_else(|| {
             DomainError::SerializationError(format!("Invalid priority: {}", row.priority))
         })?;
 
@@ -594,7 +594,7 @@ impl TryFrom<TaskRow> for Task {
         let task_type = row
             .task_type
             .as_deref()
-            .and_then(TaskType::from_str)
+            .and_then(TaskType::parse)
             .unwrap_or_default();
 
         Ok(Task {

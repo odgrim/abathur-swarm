@@ -24,6 +24,7 @@ pub mod ports;
 mod prepare;
 mod resolve;
 mod run;
+pub use run::ConvergenceRunWithPortsParams;
 
 pub use ports::{
     AdvisorDirective, ConvergenceAdvisor, ConvergenceDomainEvent, ConvergenceEventSink,
