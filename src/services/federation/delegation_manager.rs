@@ -640,9 +640,6 @@ impl DelegationManager {
     /// locally are re-tracked.
     pub(super) async fn reconcile_on_reconnect(&self, cerebrate_id: &str) {
         let local_tasks = self.in_flight_for_cerebrate(cerebrate_id).await;
-        if local_tasks.is_empty() {
-            return;
-        }
 
         tracing::info!(
             cerebrate_id = %cerebrate_id,
@@ -729,6 +726,27 @@ impl DelegationManager {
                                 },
                             ))
                             .await;
+                    }
+
+                    // Re-sync the `active_delegations` counter on the
+                    // cerebrate's status with the reconciled in_flight view.
+                    // The counter can drift from reality across restarts and
+                    // mid-delegation crashes (see NOTE on `delegate_to`); the
+                    // post-reconcile in_flight set is the source of truth, so
+                    // align the counter to it here.
+                    let new_count = self.in_flight_for_cerebrate(cerebrate_id).await.len();
+                    let mut cerebrates = self.cerebrates.write().await;
+                    if let Some(status) = cerebrates.get_mut(cerebrate_id) {
+                        let prev = status.active_delegations;
+                        status.active_delegations = new_count as u32;
+                        if prev != new_count as u32 {
+                            tracing::info!(
+                                cerebrate_id = %cerebrate_id,
+                                previous = prev,
+                                reconciled = new_count,
+                                "Reconciled active_delegations counter to in_flight truth"
+                            );
+                        }
                     }
                 }
                 Err(e) => {

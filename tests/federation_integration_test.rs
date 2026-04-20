@@ -794,3 +794,179 @@ async fn test_federation_rejection_emits_rejected_event() {
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reconciliation tests.
+//
+// Cover the `reconcile_on_reconnect()` path documented by the NOTE comment
+// in delegation_manager.rs: the `active_delegations` counter on
+// CerebrateStatus can drift from reality when a cerebrate restarts mid-
+// delegation or when the overmind crashes between tracking updates.
+// `reconcile_on_reconnect()` exchanges in-flight task ID lists with the
+// remote cerebrate over HTTP and converges local in_flight tracking +
+// the active_delegations counter to the cerebrate's reported truth.
+//
+// These tests stand up a tiny axum mock server playing the role of the
+// remote cerebrate's `/federation/reconcile` endpoint so we can drive the
+// "remote view of in_flight" deterministically.
+// ---------------------------------------------------------------------------
+
+use axum::{Json as AxumJson, Router, routing::post};
+use serde_json::Value as JsonValue;
+use tokio::net::TcpListener;
+
+/// Build an axum router whose `/federation/reconcile` handler responds with
+/// the supplied list of task UUIDs as the cerebrate's in-flight set.
+fn make_mock_reconcile_router(remote_view: Arc<RwLock<Vec<Uuid>>>) -> Router {
+    Router::new().route(
+        "/federation/reconcile",
+        post(move |body: AxumJson<JsonValue>| {
+            let remote_view = remote_view.clone();
+            async move {
+                // Echo the JSON-RPC id (default 1 if absent or not a number).
+                let id = body.0.get("id").and_then(|v| v.as_i64()).unwrap_or(1);
+                let task_ids = remote_view.read().await.clone();
+                AxumJson(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "task_ids": task_ids }
+                }))
+            }
+        }),
+    )
+}
+
+/// Spawn the mock server on a random port and return its base URL plus a
+/// JoinHandle to abort on test exit. The URL ends with no trailing slash.
+async fn spawn_mock_reconcile_server(
+    remote_view: Arc<RwLock<Vec<Uuid>>>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = make_mock_reconcile_router(remote_view);
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    (format!("http://{}", addr), handle)
+}
+
+/// Reconciliation test: federation thinks 3 tasks are in flight, cerebrate
+/// reports 0 (simulated restart that wiped its in-flight state). After
+/// `reconcile_on_reconnect()`, the federation should drop all three
+/// orphaned tasks AND drive the `active_delegations` counter to 0.
+///
+/// This is the drift scenario called out by the NOTE comment on
+/// `delegation_manager::DelegationManager::delegate_to`.
+#[tokio::test]
+async fn test_reconcile_on_reconnect_orphans_tasks_unknown_to_remote() {
+    let (overmind, _bus) = make_overmind();
+
+    let remote_view: Arc<RwLock<Vec<Uuid>>> = Arc::new(RwLock::new(Vec::new()));
+    let (base_url, server_handle) = spawn_mock_reconcile_server(remote_view.clone()).await;
+
+    // Register and connect against the mock server. The legacy register call
+    // will hit a 404 on the mock (no /federation/register handler), but the
+    // legacy-only path treats register failure as non-fatal and still moves
+    // the cerebrate to Connected (service.rs warns "connecting locally").
+    overmind
+        .register_cerebrate("c1", "Cerebrate 1", &base_url)
+        .await;
+    overmind.connect("c1").await.unwrap();
+
+    // Delegate three tasks. The mock server has no /federation/delegate
+    // handler, but legacy HTTP delegate failures are non-fatal — the tasks
+    // are still tracked in_flight and active_delegations is incremented.
+    let mut task_ids = Vec::new();
+    for i in 0..3 {
+        let task_id = Uuid::new_v4();
+        task_ids.push(task_id);
+        let envelope = FederationTaskEnvelope::new(
+            task_id,
+            format!("task-{}", i),
+            format!("payload-{}", i),
+        );
+        overmind.delegate_to(&envelope, "c1").await.unwrap();
+    }
+
+    // Pre-reconcile: federation tracks 3 in-flight, counter is 3.
+    assert_eq!(overmind.in_flight_for_cerebrate("c1").await.len(), 3);
+    let status = overmind.get_cerebrate("c1").await.unwrap();
+    assert_eq!(
+        status.active_delegations, 3,
+        "active_delegations should reflect 3 outstanding delegations"
+    );
+
+    // Simulate cerebrate restart: its self-reported in-flight set is empty.
+    // (remote_view is already empty by default — make it explicit.)
+    {
+        let mut rv = remote_view.write().await;
+        rv.clear();
+    }
+
+    // Trigger reconciliation.
+    overmind.reconcile_on_reconnect("c1").await;
+
+    // Post-reconcile: all three tasks are orphaned and removed from
+    // in_flight; active_delegations converges to the cerebrate's truth (0).
+    assert_eq!(
+        overmind.in_flight_for_cerebrate("c1").await.len(),
+        0,
+        "all orphaned tasks should be dropped from in_flight"
+    );
+    let status = overmind.get_cerebrate("c1").await.unwrap();
+    assert_eq!(
+        status.active_delegations, 0,
+        "active_delegations should converge to cerebrate's reported 0 after reconcile"
+    );
+
+    server_handle.abort();
+}
+
+/// Symmetric reconciliation test: federation thinks 0 tasks are in flight
+/// (e.g. overmind restarted and lost its in-flight map), but the cerebrate
+/// reports it is still working on 2 tasks. After `reconcile_on_reconnect()`,
+/// the federation should re-track those 2 tasks AND raise its
+/// `active_delegations` counter from 0 to 2.
+#[tokio::test]
+async fn test_reconcile_on_reconnect_rediscovers_tasks_known_to_remote() {
+    let (overmind, _bus) = make_overmind();
+
+    // Pre-seed the cerebrate's view with 2 in-flight tasks — they exist on
+    // the remote but the overmind has no record of them locally.
+    let remote_task_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+    let remote_view: Arc<RwLock<Vec<Uuid>>> =
+        Arc::new(RwLock::new(remote_task_ids.clone()));
+    let (base_url, server_handle) = spawn_mock_reconcile_server(remote_view.clone()).await;
+
+    overmind
+        .register_cerebrate("c1", "Cerebrate 1", &base_url)
+        .await;
+    overmind.connect("c1").await.unwrap();
+
+    // Pre-reconcile: federation knows nothing.
+    assert_eq!(overmind.in_flight_for_cerebrate("c1").await.len(), 0);
+    let status = overmind.get_cerebrate("c1").await.unwrap();
+    assert_eq!(status.active_delegations, 0);
+
+    // Trigger reconciliation.
+    overmind.reconcile_on_reconnect("c1").await;
+
+    // Post-reconcile: the 2 remote tasks are re-tracked locally and the
+    // counter is raised to match.
+    let in_flight = overmind.in_flight_for_cerebrate("c1").await;
+    assert_eq!(in_flight.len(), 2, "rediscovered tasks should be tracked");
+    for tid in &remote_task_ids {
+        assert!(
+            in_flight.contains(tid),
+            "in_flight should contain rediscovered task {}",
+            tid
+        );
+    }
+    let status = overmind.get_cerebrate("c1").await.unwrap();
+    assert_eq!(
+        status.active_delegations, 2,
+        "active_delegations should rise to match cerebrate's reported 2"
+    );
+
+    server_handle.abort();
+}

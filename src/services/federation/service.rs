@@ -999,6 +999,21 @@ impl FederationService {
         self.delegation.in_flight_for_cerebrate(cerebrate_id).await
     }
 
+    /// Reconcile in-flight task state with a cerebrate after reconnect.
+    ///
+    /// Sends a `federation/reconcile` request to the cerebrate to exchange
+    /// in-flight task ID lists, then converges local in-flight tracking and
+    /// the `active_delegations` counter to the cerebrate's reported truth.
+    /// Tasks known locally but not remotely are failed as orphaned; tasks
+    /// known remotely but not locally are re-tracked.
+    ///
+    /// This is invoked automatically by the reconnect loop on a successful
+    /// reconnection. Exposed publicly so tests and operational tooling can
+    /// trigger it explicitly.
+    pub async fn reconcile_on_reconnect(&self, cerebrate_id: &str) {
+        self.delegation.reconcile_on_reconnect(cerebrate_id).await
+    }
+
     /// Get a reference to the delegation strategy.
     pub fn delegation_strategy(&self) -> &dyn FederationDelegationStrategy {
         self.delegation_strategy.as_ref()
