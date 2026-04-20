@@ -28,8 +28,15 @@ jobs:
       - name: Build
         run: cargo build --locked --all-targets
 
-      - name: Test
-        run: cargo test --lib --locked
+      - name: Test (unit + integration)
+        # Runs library unit tests AND every integration-test binary in `tests/`.
+        # `#[ignore]`-marked tests are skipped by default; the only ignored
+        # tests today live in `tests/e2e_swarm_integration_test.rs` and require
+        # a working Claude CLI on PATH (run locally with `--include-ignored`).
+        # All other integration tests are self-contained: they use in-memory
+        # SQLite, no network, no env vars, and no external processes (besides
+        # the project's own `abathur` binary via `assert_cmd`).
+        run: cargo test --tests --locked
 
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --locked -- -D warnings
