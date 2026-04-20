@@ -238,7 +238,7 @@ impl EventHandler for FederationResultHandler {
                                 EventSeverity::Info,
                                 Some(*task_id),
                                 EventPayload::FederatedGoalConverged {
-                                    local_goal_id: goal_id,
+                                    federation_goal_id: goal_id,
                                     cerebrate_id: cerebrate_id.clone(),
                                 },
                             ));
@@ -248,7 +248,7 @@ impl EventHandler for FederationResultHandler {
                                 EventSeverity::Warning,
                                 Some(*task_id),
                                 EventPayload::FederatedGoalFailed {
-                                    local_goal_id: goal_id,
+                                    federation_goal_id: goal_id,
                                     cerebrate_id: cerebrate_id.clone(),
                                     reason: summary.clone(),
                                 },

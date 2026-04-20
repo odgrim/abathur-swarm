@@ -479,7 +479,7 @@ async fn test_reactor_cascade_converged_advances_dag() {
         EventSeverity::Info,
         None,
         EventPayload::FederatedGoalConverged {
-            local_goal_id: code_fed_goal_id,
+            federation_goal_id: code_fed_goal_id,
             cerebrate_id: "cerebrate-code".to_string(),
         },
     ))
@@ -597,7 +597,7 @@ async fn test_reactor_cascade_failed_propagates_to_dependents() {
         EventSeverity::Warning,
         None,
         EventPayload::FederatedGoalFailed {
-            local_goal_id: root_fed_goal_id,
+            federation_goal_id: root_fed_goal_id,
             cerebrate_id: "c1".to_string(),
             reason: "root swarm blew up".to_string(),
         },

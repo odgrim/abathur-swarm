@@ -894,29 +894,26 @@ pub enum EventPayload {
 
     /// Progress update received for a federated goal.
     FederatedGoalProgress {
-        /// NOTE: Despite the name, this is the `FederatedGoal.id` (federation
-        /// record UUID), not `FederatedGoal.local_goal_id` (parent goal UUID).
-        /// Used by `SwarmDagEventHandler` to correlate with DAG node ownership.
-        local_goal_id: Uuid,
+        /// The `FederatedGoal.id` (federation record UUID), used by
+        /// `SwarmDagEventHandler` to correlate with DAG node ownership.
+        federation_goal_id: Uuid,
         convergence_level: f64,
         signals: std::collections::HashMap<String, f64>,
     },
 
     /// A federated goal converged successfully.
     FederatedGoalConverged {
-        /// NOTE: Despite the name, this is the `FederatedGoal.id` (federation
-        /// record UUID), not `FederatedGoal.local_goal_id` (parent goal UUID).
-        /// Used by `SwarmDagEventHandler` to correlate with DAG node ownership.
-        local_goal_id: Uuid,
+        /// The `FederatedGoal.id` (federation record UUID), used by
+        /// `SwarmDagEventHandler` to correlate with DAG node ownership.
+        federation_goal_id: Uuid,
         cerebrate_id: String,
     },
 
     /// A federated goal failed.
     FederatedGoalFailed {
-        /// NOTE: Despite the name, this is the `FederatedGoal.id` (federation
-        /// record UUID), not `FederatedGoal.local_goal_id` (parent goal UUID).
-        /// Used by `SwarmDagEventHandler` to correlate with DAG node ownership.
-        local_goal_id: Uuid,
+        /// The `FederatedGoal.id` (federation record UUID), used by
+        /// `SwarmDagEventHandler` to correlate with DAG node ownership.
+        federation_goal_id: Uuid,
         cerebrate_id: String,
         reason: String,
     },

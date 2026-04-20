@@ -460,9 +460,14 @@ pub struct FederationTaskEnvelope {
     pub task_id: Uuid,
     /// Parent goal this task belongs to.
     ///
-    /// NOTE: Per domain design ("tasks have parent tasks, not parent goals"),
-    /// goal association should live on the Task model via `goal_id`, not on
-    /// the envelope as a parent relationship. Retained for wire compatibility.
+    /// Wire-compat shim: the internal domain model carries `goal_id` on
+    /// `Task` (see `Task::goal_id`) because tasks have parent tasks, not
+    /// parent goals; this envelope field is the wire representation external
+    /// cerebrates consume today, so it is retained for serialisation while
+    /// the internal flow populates and reads `Task::goal_id`. Envelope
+    /// construction paths set this field from the authoritative
+    /// `Task::goal_id` (when available) so the two stay in sync on outbound
+    /// delegations.
     pub parent_goal_id: Option<Uuid>,
     /// Correlation ID for tracking the delegation conversation.
     pub correlation_id: Uuid,

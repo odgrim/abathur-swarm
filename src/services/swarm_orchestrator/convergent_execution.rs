@@ -194,22 +194,16 @@ impl StrategyExecutor for OrchestratorStrategyExecutor {
 
 /// `StrategyEffects` implementation used by the orchestrator's convergent
 /// path. Wraps the worktree-reset + `ConvergenceFreshStart` event emission
-/// that currently lives inline inside `run_convergent_execution_inner`.
+/// invoked by the engine when it selects a `FreshStart` strategy.
 ///
-/// Part of the engine-as-core refactor chain (#13/#21): PR 3 establishes the
-/// boundary so PR 4 can migrate the engine's inner strategy handling to call
-/// `effects.on_fresh_start(...)` / `effects.on_revert(...)` directly. When
-/// that happens, the inline `FreshStart` handling in
-/// `run_convergent_execution_inner` can be deleted.
-///
-/// NOTE: PR 3 does NOT migrate the orchestrator's inline `FreshStart` code to
-/// call this impl. The inline path mutates trajectory state
-/// (`trajectory.total_fresh_starts += 1`) that the `&Trajectory` signature
-/// here cannot express, so extraction waits until PR 4 inverts ownership
-/// (engine drives the loop and owns the trajectory mutably). `on_revert` has
-/// no pre-existing orchestrator-side logic to mirror; `RevertAndBranch` is
-/// currently handled entirely inside the engine by routing to a prior
-/// observation's artifact, with no worktree side effect.
+/// Part of the engine-as-core refactor chain (#13/#21): the engine's
+/// `run_inner` loop now owns the trajectory mutably, increments
+/// `total_fresh_starts` itself, and calls `fx.on_fresh_start(&trajectory)`
+/// directly — there is no longer any inline `FreshStart` branch in
+/// `run_convergent_execution_inner`. `on_revert` is currently a no-op
+/// traced with `tracing::debug!` because `RevertAndBranch` is handled
+/// entirely inside the engine by routing to a prior observation's
+/// artifact; this impl exists for future worktree-rewind support.
 pub(super) struct OrchestratorStrategyEffects {
     event_bus: Arc<EventBus>,
     goal_id: Option<Uuid>,
@@ -247,13 +241,13 @@ impl StrategyEffects for OrchestratorStrategyEffects {
     async fn on_revert(&self, trajectory: &Trajectory, target: &Uuid) -> DomainResult<()> {
         // RevertAndBranch currently has no orchestrator-side filesystem
         // effect: the engine handles the revert by routing to the target
-        // observation's stored artifact reference. We trace the call so PR 4
-        // can introduce a real worktree-rewind here when the engine starts
-        // owning the inner loop.
+        // observation's stored artifact reference. We trace the call so a
+        // future worktree-rewind effect can slot in here without changing
+        // the engine's call site.
         tracing::debug!(
             trajectory_id = %trajectory.id,
             target = %target,
-            "StrategyEffects::on_revert invoked (no-op until PR 4 owns the loop)"
+            "StrategyEffects::on_revert invoked (no-op; worktree rewind not implemented)"
         );
         Ok(())
     }

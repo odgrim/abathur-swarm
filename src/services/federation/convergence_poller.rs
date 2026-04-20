@@ -251,7 +251,7 @@ impl ConvergencePollingDaemon {
                 EventSeverity::Info,
                 Some(goal.id),
                 EventPayload::FederatedGoalProgress {
-                    local_goal_id: goal.id,
+                    federation_goal_id: goal.id,
                     convergence_level: snapshot.convergence_level,
                     signals: snapshot.signals.clone(),
                 },
@@ -484,7 +484,7 @@ impl ConvergencePollingDaemon {
                         EventSeverity::Info,
                         Some(goal.id),
                         EventPayload::FederatedGoalConverged {
-                            local_goal_id: goal.id,
+                            federation_goal_id: goal.id,
                             cerebrate_id: goal.cerebrate_id.clone(),
                         },
                     ))
@@ -531,7 +531,7 @@ impl ConvergencePollingDaemon {
                 EventSeverity::Error,
                 Some(goal.id),
                 EventPayload::FederatedGoalFailed {
-                    local_goal_id: goal.id,
+                    federation_goal_id: goal.id,
                     cerebrate_id: goal.cerebrate_id.clone(),
                     reason: reason.to_string(),
                 },
@@ -940,11 +940,11 @@ mod tests {
         let mut saw_converged = false;
         while let Ok(event) = subscriber.try_recv() {
             if let EventPayload::FederatedGoalConverged {
-                local_goal_id,
+                federation_goal_id,
                 cerebrate_id,
             } = event.payload
             {
-                assert_eq!(local_goal_id, goal_id);
+                assert_eq!(federation_goal_id, goal_id);
                 assert_eq!(cerebrate_id, "test-cerebrate");
                 saw_converged = true;
             }
@@ -1023,12 +1023,12 @@ mod tests {
         let mut saw_failed = false;
         while let Ok(event) = subscriber.try_recv() {
             if let EventPayload::FederatedGoalFailed {
-                local_goal_id,
+                federation_goal_id,
                 reason,
                 ..
             } = event.payload
             {
-                assert_eq!(local_goal_id, goal_id);
+                assert_eq!(federation_goal_id, goal_id);
                 assert!(reason.contains("consecutive misses"));
                 saw_failed = true;
             }
@@ -1218,12 +1218,12 @@ mod tests {
         let mut saw_progress = false;
         while let Ok(event) = subscriber.try_recv() {
             if let EventPayload::FederatedGoalProgress {
-                local_goal_id,
+                federation_goal_id,
                 convergence_level,
                 signals,
             } = event.payload
             {
-                assert_eq!(local_goal_id, goal_id);
+                assert_eq!(federation_goal_id, goal_id);
                 assert!((convergence_level - 0.5).abs() < 0.01);
                 assert!(signals.contains_key("build_passing"));
                 saw_progress = true;

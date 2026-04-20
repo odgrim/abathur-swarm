@@ -93,17 +93,17 @@ impl EventHandler for SwarmDagEventHandler {
     ) -> Result<Reaction, String> {
         match &event.payload {
             EventPayload::FederatedGoalConverged {
-                local_goal_id,
+                federation_goal_id,
                 cerebrate_id,
             } => {
                 tracing::info!(
-                    local_goal_id = %local_goal_id,
+                    federation_goal_id = %federation_goal_id,
                     cerebrate_id = %cerebrate_id,
                     "DAG handler: federated goal converged, checking DAG nodes"
                 );
 
                 let mut dags = self.swarm_dags.write().await;
-                let lookup = Self::find_node_by_federated_goal(&dags, *local_goal_id);
+                let lookup = Self::find_node_by_federated_goal(&dags, *federation_goal_id);
 
                 if let Some((dag_id, node_id)) = lookup {
                     tracing::info!(
@@ -152,7 +152,7 @@ impl EventHandler for SwarmDagEventHandler {
                     }
                 } else {
                     tracing::debug!(
-                        local_goal_id = %local_goal_id,
+                        federation_goal_id = %federation_goal_id,
                         "DAG handler: no DAG node found for converged goal, ignoring"
                     );
                 }
@@ -161,19 +161,19 @@ impl EventHandler for SwarmDagEventHandler {
             }
 
             EventPayload::FederatedGoalFailed {
-                local_goal_id,
+                federation_goal_id,
                 cerebrate_id,
                 reason,
             } => {
                 tracing::info!(
-                    local_goal_id = %local_goal_id,
+                    federation_goal_id = %federation_goal_id,
                     cerebrate_id = %cerebrate_id,
                     reason = %reason,
                     "DAG handler: federated goal failed, checking DAG nodes"
                 );
 
                 let mut dags = self.swarm_dags.write().await;
-                let lookup = Self::find_node_by_federated_goal(&dags, *local_goal_id);
+                let lookup = Self::find_node_by_federated_goal(&dags, *federation_goal_id);
 
                 if let Some((dag_id, node_id)) = lookup {
                     tracing::info!(
@@ -207,7 +207,7 @@ impl EventHandler for SwarmDagEventHandler {
                     }
                 } else {
                     tracing::debug!(
-                        local_goal_id = %local_goal_id,
+                        federation_goal_id = %federation_goal_id,
                         "DAG handler: no DAG node found for failed goal, ignoring"
                     );
                 }
@@ -335,7 +335,7 @@ mod tests {
         let dags = Arc::new(RwLock::new(HashMap::new()));
         let handler = make_handler(dags);
         let event = make_event(EventPayload::FederatedGoalConverged {
-            local_goal_id: Uuid::new_v4(),
+            federation_goal_id: Uuid::new_v4(),
             cerebrate_id: "test-cerebrate".to_string(),
         });
         let ctx = HandlerContext {
@@ -352,7 +352,7 @@ mod tests {
         let dags = Arc::new(RwLock::new(HashMap::new()));
         let handler = make_handler(dags);
         let event = make_event(EventPayload::FederatedGoalFailed {
-            local_goal_id: Uuid::new_v4(),
+            federation_goal_id: Uuid::new_v4(),
             cerebrate_id: "test-cerebrate".to_string(),
             reason: "something broke".to_string(),
         });
