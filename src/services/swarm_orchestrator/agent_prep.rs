@@ -6,7 +6,6 @@
 //!
 //! Extracted from `goal_processing::spawn_task_agent` per spec T10
 //! (`specs/T10-spawn-task-agent-extraction.md`).
-#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -26,6 +25,7 @@ pub struct AgentMetadata {
     /// True when the agent's tools include write/edit/shell.
     pub can_write: bool,
     /// Whether the template was explicitly marked `read_only`.
+    #[allow(dead_code)]
     pub is_read_only: bool,
     /// Maximum turns set on the template (0 = unset, falls back to role default).
     pub max_turns: u32,

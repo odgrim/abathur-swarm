@@ -29,6 +29,7 @@ use crate::domain::models::workflow_state::WorkflowState;
 use crate::domain::models::workflow_template::WorkflowTemplate;
 
 use super::SwarmOrchestrator;
+use super::agent_prep::AgentPreparationService;
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
 use super::types::SwarmEvent;
 
@@ -75,115 +76,6 @@ async fn replay_gate_rejection_event(
             ))
             .await;
     }
-}
-
-/// Map agent template tool names (lowercase YAML) to Claude Code CLI tool names.
-///
-/// Template tools like "read", "shell", "memory" need to be translated to
-/// the PascalCase names that `claude --allowedTools` expects.
-/// Tools like "memory" and "tasks" are Abathur MCP tools, mapped to specific
-/// `mcp__abathur__*` tool names. Use "task_status" for worker agents
-/// (only task_update_status + task_get) and "tasks" for orchestrators.
-fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
-    let mut cli_tools = Vec::new();
-
-    for tool in template_tool_names {
-        match tool.as_str() {
-            "read" => cli_tools.push("Read".to_string()),
-            "write" => {
-                cli_tools.push("Write".to_string());
-            }
-            "edit" => {
-                cli_tools.push("Edit".to_string());
-                cli_tools.push("MultiEdit".to_string());
-            }
-            "shell" => cli_tools.push("Bash".to_string()),
-            "glob" => cli_tools.push("Glob".to_string()),
-            "grep" => cli_tools.push("Grep".to_string()),
-            // Abathur APIs are provided via MCP stdio server as native tools.
-            // Claude Code still needs these in --allowedTools to use them in headless mode.
-            "memory" => {
-                cli_tools.push("mcp__abathur__memory_search".to_string());
-                cli_tools.push("mcp__abathur__memory_store".to_string());
-                cli_tools.push("mcp__abathur__memory_get".to_string());
-            }
-            "tasks" => {
-                cli_tools.push("mcp__abathur__task_submit".to_string());
-                cli_tools.push("mcp__abathur__task_list".to_string());
-                cli_tools.push("mcp__abathur__task_get".to_string());
-                cli_tools.push("mcp__abathur__task_update_status".to_string());
-                cli_tools.push("mcp__abathur__task_assign".to_string());
-                cli_tools.push("mcp__abathur__task_wait".to_string());
-                cli_tools.push("mcp__abathur__goals_list".to_string());
-                cli_tools.push("mcp__abathur__workflow_select".to_string());
-                cli_tools.push("mcp__abathur__workflow_advance".to_string());
-                cli_tools.push("mcp__abathur__workflow_fan_out".to_string());
-                cli_tools.push("mcp__abathur__workflow_gate".to_string());
-                cli_tools.push("mcp__abathur__workflow_status".to_string());
-                cli_tools.push("mcp__abathur__task_cancel".to_string());
-                cli_tools.push("mcp__abathur__task_retry".to_string());
-            }
-            "task_status" => {
-                cli_tools.push("mcp__abathur__task_update_status".to_string());
-                cli_tools.push("mcp__abathur__task_get".to_string());
-            }
-            "agents" => {
-                cli_tools.push("mcp__abathur__agent_create".to_string());
-                cli_tools.push("mcp__abathur__agent_list".to_string());
-                cli_tools.push("mcp__abathur__agent_get".to_string());
-            }
-            // Pass through any already-PascalCase tool names, but reject blocked tools
-            other => {
-                const BLOCKED: &[&str] = &[
-                    "task",
-                    "todowrite",
-                    "todoread",
-                    "taskcreate",
-                    "taskupdate",
-                    "tasklist",
-                    "taskget",
-                    "taskstop",
-                    "taskoutput",
-                    "teamcreate",
-                    "teamdelete",
-                    "sendmessage",
-                    "enterplanmode",
-                    "exitplanmode",
-                    "skill",
-                    "notebookedit",
-                ];
-                if BLOCKED.contains(&other.to_lowercase().as_str()) {
-                    tracing::warn!(
-                        "Agent template requested blocked tool '{}' - skipping",
-                        other
-                    );
-                } else {
-                    cli_tools.push(other.to_string());
-                }
-            }
-        }
-    }
-
-    // Inject baseline read-only tools for agents that interact with code.
-    // Orchestration-only agents (overmind, aggregator) should NOT get these —
-    // they delegate to workers instead of exploring the codebase themselves.
-    let is_orchestration_only = template_tool_names.iter().all(|t| {
-        matches!(
-            t.as_str(),
-            "memory" | "tasks" | "agents" | "task_status" | "egress_publish"
-        )
-    });
-    if !is_orchestration_only {
-        for baseline in &["Read", "Glob", "Grep"] {
-            if !cli_tools.contains(&baseline.to_string()) {
-                cli_tools.push(baseline.to_string());
-            }
-        }
-    }
-
-    cli_tools.sort();
-    cli_tools.dedup();
-    cli_tools
 }
 
 /// Format scored memories as contextual guidance text for agent task prompts.
@@ -365,66 +257,24 @@ where
 
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
-            // Get agent template for version tracking, capabilities, and tool restrictions
-            let (
-                template_version,
-                capabilities,
-                cli_tools,
-                agent_can_write,
-                is_template_read_only,
-                template_max_turns,
-                template_preferred_model,
-                template_tier,
-            ) = match self.agent_repo.get_template_by_name(&agent_type).await {
-                Ok(Some(template)) => {
-                    let caps: Vec<String> = template.tools.iter().map(|t| t.name.clone()).collect();
-                    let tools = map_template_tools_to_cli(&caps);
-                    let can_write = caps.iter().any(|c| {
-                        let lower = c.to_lowercase();
-                        lower == "write" || lower == "edit" || lower == "shell"
-                    });
-                    (
-                        template.version,
-                        caps,
-                        tools,
-                        can_write,
-                        template.read_only,
-                        template.max_turns,
-                        template.preferred_model.clone(),
-                        template.tier,
-                    )
-                }
-                // Default to true when template lookup fails (safer to require commits from unknown agents)
-                _ => (
-                    1,
-                    vec!["task-execution".to_string()],
-                    vec![],
-                    true,
-                    false,
-                    0,
-                    None,
-                    AgentTier::Worker,
-                ),
-            };
-
-            // Read-only agent roles never produce commits regardless of tool capabilities.
-            // The template's `read_only` field is the primary signal (set at creation time).
-            // The name-based heuristic is kept as a legacy fallback for agents created
-            // before the `read_only` field existed.
-            let is_read_only_role = is_template_read_only || {
-                let lower = agent_type.to_lowercase();
-                lower == "overmind"
-                    || lower == "aggregator"
-                    || lower.contains("researcher")
-                    || lower.contains("planner")
-                    || lower.contains("analyst")
-                    || lower.contains("architect")
-            };
+            // Resolve agent template metadata (capabilities, CLI tools,
+            // read-only role) via AgentPreparationService.
+            let agent_repo_dyn: Arc<dyn crate::domain::ports::AgentRepository> =
+                self.agent_repo.clone();
+            let agent_prep = AgentPreparationService::new(agent_repo_dyn);
+            let agent_meta = agent_prep.prepare_agent(&agent_type).await?;
+            let template_version = agent_meta.version;
+            let cli_tools = agent_meta.cli_tools.clone();
+            let agent_can_write = agent_meta.can_write;
+            let template_max_turns = agent_meta.max_turns;
+            let template_preferred_model = agent_meta.preferred_model.clone();
+            let template_tier = agent_meta.tier;
+            let is_read_only_role = agent_meta.is_read_only_role;
 
             // Register agent capabilities with A2A gateway if configured
             if self.config.mcp_servers.a2a_gateway.is_some()
                 && let Err(e) = self
-                    .register_agent_capabilities(&agent_type, capabilities)
+                    .register_agent_capabilities(&agent_type, agent_meta.capabilities.clone())
                     .await
             {
                 tracing::warn!(
