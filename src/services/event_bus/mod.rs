@@ -43,8 +43,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
+#[cfg(test)]
 use super::dag_executor::ExecutionEvent;
 use super::event_store::EventStore;
+#[cfg(test)]
 use super::swarm_orchestrator::SwarmEvent;
 
 // Re-exports: preserve the crate-wide public surface of `event_bus`.
@@ -196,24 +198,6 @@ impl EventBus {
                 tracing::warn!("EventBus: dropped event (receivers lagged): {}", e);
             }
         }
-    }
-
-    /// Publish a SwarmEvent (converts to UnifiedEvent).
-    ///
-    /// **Deprecated**: Prefer constructing `UnifiedEvent` directly using
-    /// `event_factory::make_event()` or dispatching through the `CommandBus`.
-    #[deprecated(note = "Use event_factory::make_event() or dispatch through CommandBus")]
-    pub async fn publish_swarm_event(&self, event: SwarmEvent) {
-        self.publish(event.into()).await;
-    }
-
-    /// Publish an ExecutionEvent (converts to UnifiedEvent).
-    ///
-    /// **Deprecated**: Prefer constructing `UnifiedEvent` directly using
-    /// `event_factory::make_event()` or dispatching through the `CommandBus`.
-    #[deprecated(note = "Use event_factory::make_event() or dispatch through CommandBus")]
-    pub async fn publish_execution_event(&self, event: ExecutionEvent) {
-        self.publish(event.into()).await;
     }
 
     /// Subscribe to the event stream.

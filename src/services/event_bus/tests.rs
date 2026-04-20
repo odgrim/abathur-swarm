@@ -1,6 +1,5 @@
-#![allow(deprecated)]
-
 use super::*;
+use crate::services::event_factory::orchestrator_event;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -12,11 +11,19 @@ use uuid::Uuid;
 
         let mut rx = bus.subscribe();
 
-        bus.publish_swarm_event(SwarmEvent::Started).await;
+        bus.publish(orchestrator_event(
+            EventSeverity::Info,
+            EventPayload::OrchestratorStarted,
+        ))
+        .await;
         let event1 = rx.recv().await.unwrap();
         assert_eq!(event1.sequence.0, 0);
 
-        bus.publish_swarm_event(SwarmEvent::Stopped).await;
+        bus.publish(orchestrator_event(
+            EventSeverity::Info,
+            EventPayload::OrchestratorStopped,
+        ))
+        .await;
         let event2 = rx.recv().await.unwrap();
         assert_eq!(event2.sequence.0, 1);
 
@@ -29,7 +36,11 @@ use uuid::Uuid;
         let mut rx = bus.subscribe();
 
         // Event without correlation
-        bus.publish_swarm_event(SwarmEvent::Started).await;
+        bus.publish(orchestrator_event(
+            EventSeverity::Info,
+            EventPayload::OrchestratorStarted,
+        ))
+        .await;
         let event1 = rx.recv().await.unwrap();
         assert!(event1.correlation_id.is_none());
 
@@ -37,7 +48,11 @@ use uuid::Uuid;
         let corr_id = bus.start_correlation().await;
 
         // Event with correlation
-        bus.publish_swarm_event(SwarmEvent::Paused).await;
+        bus.publish(orchestrator_event(
+            EventSeverity::Info,
+            EventPayload::OrchestratorPaused,
+        ))
+        .await;
         let event2 = rx.recv().await.unwrap();
         assert_eq!(event2.correlation_id, Some(corr_id));
 
@@ -45,7 +60,11 @@ use uuid::Uuid;
         bus.end_correlation().await;
 
         // Event without correlation again
-        bus.publish_swarm_event(SwarmEvent::Stopped).await;
+        bus.publish(orchestrator_event(
+            EventSeverity::Info,
+            EventPayload::OrchestratorStopped,
+        ))
+        .await;
         let event3 = rx.recv().await.unwrap();
         assert!(event3.correlation_id.is_none());
     }
@@ -87,10 +106,18 @@ use uuid::Uuid;
         assert_eq!(bus.dropped_count(), 0);
 
         // Publish without any subscriber — should increment dropped_count
-        bus.publish_swarm_event(SwarmEvent::Started).await;
+        bus.publish(orchestrator_event(
+            EventSeverity::Info,
+            EventPayload::OrchestratorStarted,
+        ))
+        .await;
         assert_eq!(bus.dropped_count(), 1);
 
-        bus.publish_swarm_event(SwarmEvent::Stopped).await;
+        bus.publish(orchestrator_event(
+            EventSeverity::Info,
+            EventPayload::OrchestratorStopped,
+        ))
+        .await;
         assert_eq!(bus.dropped_count(), 2);
     }
 
@@ -149,7 +176,11 @@ use uuid::Uuid;
         let _rx = bus.subscribe(); // Need a subscriber so events don't get dropped
 
         // Publish an Orchestrator event — should NOT be persisted
-        bus.publish_swarm_event(SwarmEvent::Started).await;
+        bus.publish(orchestrator_event(
+            EventSeverity::Info,
+            EventPayload::OrchestratorStarted,
+        ))
+        .await;
 
         // Publish a Task event — should be persisted
         let task_event = UnifiedEvent {
