@@ -32,8 +32,7 @@ pub(crate) mod task_exec;
 pub mod types;
 pub(crate) mod workspace;
 
-// Step-1 of T11: sub-struct types are introduced as private modules above.
-// Use-imports are added in step 2 as the constructor begins populating them.
+use middleware_bundle::Middleware;
 
 // Re-export public types
 pub use types::{
@@ -156,18 +155,16 @@ where
         Option<crate::domain::models::convergence::ConvergenceEngineConfig>,
 
     // ---------------- Middleware ----------------
-    /// Pre-spawn middleware chain. Runs before substrate invocation for each
-    /// ready task; can short-circuit or enrich the spawn context. Populated
-    /// with the built-in middleware at construction; external callers may
-    /// register additional middleware via
-    /// [`SwarmOrchestrator::with_pre_spawn_middleware`].
-    pub(super) pre_spawn_chain: Arc<RwLock<middleware::PreSpawnChain>>,
-
-    /// Post-completion middleware chain. Runs the side-effects (verification,
-    /// feature-branch handling, PR creation, merge-queue) that previously
-    /// lived inline in `run_post_completion_workflow`. Registrable via
+    /// Pre-spawn and post-completion middleware chains.
+    /// Pre-spawn runs before substrate invocation for each ready task and can
+    /// short-circuit or enrich the spawn context. Post-completion runs the
+    /// side-effects (verification, feature-branch handling, PR creation,
+    /// merge-queue) previously inlined in `run_post_completion_workflow`.
+    /// Both are populated with built-in middleware at construction; external
+    /// callers may register additional middleware via
+    /// [`SwarmOrchestrator::with_pre_spawn_middleware`] /
     /// [`SwarmOrchestrator::with_post_completion_middleware`].
-    pub(super) post_completion_chain: Arc<RwLock<middleware::PostCompletionChain>>,
+    pub(super) middleware: Middleware,
 }
 
 // ============================================================================
@@ -263,8 +260,7 @@ where
             convergence_engine_config: None,
 
             // ---------------- Middleware ----------------
-            pre_spawn_chain: Arc::new(RwLock::new(middleware::PreSpawnChain::new())),
-            post_completion_chain: Arc::new(RwLock::new(middleware::PostCompletionChain::new())),
+            middleware: Middleware::new(),
         }
     }
 
@@ -274,7 +270,7 @@ where
         self,
         mw: Arc<dyn middleware::PreSpawnMiddleware>,
     ) -> Self {
-        self.pre_spawn_chain.write().await.register(mw);
+        self.middleware.register_pre_spawn(mw).await;
         self
     }
 
@@ -284,7 +280,7 @@ where
         self,
         mw: Arc<dyn middleware::PostCompletionMiddleware>,
     ) -> Self {
-        self.post_completion_chain.write().await.register(mw);
+        self.middleware.register_post_completion(mw).await;
         self
     }
 

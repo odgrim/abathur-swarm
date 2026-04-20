@@ -22,18 +22,15 @@ use super::middleware::{
 /// spawn. Both fields are populated with built-in middleware in
 /// `register_builtin_middleware()` during `run()`; external callers may
 /// register additional middleware via the `register_*` helpers below.
-// dead_code: introduced in T11 step 1; wired in steps 2-7.
-#[allow(dead_code)]
-pub(super) struct Middleware {
-    pub(super) pre_spawn_chain: Arc<RwLock<PreSpawnChain>>,
-    pub(super) post_completion_chain: Arc<RwLock<PostCompletionChain>>,
+pub(crate) struct Middleware {
+    pub(crate) pre_spawn_chain: Arc<RwLock<PreSpawnChain>>,
+    pub(crate) post_completion_chain: Arc<RwLock<PostCompletionChain>>,
 }
 
-#[allow(dead_code)]
 impl Middleware {
     /// Construct empty chains. Built-in middleware is registered later in
     /// `SwarmOrchestrator::register_builtin_middleware()`.
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pre_spawn_chain: Arc::new(RwLock::new(PreSpawnChain::new())),
             post_completion_chain: Arc::new(RwLock::new(PostCompletionChain::new())),
@@ -42,13 +39,13 @@ impl Middleware {
 
     /// Register an additional pre-spawn middleware. Registration order is
     /// preserved.
-    pub(super) async fn register_pre_spawn(&self, mw: Arc<dyn PreSpawnMiddleware>) {
+    pub(crate) async fn register_pre_spawn(&self, mw: Arc<dyn PreSpawnMiddleware>) {
         self.pre_spawn_chain.write().await.register(mw);
     }
 
     /// Register an additional post-completion middleware. Registration order
     /// is preserved.
-    pub(super) async fn register_post_completion(&self, mw: Arc<dyn PostCompletionMiddleware>) {
+    pub(crate) async fn register_post_completion(&self, mw: Arc<dyn PostCompletionMiddleware>) {
         self.post_completion_chain.write().await.register(mw);
     }
 }

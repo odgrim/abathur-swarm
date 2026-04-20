@@ -161,7 +161,7 @@ where
         // short-circuit with a Skip decision (logged below) or enrich the
         // context (e.g. RouteTaskMiddleware sets ctx.agent_type).
         let decision = {
-            let chain = self.pre_spawn_chain.read().await;
+            let chain = self.middleware.pre_spawn_chain.read().await;
             chain.run(&mut ctx).await?
         };
 
@@ -466,7 +466,7 @@ where
                 fetch_on_sync: self.config.fetch_on_sync,
                 output_delivery: task_output_delivery.clone(),
                 merge_request_repo: self.merge_request_repo.clone(),
-                post_completion_chain: self.post_completion_chain.clone(),
+                post_completion_chain: self.middleware.post_completion_chain.clone(),
             };
 
             let intent_verifier_dyn: Option<

@@ -1047,7 +1047,7 @@ where
 
         // -- Pre-spawn chain (order matches the previous inline sequence) --
         {
-            let mut chain = self.pre_spawn_chain.write().await;
+            let mut chain = self.middleware.pre_spawn_chain.write().await;
             chain.register(Arc::new(McpReadinessMiddleware::new(
                 self.config.repo_path.clone(),
                 self.config.mcp_servers.a2a_gateway.clone(),
@@ -1065,7 +1065,7 @@ where
 
         // -- Post-completion chain --
         {
-            let mut chain = self.post_completion_chain.write().await;
+            let mut chain = self.middleware.post_completion_chain.write().await;
             chain.register(Arc::new(MemoryOnlyShortCircuitMiddleware::new()));
             chain.register(Arc::new(VerificationMiddleware::new()));
             chain.register(Arc::new(SubtaskMergeBackMiddleware::new()));
