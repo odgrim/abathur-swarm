@@ -33,6 +33,7 @@ use super::agent_prep::AgentPreparationService;
 use super::exec_mode::ExecutionModeResolverService;
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
 use super::types::SwarmEvent;
+use super::workspace::WorkspaceProvisioningService;
 
 /// Re-emit `WorkflowGateRejected` for tasks that were rejected via MCP.
 ///
@@ -364,71 +365,12 @@ where
                 .provision_workspace_for_task(task.id, task_workspace_kind)
                 .await;
 
-            // Write CLAUDE.md to worktree with tool restrictions.
-            // Claude Code reads CLAUDE.md as project-level instructions.
+            // Write per-worktree agent config files (CLAUDE.md, settings.json)
+            // via WorkspaceProvisioningService. The MCP servers block is left
+            // out of settings.json — the orchestrator provides MCP via
+            // --mcp-config with absolute paths instead.
             if let Some(ref wt_path) = worktree_path {
-                let claude_md_path = std::path::Path::new(wt_path).join("CLAUDE.md");
-                let claude_md_content = "\
-# Abathur Agent Rules
-
-IMPORTANT: You are running inside the Abathur swarm orchestration system.
-
-## Prohibited Tools
-NEVER use these Claude Code built-in tools — they bypass Abathur's orchestration:
-- Task (subagent spawner)
-- TodoWrite / TodoRead
-- TaskCreate, TaskUpdate, TaskList, TaskGet, TaskStop, TaskOutput
-- TeamCreate, TeamDelete, SendMessage
-- EnterPlanMode, ExitPlanMode
-- Skill
-- NotebookEdit
-
-## How to manage work
-- Advance workflow: Use `workflow_advance` or `workflow_fan_out` to create phase subtasks
-- Change spine: Use `workflow_select` before first advance (if auto-selected spine is wrong)
-- Cancel tasks: Use `task_cancel` to stop work that is no longer needed
-- Retry failed tasks: Use `task_retry` to reset a failed task to Ready
-- Create agents: Use the `agent_create` tool directly
-- Track progress: Use `task_list` and `task_get` tools
-- Store learnings: Use the `memory_store` tool directly
-
-## Efficiency Rules
-- Use Glob for file discovery — never shell ls or find.
-- Use Grep to search code — never Read entire files looking for a pattern.
-- NEVER re-read a file you already read this session.
-- Store findings incrementally via memory_store as you go, not all at the end.
-- When done, call task_update_status immediately — no self-verification reads.
-- If retrying a task, call memory_search FIRST to find prior work and build on it.
-";
-                if let Err(e) = std::fs::write(&claude_md_path, claude_md_content) {
-                    tracing::warn!("Failed to write CLAUDE.md to worktree: {}", e);
-                } else {
-                    tracing::debug!(
-                        "Wrote CLAUDE.md with tool restrictions to {:?}",
-                        claude_md_path
-                    );
-                }
-
-                // Bootstrap .claude/settings.json in worktree.
-                // We write the permissions block directly (no mcpServers —
-                // the orchestrator provides MCP via --mcp-config with absolute paths).
-                let claude_dir = std::path::Path::new(wt_path).join(".claude");
-                let _ = std::fs::create_dir_all(&claude_dir);
-                let tools: Vec<serde_json::Value> = crate::ABATHUR_ALLOWED_TOOLS
-                    .iter()
-                    .map(|t| serde_json::Value::String(t.to_string()))
-                    .collect();
-                let settings_content = serde_json::json!({
-                    "permissions": {
-                        "allowedTools": tools
-                    }
-                });
-                if let Ok(pretty) = serde_json::to_string_pretty(&settings_content)
-                    && let Err(e) =
-                        std::fs::write(claude_dir.join("settings.json"), format!("{pretty}\n"))
-                {
-                    tracing::warn!("Failed to write .claude/settings.json to worktree: {}", e);
-                }
+                WorkspaceProvisioningService::new().write_agent_config(wt_path);
             }
 
             // Load relevant goal context for the task
