@@ -25,6 +25,9 @@ pub struct AgentMetadata {
     /// True when the agent's tools include write/edit/shell.
     pub can_write: bool,
     /// Whether the template was explicitly marked `read_only`.
+    // reason: kept distinct from `is_read_only_role` so callers can
+    // distinguish the explicit template flag from the heuristic union; the
+    // raw value is plumbed through agent metadata for future audit/UI use.
     #[allow(dead_code)]
     pub is_read_only: bool,
     /// Maximum turns set on the template (0 = unset, falls back to role default).

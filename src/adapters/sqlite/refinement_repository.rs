@@ -26,6 +26,10 @@ impl SqliteRefinementRepository {
 }
 
 /// SQLite row mapping for the `refinement_requests` table.
+///
+/// reason: `updated_at` is selected by sqlx::FromRow to match the column list
+/// but the domain model does not track an updated_at; only `created_at`
+/// participates in the conversion below.
 #[derive(sqlx::FromRow)]
 struct RefinementRequestRow {
     id: String,
@@ -134,6 +138,8 @@ fn status_from_str(s: &str) -> Result<RefinementStatus, Box<dyn std::error::Erro
 
 // ── Row types for template stats persistence ───────────────────────────────
 
+/// reason: `updated_at` is selected by sqlx::FromRow to match the column list
+/// but `TemplateStats` does not carry an updated_at timestamp.
 #[derive(sqlx::FromRow)]
 struct TemplateStatsRow {
     template_name: String,
@@ -175,6 +181,10 @@ impl From<TemplateStatsRow> for TemplateStats {
     }
 }
 
+/// reason: `id` and `created_at` are selected by sqlx::FromRow to match the
+/// column list; `TaskExecution` is keyed by `task_id` and uses `executed_at`
+/// as its temporal anchor, so the table-level identity/audit columns are
+/// not surfaced through the domain conversion.
 #[derive(sqlx::FromRow)]
 struct TemplateExecutionRow {
     #[allow(dead_code)]
@@ -214,6 +224,10 @@ impl TryFrom<TemplateExecutionRow> for TaskExecution {
     }
 }
 
+/// reason: `id` and `created_at` are selected by sqlx::FromRow to match the
+/// column list; the domain `VersionChangeRecord` is keyed by
+/// (template_name, from_version, to_version) and uses `changed_at` as its
+/// temporal anchor.
 #[derive(sqlx::FromRow)]
 struct VersionChangeRow {
     #[allow(dead_code)]

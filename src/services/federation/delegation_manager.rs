@@ -48,6 +48,9 @@ pub(super) struct DelegationManager {
     event_bus: Arc<EventBus>,
     http_client: FederationHttpClient,
     delegation_strategy: Arc<dyn FederationDelegationStrategy>,
+    // reason: shared with the federation service so callers can register
+    // task transformers; consumed via the trait impl rather than directly
+    // off this struct's field.
     #[allow(dead_code)]
     task_transformer: Arc<dyn FederationTaskTransformer>,
     a2a_client: Option<Arc<dyn A2AClient>>,

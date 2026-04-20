@@ -37,6 +37,9 @@ pub(super) struct ResultProcessor {
     last_activity: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
     event_bus: Arc<EventBus>,
     result_processor: Arc<dyn FederationResultProcessorTrait>,
+    // reason: schema registry is shared with the rest of the federation
+    // service so handlers can validate inbound result payloads; the lookup
+    // path lives on the trait impl, not on this struct directly.
     #[allow(dead_code)]
     schemas: Arc<RwLock<HashMap<String, Arc<dyn ResultSchema>>>>,
 }

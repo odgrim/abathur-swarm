@@ -329,6 +329,9 @@ struct AbsenceTimer {
     /// Correlation from the triggering event.
     correlation_id: Option<Uuid>,
     /// The agent_type from the triggering event (for logging/debugging).
+    // reason: captured for future structured-log enrichment; absence-timer
+    // diagnostics currently log task_id only, but agent_type is preserved so
+    // the timer carries the originating context for richer alerting.
     #[allow(dead_code)]
     agent_type: Option<String>,
 }

@@ -71,6 +71,9 @@ pub struct ExecutionConfig {
     /// `execute_task` is called and travel via `TaskExecutionParams::permit`.
     /// Kept here so the orchestrator can pass through any future construction
     /// helpers without rewiring callsites.
+    // reason: held but not read on the spawn path; permits already flow via
+    // `TaskExecutionParams::permit`. Kept on `ExecutionConfig` so the
+    // orchestrator can hand it to future helpers without rewiring callsites.
     #[allow(dead_code)]
     pub agent_semaphore: Arc<Semaphore>,
     pub guardrails: Arc<Guardrails>,

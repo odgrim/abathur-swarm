@@ -251,11 +251,6 @@ impl CircuitBreakerState {
         }
     }
 
-    #[allow(dead_code)]
-    fn is_tripped(&self, cooldown: Duration) -> bool {
-        self.is_tripped_with_config(cooldown, 1, 16)
-    }
-
     fn is_tripped_with_config(
         &self,
         cooldown: Duration,
@@ -274,11 +269,6 @@ impl CircuitBreakerState {
             return false;
         }
         true
-    }
-
-    #[allow(dead_code)]
-    fn reset_if_cooled(&mut self, cooldown: Duration) {
-        self.reset_if_cooled_with_config(cooldown, 1, 16);
     }
 
     fn reset_if_cooled_with_config(
@@ -314,7 +304,10 @@ impl CircuitBreakerState {
 
     /// Calculate effective cooldown: critical handlers use exponential backoff
     /// (initial_secs * 2^attempt, capped at max_secs), non-critical use flat cooldown.
-    #[allow(dead_code)]
+    // reason: thin wrapper around effective_cooldown_with_config used by unit
+    // tests to exercise the default initial/max values; production code calls
+    // effective_cooldown_with_config directly with config-supplied values.
+    #[cfg(test)]
     fn effective_cooldown(&self, default_cooldown: Duration) -> Duration {
         if !self.critical {
             return default_cooldown;

@@ -105,6 +105,10 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     ///
     /// When set, the convergence loop checks whether we are inside a quiet window
     /// at the start of each iteration and terminates early to avoid dispatching work.
+    // reason: installed via `set_cost_window_service`; planned read site is the
+    // per-iteration quiet-window gate that hasn't landed yet (see ports.rs
+    // QuietWindowGate). Field is kept so the wiring exists once that gate
+    // moves into ConvergenceEngine::run.
     #[allow(dead_code)]
     pub(super) cost_window_service:
         Option<Arc<crate::services::cost_window_service::CostWindowService>>,

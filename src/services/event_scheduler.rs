@@ -501,9 +501,14 @@ pub fn interval_schedule(
 struct ScheduleRow {
     id: String,
     name: String,
+    // reason: selected by sqlx::FromRow to match the column list, but the
+    // ScheduleType is reconstructed from `schedule_data` JSON instead.
     #[allow(dead_code)]
     schedule_type: String,
     schedule_data: String,
+    // reason: selected by sqlx::FromRow to match the column list; payload is
+    // not reconstructed in to_scheduled_event (the ScheduledEvent stores it
+    // separately on the event publish path).
     #[allow(dead_code)]
     payload: String,
     category: String,

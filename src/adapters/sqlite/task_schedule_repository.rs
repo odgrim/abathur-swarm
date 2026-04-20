@@ -28,6 +28,8 @@ struct TaskScheduleRow {
     id: String,
     name: String,
     description: String,
+    // reason: selected by sqlx::FromRow to match the column list, but the
+    // TaskScheduleType is reconstructed from `schedule_data` JSON instead.
     #[allow(dead_code)]
     schedule_type: String,
     schedule_data: String,

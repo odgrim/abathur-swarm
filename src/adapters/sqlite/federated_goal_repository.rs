@@ -156,6 +156,11 @@ impl FederatedGoalRepository for SqliteFederatedGoalRepository {
     }
 }
 
+/// reason: most columns are selected by sqlx::FromRow to match the table
+/// shape but are not surfaced through `TryFrom<FederatedGoalRow>` because
+/// the domain `FederatedGoal` is fully serialised in the `data` JSON column.
+/// The other columns are projections used for indexed lookups (id,
+/// local_goal_id, cerebrate_id, state) and audit (created_at, updated_at).
 #[derive(sqlx::FromRow)]
 struct FederatedGoalRow {
     #[allow(dead_code)]

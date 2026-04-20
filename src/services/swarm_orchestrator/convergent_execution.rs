@@ -210,7 +210,6 @@ impl StrategyExecutor for OrchestratorStrategyExecutor {
 /// no pre-existing orchestrator-side logic to mirror; `RevertAndBranch` is
 /// currently handled entirely inside the engine by routing to a prior
 /// observation's artifact, with no worktree side effect.
-#[allow(dead_code)]
 pub(super) struct OrchestratorStrategyEffects {
     event_bus: Arc<EventBus>,
     goal_id: Option<Uuid>,
@@ -301,7 +300,6 @@ impl<T: TaskRepository + ?Sized + 'static> TaskHintsLoader for TaskRepoHintsLoad
     }
 }
 
-#[allow(dead_code)]
 pub(super) struct OrchestratorConvergenceAdvisor {
     intent_verifier: Arc<dyn ConvergentIntentVerifier>,
     cancellation_token: CancellationToken,
@@ -323,7 +321,6 @@ pub(super) struct OrchestratorConvergenceAdvisor {
     last_intent_verification: Arc<TokioMutex<Option<IntentVerificationResult>>>,
 }
 
-#[allow(dead_code)]
 impl OrchestratorConvergenceAdvisor {
     pub(super) fn new(
         task: Task,
@@ -350,12 +347,6 @@ impl OrchestratorConvergenceAdvisor {
     pub(super) fn with_hints_loader(mut self, loader: Arc<dyn TaskHintsLoader>) -> Self {
         self.hints_loader = Some(loader);
         self
-    }
-
-    /// Expose the last verification for the orchestrator's prompt builder
-    /// during Phase B migration.
-    pub(super) async fn last_verification(&self) -> Option<IntentVerificationResult> {
-        self.last_intent_verification.lock().await.clone()
     }
 
     /// Overseers-clean gate used by the 3-strike indeterminate fallback.

@@ -19,9 +19,13 @@ use crate::services::memory_service::MemoryService;
 pub struct TaskContext {
     pub goal_context: Option<String>,
     /// Read by audit logging only; not load-bearing for substrate.
+    // reason: surfaced as part of the assembled context so audit log writes
+    // can persist the inputs verbatim alongside the substrate prompt.
     #[allow(dead_code)]
     pub memory_context: Option<String>,
     /// Read by audit logging only; not load-bearing for substrate.
+    // reason: surfaced as part of the assembled context so audit log writes
+    // can persist the inputs verbatim alongside the substrate prompt.
     #[allow(dead_code)]
     pub intent_gap_context: Option<String>,
     /// Final task description: goal/memory/gap context joined with the original

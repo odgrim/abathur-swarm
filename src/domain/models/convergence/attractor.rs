@@ -875,6 +875,9 @@ mod tests {
     }
 
     /// Build an observation with specific overseer signals for fingerprinting tests.
+    // reason: shared test-helper kept available for future fingerprinting
+    // assertions; current attractor tests use the simpler `make_observation`
+    // factory and exercise overseer signals via direct construction.
     #[allow(dead_code)]
     fn make_observation_with_signals(
         seq: u32,

@@ -835,7 +835,9 @@ struct DeadLetterRow {
     max_retries: i64,
     next_retry_at: Option<String>,
     created_at: String,
-    #[allow(dead_code)] // Selected by sqlx::FromRow but not accessed in conversion
+    // reason: selected by sqlx::FromRow but not accessed in conversion; the
+    // domain DeadLetterEntry surfaces only retry/error state.
+    #[allow(dead_code)]
     resolved_at: Option<String>,
 }
 

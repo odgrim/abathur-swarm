@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use crate::domain::errors::{DomainError, DomainResult};
+use crate::domain::errors::DomainResult;
 use crate::domain::models::Task;
 use crate::domain::models::workflow_template::OutputDelivery;
 use crate::domain::ports::{
@@ -282,10 +282,6 @@ impl Default for PostCompletionChain {
     }
 }
 
-// Silence an unused import lint when no implementor references DomainError yet.
-#[allow(dead_code)]
-fn _assert_domain_error_used(_: DomainError) {}
-
 pub mod autoship;
 pub mod budget;
 pub mod circuit_breaker;
@@ -321,6 +317,7 @@ pub use verification::VerificationMiddleware;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::errors::DomainError;
     use crate::domain::models::Task;
     use std::sync::atomic::{AtomicU32, Ordering};
 
