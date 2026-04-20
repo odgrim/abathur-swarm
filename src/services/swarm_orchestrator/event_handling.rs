@@ -70,7 +70,7 @@ where
 
     /// List pending (unresponded) escalation events.
     pub async fn list_pending_escalations(&self) -> Vec<HumanEscalationEvent> {
-        self.escalation_store.read().await.values().cloned().collect()
+        self.runtime_state.escalation_store.read().await.values().cloned().collect()
     }
 
     /// Get the stored CommandBus, falling back to building one if not yet initialized.
@@ -144,7 +144,7 @@ where
     ) -> DomainResult<()> {
         // Find and remove the escalation from the store atomically.
         let escalation = {
-            let mut store = self.escalation_store.write().await;
+            let mut store = self.runtime_state.escalation_store.write().await;
             let removed = store.remove(&response.event_id);
             // Opportunistically prune while we hold the write lock.
             prune_escalation_store_locked(&mut store, chrono::Utc::now());
@@ -329,7 +329,7 @@ where
                     deferred.escalation.deadline = Some(*deadline);
                 }
                 let deferred_id = deferred.id;
-                let mut store = self.escalation_store.write().await;
+                let mut store = self.runtime_state.escalation_store.write().await;
                 store.insert(deferred_id, deferred);
                 prune_escalation_store_locked(&mut store, chrono::Utc::now());
             }
@@ -383,7 +383,7 @@ where
         // otherwise mutate (e.g. human `respond_to_escalation`) the same
         // entry, causing duplicate processing or lost decisions.
         let timed_out: Vec<HumanEscalationEvent> = {
-            let mut store = self.escalation_store.write().await;
+            let mut store = self.runtime_state.escalation_store.write().await;
             let ids: Vec<Uuid> = store
                 .iter()
                 .filter(|(_, e)| e.escalation.deadline.is_some_and(|d| now > d))

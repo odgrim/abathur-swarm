@@ -152,7 +152,7 @@ where
             guardrails: self.guardrails.clone(),
             cost_window_service: self.cost_window_service.clone(),
             budget_tracker: self.budget_tracker.clone(),
-            agent_semaphore: self.agent_semaphore.clone(),
+            agent_semaphore: self.runtime_state.agent_semaphore.clone(),
             max_agents: self.config.max_agents,
             federation_priority_bumps: 0,
         };
@@ -192,7 +192,7 @@ where
         let agent_unique_id = task.id.to_string();
 
         // Try to acquire agent permit
-        if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
+        if let Ok(permit) = self.runtime_state.agent_semaphore.clone().try_acquire_owned() {
             // Atomically claim the task (Ready→Running) BEFORE spawning.
             // This prevents TOCTOU races where multiple poll cycles see the
             // same Ready task and spawn duplicate agents.
@@ -455,7 +455,7 @@ where
             let exec_cfg = ExecutionConfig {
                 repo_path: self.config.repo_path.clone(),
                 default_base_ref: self.config.default_base_ref.clone(),
-                agent_semaphore: self.agent_semaphore.clone(),
+                agent_semaphore: self.runtime_state.agent_semaphore.clone(),
                 guardrails: self.guardrails.clone(),
                 require_commits: agent_can_write && !is_read_only_role,
                 verify_on_completion: self.config.verify_on_completion,
@@ -510,7 +510,7 @@ where
                 audit_log: self.audit_log.clone(),
                 circuit_breaker: self.circuit_breaker.clone(),
                 command_bus: self.command_bus.read().await.clone(),
-                total_tokens: self.total_tokens.clone(),
+                total_tokens: self.runtime_state.total_tokens.clone(),
                 permit,
                 overseer_cluster: self.overseer_cluster.clone(),
                 trajectory_repo: self.trajectory_repo.clone(),

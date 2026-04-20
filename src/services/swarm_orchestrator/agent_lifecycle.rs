@@ -658,14 +658,14 @@ where
                 ..Default::default()
             })
             .await?;
-        let mut cache = self.active_goals_cache.write().await;
+        let mut cache = self.runtime_state.active_goals_cache.write().await;
         *cache = goals;
         Ok(())
     }
 
     /// Build goal context string for agent prompts.
     pub(super) async fn build_goal_context(&self) -> String {
-        let goals = self.active_goals_cache.read().await;
+        let goals = self.runtime_state.active_goals_cache.read().await;
         if goals.is_empty() {
             return String::new();
         }

@@ -13,35 +13,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use uuid::Uuid;
 
-use crate::domain::errors::DomainResult;
 use crate::domain::models::{Goal, HumanEscalationEvent};
 
 use super::types::{OrchestratorStatus, SwarmStats};
 
 /// Runtime state of a running swarm: status, counters, caches, and the
 /// channels that primed-spawn signalling rides on. Generic-free.
-// dead_code: introduced in T11 step 1; methods/fields wired in steps 2-7.
-#[allow(dead_code)]
-pub(super) struct RuntimeState {
-    pub(super) status: Arc<RwLock<OrchestratorStatus>>,
-    pub(super) stats: Arc<RwLock<SwarmStats>>,
-    pub(super) agent_semaphore: Arc<Semaphore>,
-    pub(super) total_tokens: Arc<AtomicU64>,
-    pub(super) active_goals_cache: Arc<RwLock<Vec<Goal>>>,
-    pub(super) escalation_store: Arc<RwLock<HashMap<Uuid, HumanEscalationEvent>>>,
+pub(crate) struct RuntimeState {
+    pub(crate) status: Arc<RwLock<OrchestratorStatus>>,
+    pub(crate)stats: Arc<RwLock<SwarmStats>>,
+    pub(crate)agent_semaphore: Arc<Semaphore>,
+    pub(crate)total_tokens: Arc<AtomicU64>,
+    pub(crate)active_goals_cache: Arc<RwLock<Vec<Goal>>>,
+    pub(crate)escalation_store: Arc<RwLock<HashMap<Uuid, HumanEscalationEvent>>>,
 
-    pub(super) ready_task_rx: Arc<Mutex<mpsc::Receiver<Uuid>>>,
-    pub(super) ready_task_tx: mpsc::Sender<Uuid>,
-    pub(super) specialist_rx: Arc<Mutex<mpsc::Receiver<Uuid>>>,
-    pub(super) specialist_tx: mpsc::Sender<Uuid>,
+    pub(crate)ready_task_rx: Arc<Mutex<mpsc::Receiver<Uuid>>>,
+    pub(crate)ready_task_tx: mpsc::Sender<Uuid>,
+    pub(crate)specialist_rx: Arc<Mutex<mpsc::Receiver<Uuid>>>,
+    pub(crate)specialist_tx: mpsc::Sender<Uuid>,
 }
 
-#[allow(dead_code)]
 impl RuntimeState {
     /// Construct fresh runtime state for an orchestrator that hasn't started
     /// yet. Capacities match the historical `mod.rs` constants (256 ready
     /// tasks, 64 specialist).
-    pub(super) fn new(max_agents: usize) -> Self {
+    pub(crate) fn new(max_agents: usize) -> Self {
         let (ready_tx, ready_rx) = mpsc::channel(256);
         let (specialist_tx, specialist_rx) = mpsc::channel(64);
         Self {
@@ -59,17 +55,17 @@ impl RuntimeState {
     }
 
     /// Get current status.
-    pub(super) async fn status(&self) -> OrchestratorStatus {
+    pub(crate) async fn status(&self) -> OrchestratorStatus {
         self.status.read().await.clone()
     }
 
     /// Get current stats snapshot.
-    pub(super) async fn stats(&self) -> SwarmStats {
+    pub(crate) async fn stats(&self) -> SwarmStats {
         self.stats.read().await.clone()
     }
 
     /// Pause the orchestrator (no-op unless currently Running).
-    pub(super) async fn pause(&self) {
+    pub(crate) async fn pause(&self) {
         let mut status = self.status.write().await;
         if *status == OrchestratorStatus::Running {
             *status = OrchestratorStatus::Paused;
@@ -77,7 +73,7 @@ impl RuntimeState {
     }
 
     /// Resume the orchestrator (no-op unless currently Paused).
-    pub(super) async fn resume(&self) {
+    pub(crate) async fn resume(&self) {
         let mut status = self.status.write().await;
         if *status == OrchestratorStatus::Paused {
             *status = OrchestratorStatus::Running;
@@ -85,37 +81,18 @@ impl RuntimeState {
     }
 
     /// Stop the orchestrator gracefully (transition to ShuttingDown).
-    pub(super) async fn stop(&self) {
+    pub(crate) async fn stop(&self) {
         let mut status = self.status.write().await;
         *status = OrchestratorStatus::ShuttingDown;
     }
 
     /// Read the running total token count.
-    pub(super) fn total_tokens(&self) -> u64 {
+    pub(crate) fn total_tokens(&self) -> u64 {
         self.total_tokens.load(Ordering::Relaxed)
     }
 
-    /// Refresh the active-goals cache from a goal repository.
-    ///
-    /// Generic over the goal repository so this method can be called from
-    /// `RuntimeState` directly without dragging the orchestrator's repo
-    /// generics onto `RuntimeState` itself.
-    pub(super) async fn refresh_active_goals_cache<G>(&self, goal_repo: &G) -> DomainResult<()>
-    where
-        G: crate::domain::ports::GoalRepository + ?Sized,
-    {
-        use crate::domain::models::GoalStatus;
-        use crate::domain::ports::GoalFilter;
-
-        let active_goals = goal_repo
-            .list(GoalFilter {
-                status: Some(GoalStatus::Active),
-                ..Default::default()
-            })
-            .await?;
-
-        let mut cache = self.active_goals_cache.write().await;
-        *cache = active_goals;
-        Ok(())
-    }
+    // The active-goals cache mutator (`refresh_active_goals_cache`) lives on
+    // `SwarmOrchestrator` (in `agent_lifecycle.rs`) because it needs the
+    // goal repository, which is owned by `CoreDeps`. It writes through
+    // `self.runtime_state.active_goals_cache`.
 }

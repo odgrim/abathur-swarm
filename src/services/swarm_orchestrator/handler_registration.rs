@@ -154,7 +154,7 @@ where
         reactor
             .register(Arc::new(GoalCreatedHandler::new(
                 self.goal_repo.clone(),
-                self.active_goals_cache.clone(),
+                self.runtime_state.active_goals_cache.clone(),
             )))
             .await;
 
@@ -162,7 +162,7 @@ where
         reactor
             .register(Arc::new(GoalRetiredHandler::new(
                 self.goal_repo.clone(),
-                self.active_goals_cache.clone(),
+                self.runtime_state.active_goals_cache.clone(),
             )))
             .await;
 
@@ -172,10 +172,10 @@ where
                 self.goal_repo.clone(),
                 self.task_repo.clone(),
                 self.worktree_repo.clone(),
-                self.stats.clone(),
-                self.agent_semaphore.clone(),
+                self.runtime_state.stats.clone(),
+                self.runtime_state.agent_semaphore.clone(),
                 self.config.max_agents,
-                self.total_tokens.clone(),
+                self.runtime_state.total_tokens.clone(),
             )))
             .await;
 
@@ -213,7 +213,7 @@ where
         // EscalationTimeoutHandler (NORMAL) — check escalation deadlines
         reactor
             .register(Arc::new(EscalationTimeoutHandler::new(
-                self.escalation_store.clone(),
+                self.runtime_state.escalation_store.clone(),
             )))
             .await;
 
@@ -258,7 +258,7 @@ where
         reactor
             .register(Arc::new(TaskReadySpawnHandler::new(
                 self.task_repo.clone(),
-                self.ready_task_tx.clone(),
+                self.runtime_state.ready_task_tx.clone(),
             )))
             .await;
 
@@ -266,7 +266,7 @@ where
         reactor
             .register(Arc::new(ReadyTaskPollingHandler::new(
                 self.task_repo.clone(),
-                self.ready_task_tx.clone(),
+                self.runtime_state.ready_task_tx.clone(),
             )))
             .await;
 
@@ -274,7 +274,7 @@ where
         reactor
             .register(Arc::new(SpecialistCheckHandler::new(
                 self.task_repo.clone(),
-                self.specialist_tx.clone(),
+                self.runtime_state.specialist_tx.clone(),
                 self.config.max_task_retries,
             )))
             .await;

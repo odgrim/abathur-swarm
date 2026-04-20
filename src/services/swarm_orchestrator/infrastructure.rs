@@ -916,13 +916,14 @@ where
             running_tasks: *task_counts.get(&TaskStatus::Running).unwrap_or(&0) as usize,
             completed_tasks: *task_counts.get(&TaskStatus::Complete).unwrap_or(&0) as usize,
             failed_tasks: *task_counts.get(&TaskStatus::Failed).unwrap_or(&0) as usize,
-            active_agents: self.config.max_agents - self.agent_semaphore.available_permits(),
+            active_agents: self.config.max_agents
+                - self.runtime_state.agent_semaphore.available_permits(),
             active_worktrees,
-            total_tokens_used: self.total_tokens.load(Ordering::Relaxed),
+            total_tokens_used: self.runtime_state.total_tokens.load(Ordering::Relaxed),
         };
 
         {
-            let mut s = self.stats.write().await;
+            let mut s = self.runtime_state.stats.write().await;
             *s = stats.clone();
         }
 
@@ -930,41 +931,34 @@ where
         Ok(())
     }
 
-    /// Get current status.
+    /// Get current status. Delegates to `RuntimeState` (T11).
     pub async fn status(&self) -> OrchestratorStatus {
-        self.status.read().await.clone()
+        self.runtime_state.status().await
     }
 
-    /// Get current stats.
+    /// Get current stats. Delegates to `RuntimeState` (T11).
     pub async fn stats(&self) -> SwarmStats {
-        self.stats.read().await.clone()
+        self.runtime_state.stats().await
     }
 
-    /// Pause the orchestrator.
+    /// Pause the orchestrator. Delegates to `RuntimeState` (T11).
     pub async fn pause(&self) {
-        let mut status = self.status.write().await;
-        if *status == OrchestratorStatus::Running {
-            *status = OrchestratorStatus::Paused;
-        }
+        self.runtime_state.pause().await;
     }
 
-    /// Resume the orchestrator.
+    /// Resume the orchestrator. Delegates to `RuntimeState` (T11).
     pub async fn resume(&self) {
-        let mut status = self.status.write().await;
-        if *status == OrchestratorStatus::Paused {
-            *status = OrchestratorStatus::Running;
-        }
+        self.runtime_state.resume().await;
     }
 
-    /// Stop the orchestrator gracefully.
+    /// Stop the orchestrator gracefully. Delegates to `RuntimeState` (T11).
     pub async fn stop(&self) {
-        let mut status = self.status.write().await;
-        *status = OrchestratorStatus::ShuttingDown;
+        self.runtime_state.stop().await;
     }
 
-    /// Get total tokens used.
+    /// Get total tokens used. Delegates to `RuntimeState` (T11).
     pub fn total_tokens(&self) -> u64 {
-        self.total_tokens.load(Ordering::Relaxed)
+        self.runtime_state.total_tokens()
     }
 
     /// Run startup reconciliation to fix inconsistent state after a crash or restart.

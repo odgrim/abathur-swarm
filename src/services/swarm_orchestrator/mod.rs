@@ -33,6 +33,7 @@ pub mod types;
 pub(crate) mod workspace;
 
 use middleware_bundle::Middleware;
+use runtime_state::RuntimeState;
 
 // Re-export public types
 pub use types::{
@@ -41,11 +42,9 @@ pub use types::{
 };
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use tokio::sync::{RwLock, Semaphore, mpsc};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::{Goal, HumanEscalationEvent};
 use crate::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository, Substrate,
     TaskRepository, TrajectoryRepository, WorktreeRepository,
@@ -80,12 +79,9 @@ where
     pub(super) config: SwarmConfig,
 
     // ---------------- Runtime state ----------------
-    pub(super) status: Arc<RwLock<OrchestratorStatus>>,
-    pub(super) stats: Arc<RwLock<SwarmStats>>,
-    pub(super) agent_semaphore: Arc<Semaphore>,
-    pub(super) total_tokens: Arc<AtomicU64>,
-    pub(super) active_goals_cache: Arc<RwLock<Vec<Goal>>>,
-    pub(super) escalation_store: Arc<RwLock<std::collections::HashMap<uuid::Uuid, HumanEscalationEvent>>>,
+    /// Mutable runtime state: status, stats, semaphore, atomics, caches,
+    /// escalation store, and the ready-task / specialist mpsc channels.
+    pub(crate) runtime_state: RuntimeState,
 
     // ---------------- Core services (always present) ----------------
     pub(super) audit_log: Arc<AuditLogService>,
@@ -98,10 +94,6 @@ where
     pub(super) event_bus: Arc<crate::services::event_bus::EventBus>,
     pub(super) event_reactor: Arc<EventReactor>,
     pub(super) event_scheduler: Arc<EventScheduler>,
-    pub(super) ready_task_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<uuid::Uuid>>>,
-    pub(super) ready_task_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
-    pub(super) specialist_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<uuid::Uuid>>>,
-    pub(super) specialist_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
 
     // ---------------- Daemon handles ----------------
     pub(super) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
@@ -192,8 +184,6 @@ where
         event_scheduler: Arc<EventScheduler>,
     ) -> Self {
         let max_agents = config.max_agents;
-        let (ready_tx, ready_rx) = tokio::sync::mpsc::channel(256);
-        let (specialist_tx, specialist_rx) = tokio::sync::mpsc::channel(64);
         Self {
             // ---------------- Core dependencies (required) ----------------
             goal_repo,
@@ -204,12 +194,7 @@ where
             config,
 
             // ---------------- Runtime state ----------------
-            status: Arc::new(RwLock::new(OrchestratorStatus::Idle)),
-            stats: Arc::new(RwLock::new(SwarmStats::default())),
-            agent_semaphore: Arc::new(Semaphore::new(max_agents)),
-            total_tokens: Arc::new(AtomicU64::new(0)),
-            active_goals_cache: Arc::new(RwLock::new(Vec::new())),
-            escalation_store: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            runtime_state: RuntimeState::new(max_agents),
 
             // ---------------- Core services (always present) ----------------
             audit_log: Arc::new(AuditLogService::with_defaults()),
@@ -224,10 +209,6 @@ where
             event_bus,
             event_reactor,
             event_scheduler,
-            ready_task_rx: Arc::new(tokio::sync::Mutex::new(ready_rx)),
-            ready_task_tx: ready_tx,
-            specialist_rx: Arc::new(tokio::sync::Mutex::new(specialist_rx)),
-            specialist_tx,
 
             // ---------------- Daemon handles ----------------
             decay_daemon_handle: Arc::new(RwLock::new(None)),
@@ -663,7 +644,7 @@ where
         self.validate_dependencies()?;
 
         {
-            let mut status = self.status.write().await;
+            let mut status = self.runtime_state.status.write().await;
             *status = OrchestratorStatus::Running;
         }
         let _ = event_tx.send(SwarmEvent::Started).await;
@@ -1047,7 +1028,7 @@ where
 
         // Main orchestration loop
         loop {
-            let current_status = self.status.read().await.clone();
+            let current_status = self.runtime_state.status.read().await.clone();
 
             match current_status {
                 OrchestratorStatus::ShuttingDown | OrchestratorStatus::Stopped => {
@@ -1067,8 +1048,8 @@ where
             // maintenance is cheapest to run. Both `recv()` and `tick()` are
             // cancel-safe, so losing a race doesn't drop a message.
             let wake = {
-                let mut ready_rx = self.ready_task_rx.lock().await;
-                let mut specialist_rx = self.specialist_rx.lock().await;
+                let mut ready_rx = self.runtime_state.ready_task_rx.lock().await;
+                let mut specialist_rx = self.runtime_state.specialist_rx.lock().await;
                 tokio::select! {
                     biased;
                     Some(id) = ready_rx.recv() => Wake::ReadyTask(id),
@@ -1303,7 +1284,7 @@ where
 
     /// Drain the ready-task channel and spawn agents for each ready task.
     async fn drain_ready_tasks(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
-        let mut rx = self.ready_task_rx.lock().await;
+        let mut rx = self.runtime_state.ready_task_rx.lock().await;
         let mut spawned_ids = std::collections::HashSet::new();
 
         while let Ok(task_id) = rx.try_recv() {
@@ -1333,7 +1314,7 @@ where
         &self,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let mut rx = self.specialist_rx.lock().await;
+        let mut rx = self.runtime_state.specialist_rx.lock().await;
 
         while let Ok(task_id) = rx.try_recv() {
             // Validate task is still in a state that warrants specialist attention
