@@ -1133,12 +1133,10 @@ async fn handle_tasks_send(state: Arc<A2AState>, request: JsonRpcRequest) -> Jso
 /// Returns `Some(Json<JsonRpcResponse>)` when the request was handled,
 /// or `None` when the caller should fall through to normal task handling.
 ///
-/// NOTE: Goal existence validation (e.g., verifying that a referenced goal_id
-/// actually exists in the GoalRepository) should happen at a higher layer
-/// (FederationService or the orchestrator), not in this HTTP handler. A2AState
-/// intentionally does not hold a GoalRepository reference — adding one would
-/// require a larger refactor and would couple the transport layer to domain
-/// storage concerns.
+/// Goal-existence validation (e.g. verifying that a `parent_goal_id`
+/// referenced in a `delegate` request actually exists) lives on
+/// `FederationService::validate_goal_exists`. The transport layer
+/// translates the resulting `DomainError` into a JSON-RPC error.
 async fn handle_federation_routing(
     state: &Arc<A2AState>,
     request_id: &Option<Value>,
@@ -1177,6 +1175,19 @@ async fn handle_federation_routing(
                 .get("parent_goal_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
+            // If a parent_goal_id is supplied, validate it exists. This is
+            // delegated to FederationService rather than performed inline so
+            // the transport layer never touches the goal repository.
+            if let Some(pgid) = parent_goal_id
+                && let Err(e) = federation_service.validate_goal_exists(pgid).await
+            {
+                return Some(Json(JsonRpcResponse::error(
+                    request_id.clone(),
+                    A2AErrorCode::InvalidParams,
+                    Some(json!({"message": format!("parent_goal_id validation failed: {}", e)})),
+                )));
+            }
 
             let correlation_id = match federation_val
                 .get("correlation_id")

@@ -837,7 +837,7 @@ async fn run_swarm_foreground(
     );
 
     let orchestrator = SwarmOrchestrator::new(
-        goal_repo,
+        goal_repo.clone(),
         task_repo,
         worktree_repo,
         agent_repo,
@@ -920,10 +920,13 @@ async fn run_swarm_foreground(
     // Wire federation if enabled in config.
     let fed_config = app_config.federation.clone();
     let orchestrator = if fed_config.enabled {
-        let federation_service = Arc::new(crate::services::federation::FederationService::new(
-            fed_config.clone(),
-            event_bus.clone(),
-        ));
+        let federation_service = Arc::new(
+            crate::services::federation::FederationService::new(
+                fed_config.clone(),
+                event_bus.clone(),
+            )
+            .with_goal_repository(goal_repo.clone()),
+        );
 
         // Register and auto-connect configured cerebrates.
         for cc in &fed_config.cerebrates {

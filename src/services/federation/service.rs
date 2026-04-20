@@ -22,11 +22,13 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::adapters::a2a::A2AClient;
+use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::a2a::{
     CerebrateStatus, ConnectionState, FederationCard, FederationResult, FederationTaskEnvelope,
 };
 use crate::domain::models::goal::Goal;
 use crate::domain::models::goal_federation::{ConvergenceContract, FederatedGoal};
+use crate::domain::ports::GoalRepository;
 use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory;
 
@@ -378,6 +380,11 @@ pub struct FederationService {
     delegation: Arc<DelegationManager>,
     /// Internal collaborator: inbound result ingest.
     results: Arc<ResultProcessor>,
+    /// Optional goal repository for cross-cutting goal lookups (e.g.
+    /// validating that a goal_id referenced from a federation request
+    /// actually exists). Optional because not every construction site
+    /// has a database (tests, ephemeral instances).
+    goal_repository: Option<Arc<dyn GoalRepository>>,
 }
 
 impl FederationService {
@@ -446,6 +453,7 @@ impl FederationService {
             a2a_client,
             delegation,
             results,
+            goal_repository: None,
         }
     }
 
@@ -518,6 +526,39 @@ impl FederationService {
         self.task_transformer = transformer;
         self.rebuild_collaborators();
         self
+    }
+
+    /// Inject a goal repository so federation can validate goal references
+    /// (e.g. confirm that a `goal_id` carried in a federation envelope
+    /// actually corresponds to a known goal). Construction sites that do
+    /// not need this validation (most unit tests) can omit it; in that
+    /// case `validate_goal_exists` returns `Ok(())`.
+    pub fn with_goal_repository(mut self, repo: Arc<dyn GoalRepository>) -> Self {
+        self.goal_repository = Some(repo);
+        self
+    }
+
+    /// Verify that a goal with the given id exists in the configured
+    /// repository.
+    ///
+    /// Returns:
+    /// - `Ok(())` if the goal exists, or if no goal repository is wired
+    ///   (the validation is treated as best-effort).
+    /// - `Err(DomainError::GoalNotFound)` if the repository is configured
+    ///   and the goal is missing.
+    /// - Other `DomainError` variants for storage failures.
+    ///
+    /// This lives on `FederationService` (rather than the transport layer)
+    /// because federation owns the goal/cerebrate relationship; transports
+    /// should not reach into domain repositories directly.
+    pub async fn validate_goal_exists(&self, goal_id: Uuid) -> DomainResult<()> {
+        let Some(ref repo) = self.goal_repository else {
+            return Ok(());
+        };
+        match repo.get(goal_id).await? {
+            Some(_) => Ok(()),
+            None => Err(DomainError::GoalNotFound(goal_id)),
+        }
     }
 
     /// Register a result schema.
@@ -1550,6 +1591,113 @@ mod tests {
         };
 
         assert!(after > before, "Progress should update last_activity timestamp");
+    }
+
+    // ------------------------------------------------------------------
+    // validate_goal_exists
+    // ------------------------------------------------------------------
+
+    use crate::domain::models::{Goal, GoalStatus};
+    use crate::domain::ports::{GoalFilter, GoalRepository as GoalRepoTrait};
+    use async_trait::async_trait;
+    use std::collections::HashMap as StdHashMap;
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// Minimal in-memory GoalRepository used only by the validation tests.
+    struct MockGoalRepo {
+        goals: TokioMutex<StdHashMap<Uuid, Goal>>,
+    }
+
+    impl MockGoalRepo {
+        fn new() -> Self {
+            Self {
+                goals: TokioMutex::new(StdHashMap::new()),
+            }
+        }
+
+        async fn insert(&self, goal: Goal) {
+            self.goals.lock().await.insert(goal.id, goal);
+        }
+    }
+
+    #[async_trait]
+    impl GoalRepoTrait for MockGoalRepo {
+        async fn create(&self, goal: &Goal) -> crate::domain::errors::DomainResult<()> {
+            self.goals.lock().await.insert(goal.id, goal.clone());
+            Ok(())
+        }
+        async fn get(&self, id: Uuid) -> crate::domain::errors::DomainResult<Option<Goal>> {
+            Ok(self.goals.lock().await.get(&id).cloned())
+        }
+        async fn update(&self, goal: &Goal) -> crate::domain::errors::DomainResult<()> {
+            self.goals.lock().await.insert(goal.id, goal.clone());
+            Ok(())
+        }
+        async fn delete(&self, id: Uuid) -> crate::domain::errors::DomainResult<()> {
+            self.goals.lock().await.remove(&id);
+            Ok(())
+        }
+        async fn list(&self, _filter: GoalFilter) -> crate::domain::errors::DomainResult<Vec<Goal>> {
+            Ok(self.goals.lock().await.values().cloned().collect())
+        }
+        async fn get_children(
+            &self,
+            _parent_id: Uuid,
+        ) -> crate::domain::errors::DomainResult<Vec<Goal>> {
+            Ok(vec![])
+        }
+        async fn get_active_with_constraints(
+            &self,
+        ) -> crate::domain::errors::DomainResult<Vec<Goal>> {
+            Ok(vec![])
+        }
+        async fn count_by_status(
+            &self,
+        ) -> crate::domain::errors::DomainResult<StdHashMap<GoalStatus, u64>> {
+            Ok(StdHashMap::new())
+        }
+        async fn find_by_domains(
+            &self,
+            _domains: &[String],
+        ) -> crate::domain::errors::DomainResult<Vec<Goal>> {
+            Ok(vec![])
+        }
+        async fn update_last_check(
+            &self,
+            _goal_id: Uuid,
+            _ts: chrono::DateTime<chrono::Utc>,
+        ) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_goal_exists_no_repo_is_ok() {
+        // When no repository is wired, validation is a no-op. Keeps the
+        // many test/ephemeral construction sites working unchanged.
+        let svc = make_service();
+        assert!(svc.validate_goal_exists(Uuid::new_v4()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_goal_exists_present() {
+        let repo = Arc::new(MockGoalRepo::new());
+        let goal = Goal::new("g", "d");
+        let goal_id = goal.id;
+        repo.insert(goal).await;
+
+        let svc = make_service().with_goal_repository(repo);
+        svc.validate_goal_exists(goal_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_goal_exists_missing() {
+        let repo = Arc::new(MockGoalRepo::new());
+        let svc = make_service().with_goal_repository(repo);
+
+        let missing = Uuid::new_v4();
+        let err = svc.validate_goal_exists(missing).await.unwrap_err();
+        assert!(matches!(err, DomainError::GoalNotFound(id) if id == missing));
     }
 
     #[tokio::test]
