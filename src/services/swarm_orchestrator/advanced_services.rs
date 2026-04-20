@@ -34,9 +34,7 @@ use crate::services::{
 /// optional; multi-field features (e.g. convergent execution requires
 /// `trajectory_repo` + `overseer_cluster` + `intent_verifier` + `memory_repo`)
 /// are validated up-front by `SwarmOrchestrator::validate_dependencies()`.
-// dead_code: introduced in T11 step 1; fields wired in steps 2-7.
-#[allow(dead_code)]
-pub(super) struct AdvancedServices<G, T, W, A, M>
+pub(crate) struct AdvancedServices<G, T, W, A, M>
 where
     G: GoalRepository + 'static,
     T: TaskRepository + 'static,
@@ -44,36 +42,35 @@ where
     A: AgentRepository + 'static,
     M: MemoryRepository + 'static,
 {
-    pub(super) memory_repo: Option<Arc<M>>,
-    pub(super) intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
-    pub(super) overmind: Option<Arc<OvermindService>>,
-    pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
+    pub(crate) memory_repo: Option<Arc<M>>,
+    pub(crate) intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
+    pub(crate) overmind: Option<Arc<OvermindService>>,
+    pub(crate) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
     /// Optional DB pool for services that need persistence (absence timers,
     /// command dedup, evolution refinements, event outbox).
-    pub(super) pool: Option<SqlitePool>,
-    pub(super) outbox_repo: Option<Arc<dyn OutboxRepository>>,
-    pub(super) trigger_rule_repo: Option<Arc<dyn TriggerRuleRepository>>,
-    pub(super) merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
-    pub(super) adapter_registry: Option<Arc<AdapterRegistry>>,
-    pub(super) budget_tracker: Option<Arc<BudgetTracker>>,
-    pub(super) cost_window_service: Option<Arc<CostWindowService>>,
+    pub(crate) pool: Option<SqlitePool>,
+    pub(crate) outbox_repo: Option<Arc<dyn OutboxRepository>>,
+    pub(crate) trigger_rule_repo: Option<Arc<dyn TriggerRuleRepository>>,
+    pub(crate) merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
+    pub(crate) adapter_registry: Option<Arc<AdapterRegistry>>,
+    pub(crate) budget_tracker: Option<Arc<BudgetTracker>>,
+    pub(crate) cost_window_service: Option<Arc<CostWindowService>>,
 
-    pub(super) federation_client: Option<Arc<FederationClient>>,
-    pub(super) federation_service: Option<Arc<FederationService>>,
+    pub(crate) federation_client: Option<Arc<FederationClient>>,
+    pub(crate) federation_service: Option<Arc<FederationService>>,
 
-    pub(super) overseer_cluster: Option<Arc<OverseerClusterService>>,
-    pub(super) trajectory_repo: Option<Arc<dyn TrajectoryRepository>>,
-    pub(super) convergence_engine_config:
+    pub(crate) overseer_cluster: Option<Arc<OverseerClusterService>>,
+    pub(crate) trajectory_repo: Option<Arc<dyn TrajectoryRepository>>,
+    pub(crate) convergence_engine_config:
         Option<crate::domain::models::convergence::ConvergenceEngineConfig>,
 
     // Phantom marker to consume the W generic, which is needed to keep this
     // bundle on the same generics as `SwarmOrchestrator` (so a single
     // `with_*()` method can mutate it without juggling parameters) but isn't
     // used by any field directly. `A` is unused too — same rationale.
-    pub(super) _marker: std::marker::PhantomData<(W, A)>,
+    pub(crate) _marker: std::marker::PhantomData<(W, A)>,
 }
 
-#[allow(dead_code)]
 impl<G, T, W, A, M> AdvancedServices<G, T, W, A, M>
 where
     G: GoalRepository + 'static,
@@ -84,7 +81,7 @@ where
 {
     /// Construct an empty bundle — every optional service is `None`. Use
     /// the `with_*()` builders on `SwarmOrchestrator` to populate.
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             memory_repo: None,
             intent_verifier: None,

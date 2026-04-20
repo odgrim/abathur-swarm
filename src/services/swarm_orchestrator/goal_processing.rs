@@ -150,8 +150,8 @@ where
             audit_log: self.subsystem_services.audit_log.clone(),
             circuit_breaker: self.subsystem_services.circuit_breaker.clone(),
             guardrails: self.subsystem_services.guardrails.clone(),
-            cost_window_service: self.cost_window_service.clone(),
-            budget_tracker: self.budget_tracker.clone(),
+            cost_window_service: self.advanced_services.cost_window_service.clone(),
+            budget_tracker: self.advanced_services.budget_tracker.clone(),
             agent_semaphore: self.runtime_state.agent_semaphore.clone(),
             max_agents: self.config.max_agents,
             federation_priority_bumps: 0,
@@ -347,7 +347,7 @@ where
             // Load goal/memory/intent-gap context and assemble the final task
             // description via TaskContextService.
             let context_svc =
-                TaskContextService::new(self.goal_repo.clone(), self.memory_repo.clone());
+                TaskContextService::new(self.goal_repo.clone(), self.advanced_services.memory_repo.clone());
             let task_context = context_svc.load_task_context(task).await?;
             if let Some(ref goal_ctx) = task_context.goal_context {
                 // Preserve audit-log behaviour for goal-context loading.
@@ -465,17 +465,17 @@ where
                 evolution_loop: self.subsystem_services.evolution_loop.clone(),
                 fetch_on_sync: self.config.fetch_on_sync,
                 output_delivery: task_output_delivery.clone(),
-                merge_request_repo: self.merge_request_repo.clone(),
+                merge_request_repo: self.advanced_services.merge_request_repo.clone(),
                 post_completion_chain: self.middleware.post_completion_chain.clone(),
             };
 
             let intent_verifier_dyn: Option<
                 Arc<dyn super::convergent_execution::ConvergentIntentVerifier>,
-            > = self.intent_verifier.as_ref().map(|iv| {
+            > = self.advanced_services.intent_verifier.as_ref().map(|iv| {
                 Arc::clone(iv) as Arc<dyn super::convergent_execution::ConvergentIntentVerifier>
             });
             let memory_repo_dyn: Option<Arc<dyn crate::domain::ports::MemoryRepository>> =
-                self.memory_repo.as_ref().map(|m| {
+                self.advanced_services.memory_repo.as_ref().map(|m| {
                     Arc::clone(m) as Arc<dyn crate::domain::ports::MemoryRepository>
                 });
             let goal_repo_dyn: Arc<dyn crate::domain::ports::GoalRepository> =
@@ -509,12 +509,12 @@ where
                 event_tx: event_tx.clone(),
                 audit_log: self.subsystem_services.audit_log.clone(),
                 circuit_breaker: self.subsystem_services.circuit_breaker.clone(),
-                command_bus: self.command_bus.read().await.clone(),
+                command_bus: self.advanced_services.command_bus.read().await.clone(),
                 total_tokens: self.runtime_state.total_tokens.clone(),
                 permit,
-                overseer_cluster: self.overseer_cluster.clone(),
-                trajectory_repo: self.trajectory_repo.clone(),
-                convergence_engine_config: self.convergence_engine_config.clone(),
+                overseer_cluster: self.advanced_services.overseer_cluster.clone(),
+                trajectory_repo: self.advanced_services.trajectory_repo.clone(),
+                convergence_engine_config: self.advanced_services.convergence_engine_config.clone(),
                 memory_repo: memory_repo_dyn,
                 intent_verifier: intent_verifier_dyn,
                 config: exec_cfg,

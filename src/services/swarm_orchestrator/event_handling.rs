@@ -77,7 +77,7 @@ where
     async fn get_command_bus(&self) -> Arc<crate::services::command_bus::CommandBus> {
         // Try the stored bus first (set during register_builtin_handlers)
         {
-            let stored = self.command_bus.read().await;
+            let stored = self.advanced_services.command_bus.read().await;
             if let Some(ref bus) = *stored {
                 return bus.clone();
             }
@@ -99,7 +99,7 @@ where
         );
         let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
 
-        if let Some(ref memory_repo) = self.memory_repo {
+        if let Some(ref memory_repo) = self.advanced_services.memory_repo {
             let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
             let maintenance_service =
                 Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
@@ -109,10 +109,10 @@ where
                 maintenance_service,
                 self.subsystem_services.event_bus.clone(),
             );
-            if let Some(ref pool) = self.pool {
+            if let Some(ref pool) = self.advanced_services.pool {
                 bus = bus.with_pool(pool.clone());
             }
-            if let Some(ref outbox) = self.outbox_repo {
+            if let Some(ref outbox) = self.advanced_services.outbox_repo {
                 bus = bus.with_outbox(outbox.clone());
             }
             Arc::new(bus)
@@ -126,10 +126,10 @@ where
                 null_maintenance,
                 self.subsystem_services.event_bus.clone(),
             );
-            if let Some(ref pool) = self.pool {
+            if let Some(ref pool) = self.advanced_services.pool {
                 bus = bus.with_pool(pool.clone());
             }
-            if let Some(ref outbox) = self.outbox_repo {
+            if let Some(ref outbox) = self.advanced_services.outbox_repo {
                 bus = bus.with_outbox(outbox.clone());
             }
             Arc::new(bus)

@@ -71,7 +71,7 @@ where
             .await;
 
         // WorkflowSubtaskCompletionHandler (HIGH) — drive workflow state machine on subtask completion
-        let verification_enabled = self.intent_verifier.is_some();
+        let verification_enabled = self.advanced_services.intent_verifier.is_some();
         reactor
             .register(Arc::new(WorkflowSubtaskCompletionHandler::new(
                 self.task_repo.clone(),
@@ -81,7 +81,7 @@ where
             .await;
 
         // WorkflowVerificationHandler (HIGH) — run intent verification on completed phases
-        if let Some(ref verifier) = self.intent_verifier {
+        if let Some(ref verifier) = self.advanced_services.intent_verifier {
             reactor
                 .register(Arc::new(WorkflowVerificationHandler::new(
                     self.task_repo.clone(),
@@ -133,7 +133,7 @@ where
             .await;
 
         // ConvergenceEscalationFeedbackHandler (NORMAL) — feed human escalation responses back into convergence loop
-        if let Some(ref trajectory_repo) = self.trajectory_repo {
+        if let Some(ref trajectory_repo) = self.advanced_services.trajectory_repo {
             reactor
                 .register(Arc::new(ConvergenceEscalationFeedbackHandler::new(
                     self.task_repo.clone(),
@@ -218,7 +218,7 @@ where
             .await;
 
         // MemoryMaintenanceHandler (NORMAL) — periodic memory maintenance
-        if let Some(ref memory_repo) = self.memory_repo {
+        if let Some(ref memory_repo) = self.advanced_services.memory_repo {
             let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
             let maintenance_service =
                 Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
@@ -285,7 +285,7 @@ where
         // Evolution evaluation is handled by process_evolution_refinements() (System A).
 
         // ConvergenceMemoryHandler (NORMAL) — record convergence outcomes to memory
-        if let Some(ref memory_repo) = self.memory_repo {
+        if let Some(ref memory_repo) = self.advanced_services.memory_repo {
             reactor
                 .register(Arc::new(ConvergenceMemoryHandler::new(
                     self.task_repo.clone(),
@@ -295,7 +295,7 @@ where
         }
 
         // DirectModeExecutionMemoryHandler (NORMAL) — record all task executions for classification heuristic
-        if let Some(ref memory_repo) = self.memory_repo {
+        if let Some(ref memory_repo) = self.advanced_services.memory_repo {
             reactor
                 .register(Arc::new(DirectModeExecutionMemoryHandler::new(
                     memory_repo.clone(),
@@ -304,7 +304,7 @@ where
         }
 
         // TaskOutcomeMemoryHandler (NORMAL) — episodic memory for ALL task completions
-        if let Some(ref memory_repo) = self.memory_repo {
+        if let Some(ref memory_repo) = self.advanced_services.memory_repo {
             reactor
                 .register(Arc::new(TaskOutcomeMemoryHandler::new(
                     self.task_repo.clone(),
@@ -334,7 +334,7 @@ where
             );
             let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
 
-            let bus = if let Some(ref memory_repo) = self.memory_repo {
+            let bus = if let Some(ref memory_repo) = self.advanced_services.memory_repo {
                 let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
                 let maintenance_service =
                     Arc::new(MemoryMaintenanceService::from_memory_service(memory_service));
@@ -344,10 +344,10 @@ where
                     maintenance_service,
                     self.subsystem_services.event_bus.clone(),
                 );
-                if let Some(ref pool) = self.pool {
+                if let Some(ref pool) = self.advanced_services.pool {
                     bus = bus.with_pool(pool.clone());
                 }
-                if let Some(ref outbox) = self.outbox_repo {
+                if let Some(ref outbox) = self.advanced_services.outbox_repo {
                     bus = bus.with_outbox(outbox.clone());
                 }
                 Arc::new(bus)
@@ -362,10 +362,10 @@ where
                     null_maintenance,
                     self.subsystem_services.event_bus.clone(),
                 );
-                if let Some(ref pool) = self.pool {
+                if let Some(ref pool) = self.advanced_services.pool {
                     bus = bus.with_pool(pool.clone());
                 }
-                if let Some(ref outbox) = self.outbox_repo {
+                if let Some(ref outbox) = self.advanced_services.outbox_repo {
                     bus = bus.with_outbox(outbox.clone());
                 }
                 Arc::new(bus)
@@ -373,7 +373,7 @@ where
 
             // Store on the orchestrator so other subsystems can use it
             {
-                let mut stored = self.command_bus.write().await;
+                let mut stored = self.advanced_services.command_bus.write().await;
                 *stored = Some(bus.clone());
             }
 
@@ -413,17 +413,17 @@ where
                 .with_event_bus(self.subsystem_services.event_bus.clone())
                 .with_event_scheduler(self.subsystem_services.event_scheduler.clone());
 
-            if let Some(ref repo) = self.trigger_rule_repo {
+            if let Some(ref repo) = self.advanced_services.trigger_rule_repo {
                 engine_builder = engine_builder.with_rule_repo(repo.clone());
             }
-            if let Some(ref pool) = self.pool {
+            if let Some(ref pool) = self.advanced_services.pool {
                 engine_builder = engine_builder.with_pool(pool.clone());
             }
 
             let engine = Arc::new(engine_builder);
 
             // Load rules: merge DB rules (if repo available) with built-in defaults
-            if let Some(ref repo) = self.trigger_rule_repo {
+            if let Some(ref repo) = self.advanced_services.trigger_rule_repo {
                 match repo.list().await {
                     Ok(db_rules) if !db_rules.is_empty() => {
                         // DB rules take precedence; seed built-ins that don't exist in DB
@@ -596,7 +596,7 @@ where
 
         // ObstacleEscalationHandler (LOW) — detect repeated failure patterns and escalate to goals
         if p.obstacle_escalation_enabled
-            && let Some(ref memory_repo) = self.memory_repo
+            && let Some(ref memory_repo) = self.advanced_services.memory_repo
         {
             reactor
                 .register(Arc::new(ObstacleEscalationHandler::new(
@@ -630,7 +630,7 @@ where
                 command_bus.clone(),
                 p.goal_convergence_check_interval_secs,
             );
-            if let Some(ref bt) = self.budget_tracker {
+            if let Some(ref bt) = self.advanced_services.budget_tracker {
                 convergence_handler = convergence_handler.with_budget_tracker(bt.clone());
             }
             reactor.register(Arc::new(convergence_handler)).await;
@@ -655,7 +655,7 @@ where
         // and direct-mode tasks.
 
         // TaskScheduleHandler (NORMAL) — create tasks when periodic schedules fire
-        if let Some(ref pool) = self.pool {
+        if let Some(ref pool) = self.advanced_services.pool {
             use crate::adapters::sqlite::SqliteTaskScheduleRepository;
             use crate::services::task_schedule_service::TaskScheduleService;
 
@@ -689,7 +689,7 @@ where
         }
 
         // Budget handlers — only when budget tracker is configured
-        if let Some(ref budget_tracker) = self.budget_tracker {
+        if let Some(ref budget_tracker) = self.advanced_services.budget_tracker {
             reactor
                 .register(Arc::new(
                     crate::services::builtin_handlers::BudgetTokenAccumulatorHandler::new(
@@ -705,7 +705,7 @@ where
         }
 
         // FederationResultHandler (NORMAL) — process federation events
-        if let Some(ref federation_service) = self.federation_service {
+        if let Some(ref federation_service) = self.advanced_services.federation_service {
             use crate::services::federation::FederationResultHandler;
             reactor
                 .register(Arc::new(FederationResultHandler::new(
@@ -715,8 +715,9 @@ where
         }
 
         // Federation heartbeat schedule — if federation is enabled, schedule periodic heartbeat checks
-        if self.federation_service.is_some() {
+        if self.advanced_services.federation_service.is_some() {
             let fed_config = self
+                .advanced_services
                 .federation_service
                 .as_ref()
                 .map(|s| s.config())
@@ -733,7 +734,7 @@ where
         }
 
         // Adapter handlers — register only when an adapter registry is present
-        if let Some(ref adapter_registry) = self.adapter_registry {
+        if let Some(ref adapter_registry) = self.advanced_services.adapter_registry {
             // IngestionPollHandler (NORMAL) — poll external systems for new work items
             if !adapter_registry.ingestion_names().is_empty() {
                 reactor
@@ -822,7 +823,7 @@ where
             .await;
 
         // Memory maintenance — prune, promote, resolve conflicts
-        if self.memory_repo.is_some() {
+        if self.advanced_services.memory_repo.is_some() {
             scheduler
                 .register(interval_schedule(
                     "memory-maintenance",
@@ -913,7 +914,7 @@ where
         }
 
         // Goal evaluation — periodic observation of goal progress
-        if self.memory_repo.is_some() {
+        if self.advanced_services.memory_repo.is_some() {
             scheduler
                 .register(interval_schedule(
                     "goal-evaluation",
@@ -979,7 +980,7 @@ where
         }
 
         // Adapter ingestion poll — periodic external system ingestion
-        if let Some(ref adapter_registry) = self.adapter_registry
+        if let Some(ref adapter_registry) = self.advanced_services.adapter_registry
             && !adapter_registry.ingestion_names().is_empty()
         {
             scheduler

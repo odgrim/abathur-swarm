@@ -298,7 +298,7 @@ where
 
             // Create a refined version based on the failure patterns
             // Try LLM-powered refinement via Substrate, fall back to heuristic string-append
-            let refined_prompt = if self.overmind.is_some() {
+            let refined_prompt = if self.advanced_services.overmind.is_some() {
                 let refinement_request = SubstrateRequest::new(
                     Uuid::new_v4(),
                     "overmind",
@@ -632,7 +632,7 @@ where
         };
 
         // Append adapter egress prompt section (if adapters are loaded)
-        let adapter_section = if let Some(ref registry) = self.adapter_registry {
+        let adapter_section = if let Some(ref registry) = self.advanced_services.adapter_registry {
             registry.build_egress_prompt_section()
         } else {
             String::new()

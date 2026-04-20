@@ -245,7 +245,7 @@ where
                     .await;
 
                 // Transition to Ready via CommandBus
-                if let Some(cb) = self.command_bus.read().await.as_ref() {
+                if let Some(cb) = self.advanced_services.command_bus.read().await.as_ref() {
                     let envelope = CommandEnvelope::new(
                         CommandSource::System,
                         DomainCommand::Task(TaskCommand::Transition {
@@ -303,7 +303,7 @@ where
             }
             RestructureDecision::Escalate { reason, context } => {
                 // Try federation delegation before falling through
-                if let Some(ref federation) = self.federation_client {
+                if let Some(ref federation) = self.advanced_services.federation_client {
                     let peers = federation.list_available_peers();
                     for peer in peers {
                         let task_desc = format!(
@@ -378,7 +378,7 @@ where
         remove_original: bool,
         _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let cb = self.command_bus.read().await.clone();
+        let cb = self.advanced_services.command_bus.read().await.clone();
 
         let mut title_to_id: Vec<(String, Uuid)> = Vec::new();
         for spec in new_tasks {
@@ -494,7 +494,7 @@ where
         );
 
         // Submit diagnostic task via CommandBus (journals TaskSubmitted event)
-        let diagnostic_task_id = if let Some(cb) = self.command_bus.read().await.as_ref() {
+        let diagnostic_task_id = if let Some(cb) = self.advanced_services.command_bus.read().await.as_ref() {
             let envelope = CommandEnvelope::new(
                 CommandSource::System,
                 DomainCommand::Task(TaskCommand::Submit {
@@ -701,7 +701,7 @@ where
         );
 
         // Submit evaluation task via CommandBus
-        let eval_task_id = if let Some(cb) = self.command_bus.read().await.as_ref() {
+        let eval_task_id = if let Some(cb) = self.advanced_services.command_bus.read().await.as_ref() {
             let envelope = CommandEnvelope::new(
                 CommandSource::System,
                 DomainCommand::Task(TaskCommand::Submit {
@@ -791,7 +791,7 @@ where
         &self,
         _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let mr_repo = match self.merge_request_repo.as_ref() {
+        let mr_repo = match self.advanced_services.merge_request_repo.as_ref() {
             Some(repo) => repo.clone(),
             None => {
                 tracing::debug!(
@@ -839,7 +839,7 @@ where
                     "skipping stale conflict — associated task is terminal"
                 );
                 // Mark the merge request as failed so it's not picked up again
-                if let Some(ref mr_repo) = self.merge_request_repo
+                if let Some(ref mr_repo) = self.advanced_services.merge_request_repo
                     && let Ok(Some(mut mr)) = mr_repo.get(conflict.merge_request_id).await
                 {
                     mr.status = crate::services::merge_queue::MergeStatus::Failed;
@@ -961,7 +961,7 @@ where
                 );
 
                 // Submit via CommandBus
-                let task_id = if let Some(cb) = self.command_bus.read().await.as_ref() {
+                let task_id = if let Some(cb) = self.advanced_services.command_bus.read().await.as_ref() {
                     let envelope = CommandEnvelope::new(
                         CommandSource::System,
                         DomainCommand::Task(TaskCommand::Submit {
@@ -1056,7 +1056,7 @@ where
 
         let fallback_winner = parties.first().map(|p| p.id);
 
-        if let Some(ref overmind) = self.overmind {
+        if let Some(ref overmind) = self.advanced_services.overmind {
             let request = ConflictResolutionRequest {
                 conflict_type,
                 parties,
@@ -1109,7 +1109,7 @@ where
             OvermindEscalationUrgency,
         };
 
-        if let Some(ref overmind) = self.overmind {
+        if let Some(ref overmind) = self.advanced_services.overmind {
             let request = EscalationRequest {
                 context: context.clone(),
                 trigger: trigger.clone(),

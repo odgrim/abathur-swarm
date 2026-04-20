@@ -202,7 +202,7 @@ where
     where
         M: MemoryRepository + Send + Sync + 'static,
     {
-        let Some(ref memory_repo) = self.memory_repo else {
+        let Some(ref memory_repo) = self.advanced_services.memory_repo else {
             return Ok(None);
         };
 
@@ -237,12 +237,12 @@ where
 
         let cold_start_config = ColdStartConfig {
             project_root: self.config.repo_path.clone(),
-            use_llm_analysis: self.overmind.is_some(),
+            use_llm_analysis: self.advanced_services.overmind.is_some(),
             ..Default::default()
         };
         let cold_start_service = ColdStartService::new(memory_service, cold_start_config)
             .with_event_bus(self.subsystem_services.event_bus.clone());
-        let cold_start_service = if self.overmind.is_some() {
+        let cold_start_service = if self.advanced_services.overmind.is_some() {
             cold_start_service.with_substrate(self.substrate.clone())
         } else {
             cold_start_service
@@ -298,7 +298,7 @@ where
         use crate::domain::models::SessionStatus;
         use crate::domain::models::task::{Task, TaskSource, TaskStatus, TaskType};
 
-        let Some(ref memory_repo) = self.memory_repo else {
+        let Some(ref memory_repo) = self.advanced_services.memory_repo else {
             return Ok(false);
         };
 
@@ -437,7 +437,7 @@ where
         a2a_client: Arc<dyn crate::adapters::a2a::A2AClient>,
         federated_goal_repo: Arc<dyn crate::domain::ports::FederatedGoalRepository>,
     ) -> DomainResult<()> {
-        let Some(ref federation_service) = self.federation_service else {
+        let Some(ref federation_service) = self.advanced_services.federation_service else {
             return Ok(());
         };
 
@@ -484,7 +484,7 @@ where
             >,
         >,
     ) -> DomainResult<()> {
-        let Some(ref federation_service) = self.federation_service else {
+        let Some(ref federation_service) = self.advanced_services.federation_service else {
             return Ok(());
         };
 
@@ -499,7 +499,7 @@ where
         let mut publisher =
             ConvergencePublisher::new(a2a_tasks, std::time::Duration::from_secs(30));
 
-        if let Some(ref trajectory_repo) = self.trajectory_repo {
+        if let Some(ref trajectory_repo) = self.advanced_services.trajectory_repo {
             publisher = publisher.with_trajectory_repo(trajectory_repo.clone());
         }
 
@@ -526,7 +526,7 @@ where
     where
         M: MemoryRepository + Send + Sync + 'static,
     {
-        let Some(ref memory_repo) = self.memory_repo else {
+        let Some(ref memory_repo) = self.advanced_services.memory_repo else {
             return Ok(());
         };
 
@@ -699,7 +699,7 @@ where
     /// to the EventBus. Only starts if an outbox repository is configured
     /// (i.e., a pool was provided via `with_pool`).
     pub async fn start_outbox_poller(&self) {
-        let Some(ref outbox) = self.outbox_repo else {
+        let Some(ref outbox) = self.advanced_services.outbox_repo else {
             return;
         };
 
@@ -955,7 +955,7 @@ where
     /// - Tasks in `Pending` status with all dependencies complete -> transition to `Ready`
     pub async fn run_startup_reconciliation(&self) -> DomainResult<u64> {
         let mut corrections: u64 = 0;
-        let cb = self.command_bus.read().await.clone();
+        let cb = self.advanced_services.command_bus.read().await.clone();
 
         // 1. Fail stale Running tasks (started_at older than threshold).
         //    On restart, any task that was Running has lost its agent.

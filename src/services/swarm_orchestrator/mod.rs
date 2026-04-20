@@ -32,6 +32,7 @@ pub(crate) mod task_exec;
 pub mod types;
 pub(crate) mod workspace;
 
+use advanced_services::AdvancedServices;
 use daemon_handles::DaemonHandles;
 use middleware_bundle::Middleware;
 use runtime_state::RuntimeState;
@@ -44,7 +45,7 @@ pub use types::{
 };
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::ports::{
@@ -55,7 +56,6 @@ use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogConfig,
     AuditLogService, CircuitBreakerConfig, CircuitBreakerService, EvolutionLoop,
     IntentVerifierConfig, IntentVerifierService,
-    command_bus::CommandBus,
     event_reactor::EventReactor,
     event_scheduler::EventScheduler,
     guardrails::{Guardrails, GuardrailsConfig},
@@ -97,38 +97,13 @@ where
     /// cancels tokens before signalling stops; see `daemon_handles.rs`.
     pub(crate) daemon_handles: DaemonHandles,
 
-    // ---------------- Optional services (progressive enhancement) ----------------
-    pub(super) memory_repo: Option<Arc<M>>,
-    pub(super) intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
-    pub(super) overmind: Option<Arc<crate::services::OvermindService>>,
-    pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
-    /// Optional DB pool for services that need persistence (absence timers, command dedup).
-    pub(super) pool: Option<sqlx::SqlitePool>,
-    /// Optional outbox repository for transactional event delivery.
-    pub(super) outbox_repo: Option<Arc<dyn crate::domain::ports::OutboxRepository>>,
-    pub(super) trigger_rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
-    pub(super) merge_request_repo: Option<Arc<dyn crate::domain::ports::MergeRequestRepository>>,
-    /// Optional adapter registry for external system integration.
-    pub(super) adapter_registry: Option<Arc<crate::services::adapter_registry::AdapterRegistry>>,
-    /// Optional budget tracker for budget-aware scheduling.
-    pub(super) budget_tracker: Option<Arc<crate::services::budget_tracker::BudgetTracker>>,
-    /// Optional cost-window service for quiet-hours scheduling.
-    pub(super) cost_window_service:
-        Option<Arc<crate::services::cost_window_service::CostWindowService>>,
-
-    // ---------------- Federation ----------------
-    pub(super) federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
-    pub(super) federation_service: Option<Arc<crate::services::federation::FederationService>>,
-
-    // ---------------- Convergence infrastructure ----------------
-    /// Overseer cluster for convergent execution quality measurement.
-    pub(super) overseer_cluster: Option<Arc<crate::services::overseers::OverseerClusterService>>,
-    /// Trajectory repository for convergence state persistence.
-    pub(super) trajectory_repo: Option<Arc<dyn TrajectoryRepository>>,
-    /// Pre-built convergence engine config derived from SwarmConfig.
-    /// Stored here to avoid recomputing on every convergent task spawn.
-    pub(super) convergence_engine_config:
-        Option<crate::domain::models::convergence::ConvergenceEngineConfig>,
+    // ---------------- Advanced services (progressive enhancement) ----------------
+    /// Progressive-enhancement subsystems. Each field on the bundle is
+    /// independently `Option` and gated by a `with_*()` builder method.
+    /// Includes the memory/intent-verifier generics, federation pair, and
+    /// convergence infrastructure (trajectory_repo, overseer_cluster,
+    /// convergence_engine_config). See `advanced_services.rs`.
+    pub(crate) advanced_services: AdvancedServices<G, T, W, A, M>,
 
     // ---------------- Middleware ----------------
     /// Pre-spawn and post-completion middleware chains.
@@ -186,27 +161,8 @@ where
             // ---------------- Daemon handles ----------------
             daemon_handles: DaemonHandles::new(),
 
-            // ---------------- Optional services (progressive enhancement) ----------------
-            memory_repo: None,
-            intent_verifier: None,
-            overmind: None,
-            command_bus: Arc::new(RwLock::new(None)),
-            pool: None,
-            outbox_repo: None,
-            trigger_rule_repo: None,
-            merge_request_repo: None,
-            adapter_registry: None,
-            budget_tracker: None,
-            cost_window_service: None,
-
-            // ---------------- Federation ----------------
-            federation_client: None,
-            federation_service: None,
-
-            // ---------------- Convergence infrastructure ----------------
-            overseer_cluster: None,
-            trajectory_repo: None,
-            convergence_engine_config: None,
+            // ---------------- Advanced services (progressive enhancement) ----------------
+            advanced_services: AdvancedServices::new(),
 
             // ---------------- Middleware ----------------
             middleware: Middleware::new(),
@@ -240,7 +196,7 @@ where
         mut self,
         federation_client: Arc<crate::adapters::mcp::FederationClient>,
     ) -> Self {
-        self.federation_client = Some(federation_client);
+        self.advanced_services.federation_client = Some(federation_client);
         self
     }
 
@@ -249,7 +205,7 @@ where
         mut self,
         federation_service: Arc<crate::services::federation::FederationService>,
     ) -> Self {
-        self.federation_service = Some(federation_service);
+        self.advanced_services.federation_service = Some(federation_service);
         self
     }
 
@@ -257,7 +213,7 @@ where
     pub fn federation_service(
         &self,
     ) -> Option<&Arc<crate::services::federation::FederationService>> {
-        self.federation_service.as_ref()
+        self.advanced_services.federation_service.as_ref()
     }
 
     /// Set the federation delegation strategy (pass-through to FederationService).
@@ -268,7 +224,7 @@ where
         self,
         strategy: Arc<dyn crate::services::federation::traits::FederationDelegationStrategy>,
     ) -> Self {
-        if let Some(ref svc) = self.federation_service {
+        if let Some(ref svc) = self.advanced_services.federation_service {
             // Can't mutate Arc contents directly; log a warning.
             // Strategies should be set on FederationService before passing to orchestrator.
             tracing::warn!(
@@ -286,7 +242,7 @@ where
         self,
         processor: Arc<dyn crate::services::federation::traits::FederationResultProcessor>,
     ) -> Self {
-        if let Some(ref svc) = self.federation_service {
+        if let Some(ref svc) = self.advanced_services.federation_service {
             tracing::warn!(
                 "Result processor should be set on FederationService before calling with_federation_service. \
                  Current service has {} cerebrates.",
@@ -302,7 +258,7 @@ where
         self,
         transformer: Arc<dyn crate::services::federation::traits::FederationTaskTransformer>,
     ) -> Self {
-        if let Some(ref svc) = self.federation_service {
+        if let Some(ref svc) = self.advanced_services.federation_service {
             tracing::warn!(
                 "Task transformer should be set on FederationService before calling with_federation_service. \
                  Current service has {} cerebrates.",
@@ -318,7 +274,7 @@ where
         &self,
         schema: Arc<dyn crate::services::federation::traits::ResultSchema>,
     ) {
-        if let Some(ref svc) = self.federation_service {
+        if let Some(ref svc) = self.advanced_services.federation_service {
             svc.register_result_schema(schema).await;
         } else {
             tracing::warn!("Cannot register result schema: no federation service configured");
@@ -340,7 +296,7 @@ where
             include_task_output: true,
             verifier_agent_type: "intent-verifier".to_string(),
         };
-        self.intent_verifier = Some(Arc::new(IntentVerifierService::new(
+        self.advanced_services.intent_verifier = Some(Arc::new(IntentVerifierService::new(
             self.goal_repo.clone(),
             self.task_repo.clone(),
             substrate,
@@ -360,13 +316,13 @@ where
         mut self,
         repo: Arc<dyn crate::domain::ports::TriggerRuleRepository>,
     ) -> Self {
-        self.trigger_rule_repo = Some(repo);
+        self.advanced_services.trigger_rule_repo = Some(repo);
         self
     }
 
     /// Create orchestrator with memory repository for cold start and decay daemon.
     pub fn with_memory_repo(mut self, memory_repo: Arc<M>) -> Self {
-        self.memory_repo = Some(memory_repo);
+        self.advanced_services.memory_repo = Some(memory_repo);
         self
     }
 
@@ -396,9 +352,11 @@ where
                 .with_repo(refinement_repo)
                 .with_agent_repo(self.agent_repo.clone()),
         );
-        self.outbox_repo = Some(Arc::new(SqliteOutboxRepository::new(pool.clone())));
-        self.merge_request_repo = Some(Arc::new(SqliteMergeRequestRepository::new(pool.clone())));
-        self.pool = Some(pool);
+        self.advanced_services.outbox_repo =
+            Some(Arc::new(SqliteOutboxRepository::new(pool.clone())));
+        self.advanced_services.merge_request_repo =
+            Some(Arc::new(SqliteMergeRequestRepository::new(pool.clone())));
+        self.advanced_services.pool = Some(pool);
         self
     }
 
@@ -411,7 +369,7 @@ where
         mut self,
         cluster: Arc<crate::services::overseers::OverseerClusterService>,
     ) -> Self {
-        self.overseer_cluster = Some(cluster);
+        self.advanced_services.overseer_cluster = Some(cluster);
         self
     }
 
@@ -420,7 +378,7 @@ where
     /// Required for convergent execution. Without this, convergent tasks will
     /// fall back to direct execution with a warning.
     pub fn with_trajectory_repo(mut self, repo: Arc<dyn TrajectoryRepository>) -> Self {
-        self.trajectory_repo = Some(repo);
+        self.advanced_services.trajectory_repo = Some(repo);
         self
     }
 
@@ -432,7 +390,7 @@ where
         mut self,
         config: crate::domain::models::convergence::ConvergenceEngineConfig,
     ) -> Self {
-        self.convergence_engine_config = Some(config);
+        self.advanced_services.convergence_engine_config = Some(config);
         self
     }
 
@@ -447,7 +405,7 @@ where
         if let Ok(mut svc) = self.subsystem_services.restructure_service.try_lock() {
             svc.set_overmind(overmind_clone);
         }
-        self.overmind = Some(overmind);
+        self.advanced_services.overmind = Some(overmind);
         self
     }
 
@@ -459,7 +417,7 @@ where
         mut self,
         registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
     ) -> Self {
-        self.adapter_registry = Some(registry);
+        self.advanced_services.adapter_registry = Some(registry);
         self
     }
 
@@ -472,7 +430,7 @@ where
         mut self,
         service: Arc<crate::services::cost_window_service::CostWindowService>,
     ) -> Self {
-        self.cost_window_service = Some(service);
+        self.advanced_services.cost_window_service = Some(service);
         self
     }
 
@@ -480,7 +438,7 @@ where
         mut self,
         tracker: Arc<crate::services::budget_tracker::BudgetTracker>,
     ) -> Self {
-        self.budget_tracker = Some(tracker);
+        self.advanced_services.budget_tracker = Some(tracker);
         self
     }
 
@@ -488,7 +446,7 @@ where
 
     /// Get the Overmind service if configured.
     pub fn overmind(&self) -> Option<&Arc<crate::services::OvermindService>> {
-        self.overmind.as_ref()
+        self.advanced_services.overmind.as_ref()
     }
 
     /// Get the guardrails service for external use.
@@ -542,28 +500,28 @@ where
         // Without all four, convergent tasks silently fall back to direct
         // execution (see goal_processing::spawn_task_agent).
         if self.config.convergence_enabled {
-            if self.trajectory_repo.is_none() {
+            if self.advanced_services.trajectory_repo.is_none() {
                 return Err(DomainError::ValidationFailed(
                     "convergence_enabled=true but no trajectory repository wired. \
                      Call .with_trajectory_repo(...) before run(), or set convergence_enabled=false."
                         .into(),
                 ));
             }
-            if self.overseer_cluster.is_none() {
+            if self.advanced_services.overseer_cluster.is_none() {
                 return Err(DomainError::ValidationFailed(
                     "convergence_enabled=true but no overseer cluster wired. \
                      Call .with_overseer_cluster(...) before run(), or set convergence_enabled=false."
                         .into(),
                 ));
             }
-            if self.intent_verifier.is_none() {
+            if self.advanced_services.intent_verifier.is_none() {
                 return Err(DomainError::ValidationFailed(
                     "convergence_enabled=true but no intent verifier wired. \
                      Call .with_intent_verifier(...) before run(), or set convergence_enabled=false."
                         .into(),
                 ));
             }
-            if self.memory_repo.is_none() {
+            if self.advanced_services.memory_repo.is_none() {
                 return Err(DomainError::ValidationFailed(
                     "convergence_enabled=true but no memory repository wired. \
                      Call .with_memory_repo(...) before run(), or set convergence_enabled=false."
@@ -574,7 +532,7 @@ where
 
         // Intent verification toggle: if this flag is set, we need the
         // verifier service that runs it.
-        if self.config.enable_intent_verification && self.intent_verifier.is_none() {
+        if self.config.enable_intent_verification && self.advanced_services.intent_verifier.is_none() {
             return Err(DomainError::ValidationFailed(
                 "enable_intent_verification=true but no intent verifier wired. \
                  Call .with_intent_verifier(...) before run(), or set enable_intent_verification=false."
@@ -586,7 +544,7 @@ where
         // two-stage merge queue, the merge-request repo must be present.
         // Without it, merge_queue middleware and conflict-specialist triggers
         // all silently no-op.
-        if self.config.use_merge_queue && self.merge_request_repo.is_none() {
+        if self.config.use_merge_queue && self.advanced_services.merge_request_repo.is_none() {
             return Err(DomainError::ValidationFailed(
                 "use_merge_queue=true but no merge request repository wired. \
                  Call .with_pool(...) (which wires the SQLite backed repo) before run(), \
@@ -664,7 +622,7 @@ where
         self.check_remote_at_startup();
 
         // Run cold start if memory is empty (populates initial project context)
-        if self.memory_repo.is_some() {
+        if self.advanced_services.memory_repo.is_some() {
             match self.cold_start().await {
                 Ok(Some(report)) => {
                     self.subsystem_services.audit_log
@@ -696,7 +654,7 @@ where
         }
 
         // Start memory decay daemon if memory repo is available
-        if self.memory_repo.is_some()
+        if self.advanced_services.memory_repo.is_some()
             && let Err(e) = self.start_decay_daemon().await
         {
             self.subsystem_services.audit_log
@@ -787,7 +745,7 @@ where
         }
 
         // Run startup codebase triage if memory repo is available
-        if self.memory_repo.is_some() {
+        if self.advanced_services.memory_repo.is_some() {
             match self.run_startup_triage().await {
                 Ok(true) => {
                     self.subsystem_services.audit_log
@@ -1160,7 +1118,7 @@ where
             // Periodic maintenance: prune stale processed_commands entries
             tick_counter += 1;
             if tick_counter.is_multiple_of(cleanup_every_n_ticks)
-                && let Some(bus) = self.command_bus.read().await.as_ref()
+                && let Some(bus) = self.advanced_services.command_bus.read().await.as_ref()
             {
                 let pruned = bus.prune_old_commands(command_retention).await;
                 if pruned > 0 {
