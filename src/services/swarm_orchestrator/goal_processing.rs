@@ -30,6 +30,7 @@ use crate::domain::models::workflow_template::WorkflowTemplate;
 
 use super::SwarmOrchestrator;
 use super::agent_prep::AgentPreparationService;
+use super::exec_mode::ExecutionModeResolverService;
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
 use super::types::SwarmEvent;
 
@@ -508,31 +509,23 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             // Spawn task execution
             let task_id = task.id;
 
-            // Runtime upgrade: if the stored mode is Direct but the agent is
-            // write-capable and non-read-only, upgrade to Convergent when
-            // convergence is enabled. This applies to both standalone tasks
-            // and workflow subtasks — read-only phases are already protected
-            // by the is_read_only_role and agent_can_write checks.
-            let effective_mode = if task.execution_mode.is_direct()
-                && self.config.convergence_enabled
-                && !is_read_only_role
-                && agent_can_write
-            {
+            // Resolve effective execution mode (Direct vs Convergent) via
+            // ExecutionModeResolverService. The resolver applies the runtime
+            // upgrade rule: stored Direct → Convergent when convergence is
+            // enabled AND the agent is write-capable AND non-read-only.
+            let mode_resolver =
+                ExecutionModeResolverService::new(self.config.convergence_enabled);
+            let (effective_mode, is_convergent) =
+                mode_resolver.resolve_mode(task.execution_mode.clone(), &agent_meta);
+            if effective_mode != task.execution_mode {
                 tracing::info!(
                     task_id = %task_id,
                     %agent_type,
+                    stored_mode = ?task.execution_mode,
+                    effective_mode = ?effective_mode,
                     "Upgrading execution mode Direct -> Convergent (write-capable, non-read-only agent)"
                 );
-                crate::domain::models::ExecutionMode::Convergent {
-                    parallel_samples: None,
-                }
-            } else {
-                task.execution_mode.clone()
-            };
-
-            let is_convergent = effective_mode.is_convergent()
-                && self.config.convergence_enabled
-                && !is_read_only_role;
+            }
 
             tracing::info!(
                 task_id = %task_id,

@@ -5,7 +5,6 @@
 //!
 //! Extracted from `goal_processing::spawn_task_agent` per spec T10
 //! (`specs/T10-spawn-task-agent-extraction.md`).
-#![allow(dead_code)]
 
 use crate::domain::models::ExecutionMode;
 
