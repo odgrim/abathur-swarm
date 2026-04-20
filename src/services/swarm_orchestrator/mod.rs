@@ -33,6 +33,7 @@ pub mod types;
 pub(crate) mod workspace;
 
 use advanced_services::AdvancedServices;
+use core_deps::CoreDeps;
 use daemon_handles::DaemonHandles;
 use middleware_bundle::Middleware;
 use runtime_state::RuntimeState;
@@ -71,13 +72,9 @@ where
     A: AgentRepository + 'static,
     M: MemoryRepository + 'static,
 {
-    // ---------------- Core dependencies (required) ----------------
-    pub(super) goal_repo: Arc<G>,
-    pub(super) task_repo: Arc<T>,
-    pub(super) worktree_repo: Arc<W>,
-    pub(super) agent_repo: Arc<A>,
-    pub(super) substrate: Arc<dyn Substrate>,
-    pub(super) config: SwarmConfig,
+    // ---------------- Core dependencies (required, immutable) ----------------
+    /// Repositories, substrate, and static config that every subsystem reads.
+    pub(crate) core_deps: CoreDeps<G, T, W, A>,
 
     // ---------------- Runtime state ----------------
     /// Mutable runtime state: status, stats, semaphore, atomics, caches,
@@ -115,7 +112,7 @@ where
     /// callers may register additional middleware via
     /// [`SwarmOrchestrator::with_pre_spawn_middleware`] /
     /// [`SwarmOrchestrator::with_post_completion_middleware`].
-    pub(super) middleware: Middleware,
+    pub(crate) middleware: Middleware,
 }
 
 // ============================================================================
@@ -145,12 +142,14 @@ where
         let max_agents = config.max_agents;
         Self {
             // ---------------- Core dependencies (required) ----------------
-            goal_repo,
-            task_repo,
-            worktree_repo,
-            agent_repo,
-            substrate,
-            config,
+            core_deps: CoreDeps {
+                goal_repo,
+                task_repo,
+                worktree_repo,
+                agent_repo,
+                substrate,
+                config,
+            },
 
             // ---------------- Runtime state ----------------
             runtime_state: RuntimeState::new(max_agents),
@@ -284,21 +283,21 @@ where
     /// Create orchestrator with intent verification enabled.
     pub fn with_intent_verifier(mut self, substrate: Arc<dyn Substrate>) -> Self {
         let config = IntentVerifierConfig {
-            max_turns: self.config.default_max_turns,
+            max_turns: self.core_deps.config.default_max_turns,
             convergence: crate::domain::models::ConvergenceConfig {
-                max_iterations: self.config.convergence.max_iterations,
-                min_confidence_threshold: self.config.convergence.min_confidence_threshold,
-                require_full_satisfaction: self.config.convergence.require_full_satisfaction,
-                auto_retry_partial: self.config.convergence.auto_retry_partial,
-                convergence_timeout_secs: self.config.convergence.convergence_timeout_secs,
+                max_iterations: self.core_deps.config.convergence.max_iterations,
+                min_confidence_threshold: self.core_deps.config.convergence.min_confidence_threshold,
+                require_full_satisfaction: self.core_deps.config.convergence.require_full_satisfaction,
+                auto_retry_partial: self.core_deps.config.convergence.auto_retry_partial,
+                convergence_timeout_secs: self.core_deps.config.convergence.convergence_timeout_secs,
             },
             include_artifacts: true,
             include_task_output: true,
             verifier_agent_type: "intent-verifier".to_string(),
         };
         self.advanced_services.intent_verifier = Some(Arc::new(IntentVerifierService::new(
-            self.goal_repo.clone(),
-            self.task_repo.clone(),
+            self.core_deps.goal_repo.clone(),
+            self.core_deps.task_repo.clone(),
             substrate,
             config,
         )));
@@ -350,7 +349,7 @@ where
         self.subsystem_services.evolution_loop = Arc::new(
             EvolutionLoop::new(EvolutionConfig::default())
                 .with_repo(refinement_repo)
-                .with_agent_repo(self.agent_repo.clone()),
+                .with_agent_repo(self.core_deps.agent_repo.clone()),
         );
         self.advanced_services.outbox_repo =
             Some(Arc::new(SqliteOutboxRepository::new(pool.clone())));
@@ -499,7 +498,7 @@ where
         // for quality measurement, an intent verifier, and a memory repo.
         // Without all four, convergent tasks silently fall back to direct
         // execution (see goal_processing::spawn_task_agent).
-        if self.config.convergence_enabled {
+        if self.core_deps.config.convergence_enabled {
             if self.advanced_services.trajectory_repo.is_none() {
                 return Err(DomainError::ValidationFailed(
                     "convergence_enabled=true but no trajectory repository wired. \
@@ -532,7 +531,7 @@ where
 
         // Intent verification toggle: if this flag is set, we need the
         // verifier service that runs it.
-        if self.config.enable_intent_verification && self.advanced_services.intent_verifier.is_none() {
+        if self.core_deps.config.enable_intent_verification && self.advanced_services.intent_verifier.is_none() {
             return Err(DomainError::ValidationFailed(
                 "enable_intent_verification=true but no intent verifier wired. \
                  Call .with_intent_verifier(...) before run(), or set enable_intent_verification=false."
@@ -544,7 +543,7 @@ where
         // two-stage merge queue, the merge-request repo must be present.
         // Without it, merge_queue middleware and conflict-specialist triggers
         // all silently no-op.
-        if self.config.use_merge_queue && self.advanced_services.merge_request_repo.is_none() {
+        if self.core_deps.config.use_merge_queue && self.advanced_services.merge_request_repo.is_none() {
             return Err(DomainError::ValidationFailed(
                 "use_merge_queue=true but no merge request repository wired. \
                  Call .with_pool(...) (which wires the SQLite backed repo) before run(), \
@@ -613,7 +612,7 @@ where
                 AuditAction::SwarmStarted,
                 format!(
                     "Swarm orchestrator started with max {} agents",
-                    self.config.max_agents
+                    self.core_deps.config.max_agents
                 ),
             )
             .await;
@@ -695,21 +694,21 @@ where
         // Seed baseline agent templates (DB is sole source, hardcoded as bootstrap)
         {
             use crate::services::AgentService;
-            let agent_service = AgentService::new(self.agent_repo.clone(), self.subsystem_services.event_bus.clone());
+            let agent_service = AgentService::new(self.core_deps.agent_repo.clone(), self.subsystem_services.event_bus.clone());
             // Use routing-aware seeding when all_workflows is populated; otherwise fall
             // back to single-workflow seeding (legacy / empty config path).
-            let seed_result = if !self.config.all_workflows.is_empty() {
+            let seed_result = if !self.core_deps.config.all_workflows.is_empty() {
                 agent_service
                     .seed_baseline_agents_with_workflows(
-                        &self.config.all_workflows,
-                        self.config.overmind_max_turns,
+                        &self.core_deps.config.all_workflows,
+                        self.core_deps.config.overmind_max_turns,
                     )
                     .await
             } else {
                 agent_service
                     .seed_baseline_agents_with_workflow(
-                        self.config.workflow_template.as_ref(),
-                        self.config.overmind_max_turns,
+                        self.core_deps.config.workflow_template.as_ref(),
+                        self.core_deps.config.overmind_max_turns,
                     )
                     .await
             };
@@ -774,7 +773,7 @@ where
         }
 
         // Register existing agent templates with A2A gateway for discovery
-        if self.config.mcp_servers.a2a_gateway.is_some()
+        if self.core_deps.config.mcp_servers.a2a_gateway.is_some()
             && let Err(e) = self.register_all_agent_templates().await
         {
             self.subsystem_services.audit_log
@@ -930,7 +929,7 @@ where
         // dispatch, and falls back to the interval for periodic reconciliation
         // (evolution refinements, idle auto-shutdown, table pruning) when the
         // channels are quiet.
-        let reconciliation_secs = self.config.reconciliation_interval_secs.unwrap_or(30);
+        let reconciliation_secs = self.core_deps.config.reconciliation_interval_secs.unwrap_or(30);
         let loop_interval = tokio::time::Duration::from_secs(reconciliation_secs);
         let mut reconciliation_interval = tokio::time::interval(loop_interval);
         reconciliation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -988,7 +987,7 @@ where
             // draining so the first newly-ready task hits an agent without
             // waiting for the rest of the drain pass.
             if let Wake::ReadyTask(task_id) = wake
-                && let Ok(Some(task)) = self.task_repo.get(task_id).await
+                && let Ok(Some(task)) = self.core_deps.task_repo.get(task_id).await
                 && task.status == crate::domain::models::TaskStatus::Ready
                 && let Err(e) = self.spawn_task_agent(&task, &event_tx).await
             {
@@ -1064,7 +1063,7 @@ where
                 continue;
             }
 
-            if self.config.track_evolution
+            if self.core_deps.config.track_evolution
                 && let Err(e) = self.process_evolution_refinements(&event_tx).await
             {
                 tracing::error!(error = %e, "process_evolution_refinements subsystem error (isolated)");
@@ -1084,6 +1083,7 @@ where
             {
                 use crate::domain::ports::GoalFilter;
                 let all_goals = self
+                    .core_deps
                     .goal_repo
                     .list(GoalFilter::default())
                     .await
@@ -1091,6 +1091,7 @@ where
                 if !all_goals.is_empty() && all_goals.iter().all(|g| g.is_terminal()) {
                     use crate::domain::ports::TaskFilter;
                     let all_tasks = self
+                        .core_deps
                         .task_repo
                         .list(TaskFilter::default())
                         .await
@@ -1211,7 +1212,7 @@ where
 
         while let Ok(task_id) = rx.try_recv() {
             // Fetch and validate task is still Ready
-            if let Ok(Some(task)) = self.task_repo.get(task_id).await
+            if let Ok(Some(task)) = self.core_deps.task_repo.get(task_id).await
                 && task.status == crate::domain::models::TaskStatus::Ready
             {
                 self.spawn_task_agent(&task, event_tx).await?;
@@ -1240,7 +1241,7 @@ where
 
         while let Ok(task_id) = rx.try_recv() {
             // Validate task is still in a state that warrants specialist attention
-            if let Ok(Some(task)) = self.task_repo.get(task_id).await
+            if let Ok(Some(task)) = self.core_deps.task_repo.get(task_id).await
                 && task.status == crate::domain::models::TaskStatus::Failed
             {
                 // Delegate to existing specialist processing

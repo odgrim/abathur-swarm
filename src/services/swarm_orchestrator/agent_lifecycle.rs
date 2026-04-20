@@ -56,7 +56,7 @@ where
             .await;
 
         // If A2A gateway is configured, register the agent card
-        if let Some(ref gateway_url) = self.config.mcp_servers.a2a_gateway {
+        if let Some(ref gateway_url) = self.core_deps.config.mcp_servers.a2a_gateway {
             let register_url = format!("{}/agents", gateway_url.trim_end_matches('/'));
 
             let client = reqwest::Client::new();
@@ -99,6 +99,7 @@ where
         // Get all agent templates from the repository
         use crate::domain::ports::AgentFilter;
         let templates = self
+            .core_deps
             .agent_repo
             .list_templates(AgentFilter::default())
             .await?;
@@ -195,6 +196,7 @@ where
             {
                 // Fetch the exact previous version's template content
                 let previous_template = self
+                    .core_deps
                     .agent_repo
                     .get_template_version(&event.template_name, *to_version)
                     .await;
@@ -203,20 +205,21 @@ where
                     Ok(Some(mut restored)) => {
                         // Disable the broken (current) version
                         if let Ok(Some(mut broken)) = self
+                            .core_deps
                             .agent_repo
                             .get_template_version(&event.template_name, *from_version)
                             .await
                         {
                             broken.status = AgentStatus::Disabled;
                             broken.updated_at = chrono::Utc::now();
-                            let _ = self.agent_repo.update_template(&broken).await;
+                            let _ = self.core_deps.agent_repo.update_template(&broken).await;
                         }
 
                         // Re-activate the previous version
                         restored.status = AgentStatus::Active;
                         restored.updated_at = chrono::Utc::now();
 
-                        if self.agent_repo.update_template(&restored).await.is_ok() {
+                        if self.core_deps.agent_repo.update_template(&restored).await.is_ok() {
                             self.subsystem_services.evolution_loop
                                 .record_version_change(&event.template_name, *to_version)
                                 .await;
@@ -283,6 +286,7 @@ where
 
             // Get the current agent template
             let template = match self
+                .core_deps
                 .agent_repo
                 .get_template_by_name(&request.template_name)
                 .await
@@ -326,7 +330,7 @@ where
                     ),
                 );
 
-                match self.substrate.execute(refinement_request).await {
+                match self.core_deps.substrate.execute(refinement_request).await {
                     Ok(session) => {
                         if let Some(result) = session.result {
                             result
@@ -366,9 +370,9 @@ where
             let mut old_template = template.clone();
             old_template.status = AgentStatus::Disabled;
             old_template.updated_at = chrono::Utc::now();
-            let _ = self.agent_repo.update_template(&old_template).await;
+            let _ = self.core_deps.agent_repo.update_template(&old_template).await;
 
-            match self.agent_repo.create_template(&new_template).await {
+            match self.core_deps.agent_repo.create_template(&new_template).await {
                 Ok(_) => {
                     // Record version change for regression detection
                     self.subsystem_services.evolution_loop
@@ -480,7 +484,7 @@ where
     /// Get the system prompt for an agent type, including goal context and API docs.
     pub(super) async fn get_agent_system_prompt(&self, agent_type: &str) -> String {
         let (raw_prompt, is_read_only) =
-            match self.agent_repo.get_template_by_name(agent_type).await {
+            match self.core_deps.agent_repo.get_template_by_name(agent_type).await {
                 Ok(Some(template)) => (template.system_prompt.clone(), template.read_only),
                 _ => {
                     // Default system prompt if agent template not found
@@ -652,6 +656,7 @@ where
     pub(super) async fn refresh_active_goals_cache(&self) -> DomainResult<()> {
         use crate::domain::ports::GoalFilter;
         let goals = self
+            .core_deps
             .goal_repo
             .list(GoalFilter {
                 status: Some(GoalStatus::Active),

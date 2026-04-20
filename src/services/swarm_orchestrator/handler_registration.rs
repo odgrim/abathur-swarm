@@ -54,18 +54,18 @@ where
     /// Called in `run()` after reactor start but before the main loop.
     pub(super) async fn register_builtin_handlers(&self) {
         let reactor = &self.subsystem_services.event_reactor;
-        let p = &self.config.polling;
+        let p = &self.core_deps.config.polling;
 
         // Create a TaskService for SYSTEM handlers that need validated state transitions.
         // This ensures all mutations go through TaskService (validation + event emission).
         let handler_task_service = Arc::new(
-            TaskService::new(self.task_repo.clone()).with_event_bus(self.subsystem_services.event_bus.clone()),
+            TaskService::new(self.core_deps.task_repo.clone()).with_event_bus(self.subsystem_services.event_bus.clone()),
         );
 
         // TaskCompletedReadinessHandler (SYSTEM) — cascade readiness on completion
         reactor
             .register(Arc::new(TaskCompletedReadinessHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 handler_task_service.clone(),
             )))
             .await;
@@ -74,7 +74,7 @@ where
         let verification_enabled = self.advanced_services.intent_verifier.is_some();
         reactor
             .register(Arc::new(WorkflowSubtaskCompletionHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 self.subsystem_services.event_bus.clone(),
                 verification_enabled,
             )))
@@ -84,7 +84,7 @@ where
         if let Some(ref verifier) = self.advanced_services.intent_verifier {
             reactor
                 .register(Arc::new(WorkflowVerificationHandler::new(
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                     self.subsystem_services.event_bus.clone(),
                     Arc::clone(verifier) as Arc<dyn crate::services::swarm_orchestrator::convergent_execution::ConvergentIntentVerifier>,
                     true,
@@ -98,7 +98,7 @@ where
         // TaskFailedBlockHandler (SYSTEM) — block dependents on failure/cancel
         reactor
             .register(Arc::new(TaskFailedBlockHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 handler_task_service.clone(),
             )))
             .await;
@@ -106,7 +106,7 @@ where
         // AgentTerminationHandler (SYSTEM) — kill agent subprocess and free guardrail slot on task failure
         reactor
             .register(Arc::new(AgentTerminationHandler::new(
-                self.substrate.clone(),
+                self.core_deps.substrate.clone(),
                 self.subsystem_services.guardrails.clone(),
             )))
             .await;
@@ -114,21 +114,21 @@ where
         // ConvergenceCoordinationHandler (HIGH) — cascade child completion/failure to convergent parent
         reactor
             .register(Arc::new(ConvergenceCoordinationHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
             )))
             .await;
 
         // ConvergenceCancellationHandler (HIGH) — cascade cancellation from convergent parent to children
         reactor
             .register(Arc::new(ConvergenceCancellationHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
             )))
             .await;
 
         // ConvergenceSLAPressureHandler (HIGH) — add SLA pressure hints to convergent task context
         reactor
             .register(Arc::new(ConvergenceSLAPressureHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
             )))
             .await;
 
@@ -136,7 +136,7 @@ where
         if let Some(ref trajectory_repo) = self.advanced_services.trajectory_repo {
             reactor
                 .register(Arc::new(ConvergenceEscalationFeedbackHandler::new(
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                     Arc::new(DynTrajectoryRepository(trajectory_repo.clone())),
                 )))
                 .await;
@@ -145,15 +145,15 @@ where
         // TaskFailedRetryHandler (NORMAL) — retry after failure if retries remain
         reactor
             .register(Arc::new(TaskFailedRetryHandler::new(
-                self.task_repo.clone(),
-                self.config.max_task_retries,
+                self.core_deps.task_repo.clone(),
+                self.core_deps.config.max_task_retries,
             )))
             .await;
 
         // GoalCreatedHandler (NORMAL) — refresh active goals cache
         reactor
             .register(Arc::new(GoalCreatedHandler::new(
-                self.goal_repo.clone(),
+                self.core_deps.goal_repo.clone(),
                 self.runtime_state.active_goals_cache.clone(),
             )))
             .await;
@@ -161,7 +161,7 @@ where
         // GoalRetiredHandler (HIGH) — refresh cache on goal retirement (no task coupling)
         reactor
             .register(Arc::new(GoalRetiredHandler::new(
-                self.goal_repo.clone(),
+                self.core_deps.goal_repo.clone(),
                 self.runtime_state.active_goals_cache.clone(),
             )))
             .await;
@@ -169,12 +169,12 @@ where
         // StatsUpdateHandler (LOW) — periodic stats refresh
         reactor
             .register(Arc::new(StatsUpdateHandler::new(
-                self.goal_repo.clone(),
-                self.task_repo.clone(),
-                self.worktree_repo.clone(),
+                self.core_deps.goal_repo.clone(),
+                self.core_deps.task_repo.clone(),
+                self.core_deps.worktree_repo.clone(),
                 self.runtime_state.stats.clone(),
                 self.runtime_state.agent_semaphore.clone(),
-                self.config.max_agents,
+                self.core_deps.config.max_agents,
                 self.runtime_state.total_tokens.clone(),
             )))
             .await;
@@ -182,30 +182,30 @@ where
         // FastReconciliationHandler (NORMAL) — fast-path state transition recovery
         reactor
             .register(Arc::new(FastReconciliationHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 handler_task_service.clone(),
             )))
             .await;
 
         // ReconciliationHandler (LOW) — slow-path expensive checks (stale tasks, timeouts)
         reactor
-            .register(Arc::new(ReconciliationHandler::new(self.task_repo.clone())))
+            .register(Arc::new(ReconciliationHandler::new(self.core_deps.task_repo.clone())))
             .await;
 
         // WorktreeReconciliationHandler (LOW) — detect orphaned worktrees
         reactor
             .register(Arc::new(WorktreeReconciliationHandler::new(
-                self.task_repo.clone(),
-                self.worktree_repo.clone(),
+                self.core_deps.task_repo.clone(),
+                self.core_deps.worktree_repo.clone(),
             )))
             .await;
 
         // RetryProcessingHandler (NORMAL) — periodic retry sweep
-        if self.config.auto_retry {
+        if self.core_deps.config.auto_retry {
             reactor
                 .register(Arc::new(RetryProcessingHandler::new(
-                    self.task_repo.clone(),
-                    self.config.max_task_retries,
+                    self.core_deps.task_repo.clone(),
+                    self.core_deps.config.max_task_retries,
                 )))
                 .await;
         }
@@ -239,7 +239,7 @@ where
         // GoalReconciliationHandler (LOW) — periodic goal reconciliation
         reactor
             .register(Arc::new(GoalReconciliationHandler::new(
-                self.goal_repo.clone(),
+                self.core_deps.goal_repo.clone(),
             )))
             .await;
 
@@ -248,7 +248,7 @@ where
             let threshold = p.goal_convergence_check_interval_secs.saturating_mul(2);
             reactor
                 .register(Arc::new(SystemStallDetectorHandler::new(
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                     threshold,
                 )))
                 .await;
@@ -257,7 +257,7 @@ where
         // TaskReadySpawnHandler (NORMAL) — push ready tasks to spawn channel
         reactor
             .register(Arc::new(TaskReadySpawnHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 self.runtime_state.ready_task_tx.clone(),
             )))
             .await;
@@ -265,7 +265,7 @@ where
         // ReadyTaskPollingHandler (NORMAL) — periodic poll for ready tasks missed by events
         reactor
             .register(Arc::new(ReadyTaskPollingHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 self.runtime_state.ready_task_tx.clone(),
             )))
             .await;
@@ -273,9 +273,9 @@ where
         // SpecialistCheckHandler (NORMAL) — scan for stuck/failed tasks needing specialists
         reactor
             .register(Arc::new(SpecialistCheckHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 self.runtime_state.specialist_tx.clone(),
-                self.config.max_task_retries,
+                self.core_deps.config.max_task_retries,
             )))
             .await;
 
@@ -288,7 +288,7 @@ where
         if let Some(ref memory_repo) = self.advanced_services.memory_repo {
             reactor
                 .register(Arc::new(ConvergenceMemoryHandler::new(
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                     memory_repo.clone(),
                 )))
                 .await;
@@ -307,17 +307,17 @@ where
         if let Some(ref memory_repo) = self.advanced_services.memory_repo {
             reactor
                 .register(Arc::new(TaskOutcomeMemoryHandler::new(
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                     memory_repo.clone(),
                 )))
                 .await;
         }
 
         // ConvergenceEvolutionHandler (NORMAL) — emit evolution metrics for convergent tasks
-        if self.config.track_evolution {
+        if self.core_deps.config.track_evolution {
             reactor
                 .register(Arc::new(ConvergenceEvolutionHandler::new(
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                 )))
                 .await;
         }
@@ -328,11 +328,11 @@ where
             use crate::domain::ports::NullMemoryRepository;
 
             let task_service = Arc::new(
-                TaskService::new(self.task_repo.clone())
+                TaskService::new(self.core_deps.task_repo.clone())
                     .with_event_bus(self.subsystem_services.event_bus.clone())
-                    .with_default_execution_mode(self.config.default_execution_mode.clone()),
+                    .with_default_execution_mode(self.core_deps.config.default_execution_mode.clone()),
             );
-            let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
+            let goal_service = Arc::new(GoalService::new(self.core_deps.goal_repo.clone()));
 
             let bus = if let Some(ref memory_repo) = self.advanced_services.memory_repo {
                 let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
@@ -383,14 +383,14 @@ where
         // ReviewFailureLoopHandler (HIGH) — loop review failures back to plan+implement
         reactor
             .register(Arc::new(ReviewFailureLoopHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 command_bus.clone(),
-                self.config.max_review_iterations,
+                self.core_deps.config.max_review_iterations,
             )))
             .await;
 
         // A2APollHandler (NORMAL) — poll A2A gateway for delegations
-        if let Some(ref a2a_url) = self.config.mcp_servers.a2a_gateway {
+        if let Some(ref a2a_url) = self.core_deps.config.mcp_servers.a2a_gateway {
             reactor
                 .register(Arc::new(A2APollHandler::new(
                     command_bus.clone(),
@@ -402,8 +402,8 @@ where
         // GoalEvaluationHandler (NORMAL) — periodic goal progress observation
         reactor
             .register(Arc::new(GoalEvaluationHandler::new(
-                self.goal_repo.clone(),
-                self.task_repo.clone(),
+                self.core_deps.goal_repo.clone(),
+                self.core_deps.task_repo.clone(),
             )))
             .await;
 
@@ -528,7 +528,7 @@ where
             reactor
                 .register(Arc::new(EventPruningHandler::new(
                     event_store.clone(),
-                    self.config.event_retention_days,
+                    self.core_deps.config.event_retention_days,
                 )))
                 .await;
 
@@ -536,8 +536,8 @@ where
             if p.startup_catchup_enabled {
                 reactor
                     .register(Arc::new(StartupCatchUpHandler::new(
-                        self.task_repo.clone(),
-                        self.goal_repo.clone(),
+                        self.core_deps.task_repo.clone(),
+                        self.core_deps.goal_repo.clone(),
                         event_store,
                         p.startup_stale_task_threshold_secs,
                         p.startup_max_replay_events,
@@ -549,7 +549,7 @@ where
         // TaskSLAEnforcementHandler (NORMAL) — periodic SLA deadline checks
         reactor
             .register(Arc::new(TaskSLAEnforcementHandler::new(
-                self.task_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 p.sla_warning_threshold_pct,
                 p.sla_critical_threshold_pct,
                 p.sla_auto_escalate_on_breach,
@@ -560,7 +560,7 @@ where
         if p.priority_aging_enabled {
             reactor
                 .register(Arc::new(PriorityAgingHandler::new(
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                     p.priority_aging_low_to_normal_secs,
                     p.priority_aging_normal_to_high_secs,
                     p.priority_aging_high_to_critical_secs,
@@ -572,7 +572,7 @@ where
         if p.memory_informed_decomposition_enabled {
             reactor
                 .register(Arc::new(MemoryInformedDecompositionHandler::new(
-                    self.goal_repo.clone(),
+                    self.core_deps.goal_repo.clone(),
                     p.memory_informed_cooldown_per_goal_secs,
                 )))
                 .await;
@@ -600,9 +600,9 @@ where
         {
             reactor
                 .register(Arc::new(ObstacleEscalationHandler::new(
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                     memory_repo.clone(),
-                    self.goal_repo.clone(),
+                    self.core_deps.goal_repo.clone(),
                     command_bus.clone(),
                     p.obstacle_escalation_threshold,
                     p.obstacle_escalation_window_secs,
@@ -625,8 +625,8 @@ where
         // GoalConvergenceCheckHandler (NORMAL) — periodic deep goal convergence evaluation
         if p.goal_convergence_check_enabled {
             let mut convergence_handler = GoalConvergenceCheckHandler::new(
-                self.goal_repo.clone(),
-                self.task_repo.clone(),
+                self.core_deps.goal_repo.clone(),
+                self.core_deps.task_repo.clone(),
                 command_bus.clone(),
                 p.goal_convergence_check_interval_secs,
             );
@@ -640,7 +640,7 @@ where
                 let threshold = (p.goal_convergence_check_interval_secs * 3) / 2;
                 reactor
                     .register(Arc::new(GoalStagnationDetectorHandler::new(
-                        self.goal_repo.clone(),
+                        self.core_deps.goal_repo.clone(),
                         threshold,
                     )))
                     .await;
@@ -663,7 +663,7 @@ where
             reactor
                 .register(Arc::new(TaskScheduleHandler::new(
                     schedule_repo.clone(),
-                    self.task_repo.clone(),
+                    self.core_deps.task_repo.clone(),
                     command_bus.clone(),
                 )))
                 .await;
@@ -739,10 +739,10 @@ where
             if !adapter_registry.ingestion_names().is_empty() {
                 reactor
                     .register(Arc::new(IngestionPollHandler::new(
-                        self.task_repo.clone(),
+                        self.core_deps.task_repo.clone(),
                         adapter_registry.clone(),
                         command_bus.clone(),
-                        self.config.max_pending_ingestion_tasks,
+                        self.core_deps.config.max_pending_ingestion_tasks,
                     )))
                     .await;
             }
@@ -760,7 +760,7 @@ where
             if !adapter_registry.egress_names().is_empty() {
                 reactor
                     .register(Arc::new(AdapterLifecycleSyncHandler::new(
-                        self.task_repo.clone(),
+                        self.core_deps.task_repo.clone(),
                         adapter_registry.clone(),
                     )))
                     .await;
@@ -774,10 +774,11 @@ where
     /// All intervals are configurable via `SwarmConfig.polling`.
     pub(super) async fn register_builtin_schedules(&self) {
         let scheduler = &self.subsystem_services.event_scheduler;
-        let p = &self.config.polling;
+        let p = &self.core_deps.config.polling;
 
         // Use explicit override if set, otherwise fall back to PollingConfig
         let reconciliation_secs = self
+            .core_deps
             .config
             .reconciliation_interval_secs
             .unwrap_or(p.reconciliation_interval_secs);
@@ -865,7 +866,7 @@ where
             .await;
 
         // Retry check — periodic retry sweep for failed tasks
-        if self.config.auto_retry {
+        if self.core_deps.config.auto_retry {
             scheduler
                 .register(interval_schedule(
                     "retry-check",
@@ -902,7 +903,7 @@ where
         // in agent_lifecycle.rs, which runs on the orchestrator's reconciliation interval.
 
         // A2A delegation polling
-        if self.config.mcp_servers.a2a_gateway.is_some() {
+        if self.core_deps.config.mcp_servers.a2a_gateway.is_some() {
             scheduler
                 .register(interval_schedule(
                     "a2a-poll",
@@ -1050,8 +1051,8 @@ where
         {
             let mut chain = self.middleware.pre_spawn_chain.write().await;
             chain.register(Arc::new(McpReadinessMiddleware::new(
-                self.config.repo_path.clone(),
-                self.config.mcp_servers.a2a_gateway.clone(),
+                self.core_deps.config.repo_path.clone(),
+                self.core_deps.config.mcp_servers.a2a_gateway.clone(),
             )));
             chain.register(Arc::new(RouteTaskMiddleware::new()));
             chain.register(Arc::new(CircuitBreakerMiddleware::new()));

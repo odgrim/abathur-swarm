@@ -93,11 +93,11 @@ where
 
         tracing::warn!("CommandBus not initialized — building ephemeral instance");
         let task_service = Arc::new(
-            TaskService::new(self.task_repo.clone())
+            TaskService::new(self.core_deps.task_repo.clone())
                 .with_event_bus(self.subsystem_services.event_bus.clone())
-                .with_default_execution_mode(self.config.default_execution_mode.clone()),
+                .with_default_execution_mode(self.core_deps.config.default_execution_mode.clone()),
         );
-        let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
+        let goal_service = Arc::new(GoalService::new(self.core_deps.goal_repo.clone()));
 
         if let Some(ref memory_repo) = self.advanced_services.memory_repo {
             let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
@@ -183,7 +183,7 @@ where
             EscalationDecision::Accept => {
                 // Unblock associated task if it was blocked
                 if let Some(task_id) = escalation.task_id
-                    && let Ok(Some(task)) = self.task_repo.get(task_id).await
+                    && let Ok(Some(task)) = self.core_deps.task_repo.get(task_id).await
                     && task.status == TaskStatus::Blocked
                 {
                     let envelope = CommandEnvelope::new(
@@ -216,7 +216,7 @@ where
             EscalationDecision::Clarify { clarification } => {
                 // Append clarification to task description, then unblock via CommandBus
                 if let Some(task_id) = escalation.task_id
-                    && let Ok(Some(task)) = self.task_repo.get(task_id).await
+                    && let Ok(Some(task)) = self.core_deps.task_repo.get(task_id).await
                 {
                     // Update description directly (no command for description updates)
                     let mut updated = task.clone();
@@ -224,7 +224,7 @@ where
                         "{}\n\n## Human Clarification\n\n{}",
                         updated.description, clarification
                     );
-                    self.task_repo.update(&updated).await?;
+                    self.core_deps.task_repo.update(&updated).await?;
 
                     // Emit description update event via EventBus
                     self.subsystem_services.event_bus
@@ -260,7 +260,7 @@ where
             } => {
                 // Update goal description directly (no command for description updates)
                 if let Some(goal_id) = escalation.goal_id
-                    && let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await
+                    && let Ok(Some(mut goal)) = self.core_deps.goal_repo.get(goal_id).await
                 {
                     for req in new_requirements {
                         goal.description = format!("{}\n- {}", goal.description, req);
@@ -276,7 +276,7 @@ where
                                 .join("\n")
                         );
                     }
-                    self.goal_repo.update(&goal).await?;
+                    self.core_deps.goal_repo.update(&goal).await?;
 
                     // Emit description update event via EventBus
                     self.subsystem_services.event_bus
@@ -292,7 +292,7 @@ where
                 }
                 // Unblock associated task via CommandBus
                 if let Some(task_id) = escalation.task_id
-                    && let Ok(Some(task)) = self.task_repo.get(task_id).await
+                    && let Ok(Some(task)) = self.core_deps.task_repo.get(task_id).await
                     && task.status == TaskStatus::Blocked
                 {
                     let envelope = CommandEnvelope::new(
@@ -460,7 +460,7 @@ where
             .await;
 
         // If A2A gateway is configured, route the message via HTTP
-        if let Some(ref gateway_url) = self.config.mcp_servers.a2a_gateway {
+        if let Some(ref gateway_url) = self.core_deps.config.mcp_servers.a2a_gateway {
             // Build JSON-RPC request for tasks/send
             let request_id = Uuid::new_v4().to_string();
             let json_rpc_request = serde_json::json!({

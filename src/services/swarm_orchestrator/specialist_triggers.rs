@@ -43,10 +43,10 @@ where
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
         // Check for persistent failures that need restructuring or diagnostic analysis
-        let failed_tasks = self.task_repo.list_by_status(TaskStatus::Failed).await?;
+        let failed_tasks = self.core_deps.task_repo.list_by_status(TaskStatus::Failed).await?;
         let permanently_failed: Vec<_> = failed_tasks
             .iter()
-            .filter(|t| t.retry_count >= self.config.max_task_retries)
+            .filter(|t| t.retry_count >= self.core_deps.config.max_task_retries)
             .collect();
 
         for task in permanently_failed {
@@ -92,6 +92,7 @@ where
             let mut diagnostic_exists = false;
             for status in &statuses_to_check {
                 if self
+                    .core_deps
                     .task_repo
                     .list_by_status(*status)
                     .await?
@@ -125,7 +126,7 @@ where
         }
 
         // Check for merge conflicts needing specialist resolution
-        if self.config.use_merge_queue
+        if self.core_deps.config.use_merge_queue
             && let Err(e) = self.process_merge_conflict_specialists(event_tx).await
         {
             self.subsystem_services.audit_log
@@ -162,7 +163,7 @@ where
         }
 
         // Get related failures
-        let all_failed = self.task_repo.list_by_status(TaskStatus::Failed).await?;
+        let all_failed = self.core_deps.task_repo.list_by_status(TaskStatus::Failed).await?;
         let related_failures: Vec<Task> = all_failed
             .into_iter()
             .filter(|t| t.id != failed_task.id)
@@ -226,7 +227,7 @@ where
                     updated_task.agent_type = Some(agent_type);
                 }
                 updated_task.retry_count = 0;
-                self.task_repo.update(&updated_task).await?;
+                self.core_deps.task_repo.update(&updated_task).await?;
 
                 // Emit description update event via EventBus
                 self.subsystem_services.event_bus
@@ -576,37 +577,38 @@ where
             return Ok(true);
         };
 
-        let parent_task = match self.task_repo.get(parent_id).await? {
+        let parent_task = match self.core_deps.task_repo.get(parent_id).await? {
             Some(t) => t,
             None => return Ok(true),
         };
 
         let spawn_limits = SpawnLimitConfig {
-            max_subtask_depth: self.config.spawn_limits.max_subtask_depth,
-            max_subtasks_per_task: self.config.spawn_limits.max_subtasks_per_task,
-            max_total_descendants: self.config.spawn_limits.max_total_descendants,
-            allow_limit_extensions: self.config.spawn_limits.allow_limit_extensions,
+            max_subtask_depth: self.core_deps.config.spawn_limits.max_subtask_depth,
+            max_subtasks_per_task: self.core_deps.config.spawn_limits.max_subtasks_per_task,
+            max_total_descendants: self.core_deps.config.spawn_limits.max_total_descendants,
+            allow_limit_extensions: self.core_deps.config.spawn_limits.allow_limit_extensions,
         };
 
         // Check subtask depth using a single recursive CTE query
-        let depth = self.task_repo.calculate_depth(parent_id).await?;
+        let depth = self.core_deps.task_repo.calculate_depth(parent_id).await?;
 
         if depth >= spawn_limits.max_subtask_depth {
             if spawn_limits.allow_limit_extensions {
                 let id_prefix = &parent_task.id.to_string()[..8];
                 let specialist_exists = self
+                    .core_deps
                     .task_repo
                     .list_by_status(TaskStatus::Ready)
                     .await?
                     .iter()
                     .chain(
-                        self.task_repo
+                        self.core_deps.task_repo
                             .list_by_status(TaskStatus::Pending)
                             .await?
                             .iter(),
                     )
                     .chain(
-                        self.task_repo
+                        self.core_deps.task_repo
                             .list_by_status(TaskStatus::Running)
                             .await?
                             .iter(),
@@ -628,24 +630,25 @@ where
         }
 
         // Check direct subtasks count using a single COUNT query
-        let direct_subtasks = self.task_repo.count_children(parent_id).await?;
+        let direct_subtasks = self.core_deps.task_repo.count_children(parent_id).await?;
 
         if direct_subtasks >= spawn_limits.max_subtasks_per_task {
             if spawn_limits.allow_limit_extensions {
                 let id_prefix = &parent_task.id.to_string()[..8];
                 let specialist_exists = self
+                    .core_deps
                     .task_repo
                     .list_by_status(TaskStatus::Ready)
                     .await?
                     .iter()
                     .chain(
-                        self.task_repo
+                        self.core_deps.task_repo
                             .list_by_status(TaskStatus::Pending)
                             .await?
                             .iter(),
                     )
                     .chain(
-                        self.task_repo
+                        self.core_deps.task_repo
                             .list_by_status(TaskStatus::Running)
                             .await?
                             .iter(),
@@ -802,23 +805,23 @@ where
         };
 
         let verifier = IntegrationVerifierService::new(
-            self.task_repo.clone(),
-            self.goal_repo.clone(),
-            self.worktree_repo.clone(),
+            self.core_deps.task_repo.clone(),
+            self.core_deps.goal_repo.clone(),
+            self.core_deps.worktree_repo.clone(),
             VerifierConfig::default(),
         );
 
         let merge_config = MergeQueueConfig {
-            repo_path: self.config.repo_path.to_str().unwrap_or(".").to_string(),
-            main_branch: self.config.default_base_ref.clone(),
-            require_verification: self.config.verify_on_completion,
+            repo_path: self.core_deps.config.repo_path.to_str().unwrap_or(".").to_string(),
+            main_branch: self.core_deps.config.default_base_ref.clone(),
+            require_verification: self.core_deps.config.verify_on_completion,
             route_conflicts_to_specialist: true,
             ..Default::default()
         };
 
         let merge_queue = MergeQueue::new(
-            self.task_repo.clone(),
-            self.worktree_repo.clone(),
+            self.core_deps.task_repo.clone(),
+            self.core_deps.worktree_repo.clone(),
             Arc::new(verifier),
             merge_config,
             mr_repo,
@@ -829,7 +832,7 @@ where
         for conflict in conflicts {
             // Skip stale conflicts: if the associated task is already terminal,
             // mark the merge request as Failed and move on.
-            if let Ok(Some(conflict_task)) = self.task_repo.get(conflict.task_id).await
+            if let Ok(Some(conflict_task)) = self.core_deps.task_repo.get(conflict.task_id).await
                 && conflict_task.status.is_terminal()
                 && conflict_task.status != TaskStatus::Complete
             {
@@ -866,18 +869,21 @@ where
                 })
             };
             let resolution_exists = self
+                .core_deps
                 .task_repo
                 .list_by_status(TaskStatus::Ready)
                 .await
                 .map(has_existing_task)
                 .unwrap_or(false)
                 || self
+                    .core_deps
                     .task_repo
                     .list_by_status(TaskStatus::Running)
                     .await
                     .map(has_existing_task)
                     .unwrap_or(false)
                 || self
+                    .core_deps
                     .task_repo
                     .list_by_status(TaskStatus::Pending)
                     .await
@@ -888,7 +894,7 @@ where
                 // Determine parent_id and context for the specialist task.
                 // If the conflict's task has a parent, this is a feature branch merge-back.
                 let (specialist_parent_id, conflict_context) = {
-                    let conflict_task = self.task_repo.get(conflict.task_id).await.ok().flatten();
+                    let conflict_task = self.core_deps.task_repo.get(conflict.task_id).await.ok().flatten();
                     if let Some(ref ct) = conflict_task {
                         if ct.parent_id.is_some() {
                             let root_id = self.find_root_ancestor(conflict.task_id).await;
@@ -896,6 +902,7 @@ where
                             // the specialist task under it — that would be rejected by
                             // the workflow subtask guard. Create it as a top-level task.
                             let root_is_workflow = self
+                                .core_deps
                                 .task_repo
                                 .get(root_id)
                                 .await

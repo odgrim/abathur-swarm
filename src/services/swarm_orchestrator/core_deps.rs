@@ -18,19 +18,17 @@ use super::types::SwarmConfig;
 /// subsystems. Field access is intentional and direct (no accessors); these
 /// fields are read constantly and adding accessors would add noise without
 /// adding safety.
-// dead_code: introduced in T11 step 1; field access lands in step 7.
-#[allow(dead_code)]
-pub(super) struct CoreDeps<G, T, W, A>
+pub(crate) struct CoreDeps<G, T, W, A>
 where
     G: GoalRepository + 'static,
     T: TaskRepository + 'static,
     W: WorktreeRepository + 'static,
     A: AgentRepository + 'static,
 {
-    pub(super) goal_repo: Arc<G>,
-    pub(super) task_repo: Arc<T>,
-    pub(super) worktree_repo: Arc<W>,
-    pub(super) agent_repo: Arc<A>,
-    pub(super) substrate: Arc<dyn Substrate>,
-    pub(super) config: SwarmConfig,
+    pub(crate) goal_repo: Arc<G>,
+    pub(crate) task_repo: Arc<T>,
+    pub(crate) worktree_repo: Arc<W>,
+    pub(crate) agent_repo: Arc<A>,
+    pub(crate) substrate: Arc<dyn Substrate>,
+    pub(crate) config: SwarmConfig,
 }

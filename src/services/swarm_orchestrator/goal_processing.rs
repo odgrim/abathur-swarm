@@ -91,8 +91,9 @@ where
     ) -> DomainResult<()> {
         // Get ready tasks and spawn agents for them
         let ready_tasks = self
+            .core_deps
             .task_repo
-            .get_ready_tasks(self.config.max_agents)
+            .get_ready_tasks(self.core_deps.config.max_agents)
             .await?;
 
         for task in &ready_tasks {
@@ -109,8 +110,9 @@ where
         already_spawned: &std::collections::HashSet<uuid::Uuid>,
     ) -> DomainResult<()> {
         let ready_tasks = self
+            .core_deps
             .task_repo
-            .get_ready_tasks(self.config.max_agents)
+            .get_ready_tasks(self.core_deps.config.max_agents)
             .await?;
 
         for task in &ready_tasks {
@@ -137,9 +139,9 @@ where
 
         // Build the pre-spawn context. Repos are coerced to trait objects so
         // middleware can operate without being generic over the orchestrator.
-        let task_repo: Arc<dyn crate::domain::ports::TaskRepository> = self.task_repo.clone();
-        let agent_repo: Arc<dyn crate::domain::ports::AgentRepository> = self.agent_repo.clone();
-        let goal_repo: Arc<dyn crate::domain::ports::GoalRepository> = self.goal_repo.clone();
+        let task_repo: Arc<dyn crate::domain::ports::TaskRepository> = self.core_deps.task_repo.clone();
+        let agent_repo: Arc<dyn crate::domain::ports::AgentRepository> = self.core_deps.agent_repo.clone();
+        let goal_repo: Arc<dyn crate::domain::ports::GoalRepository> = self.core_deps.goal_repo.clone();
 
         let mut ctx = PreSpawnContext {
             task: task.clone(),
@@ -153,7 +155,7 @@ where
             cost_window_service: self.advanced_services.cost_window_service.clone(),
             budget_tracker: self.advanced_services.budget_tracker.clone(),
             agent_semaphore: self.runtime_state.agent_semaphore.clone(),
-            max_agents: self.config.max_agents,
+            max_agents: self.core_deps.config.max_agents,
             federation_priority_bumps: 0,
         };
 
@@ -196,7 +198,7 @@ where
             // Atomically claim the task (Ready→Running) BEFORE spawning.
             // This prevents TOCTOU races where multiple poll cycles see the
             // same Ready task and spawn duplicate agents.
-            match self.task_repo.claim_task_atomic(task.id, &agent_type).await {
+            match self.core_deps.task_repo.claim_task_atomic(task.id, &agent_type).await {
                 Ok(None) => {
                     // Task was already claimed by another cycle — nothing to do
                     tracing::debug!("Task {} already claimed, skipping spawn", task.id);
@@ -236,7 +238,7 @@ where
             // Resolve agent template metadata (capabilities, CLI tools,
             // read-only role) via AgentPreparationService.
             let agent_repo_dyn: Arc<dyn crate::domain::ports::AgentRepository> =
-                self.agent_repo.clone();
+                self.core_deps.agent_repo.clone();
             let agent_prep = AgentPreparationService::new(agent_repo_dyn);
             let agent_meta = agent_prep.prepare_agent(&agent_type).await?;
             let template_version = agent_meta.version;
@@ -245,7 +247,7 @@ where
             let is_read_only_role = agent_meta.is_read_only_role;
 
             // Register agent capabilities with A2A gateway if configured
-            if self.config.mcp_servers.a2a_gateway.is_some()
+            if self.core_deps.config.mcp_servers.a2a_gateway.is_some()
                 && let Err(e) = self
                     .register_agent_capabilities(&agent_type, agent_meta.capabilities.clone())
                     .await
@@ -276,7 +278,7 @@ where
             // startup from the resolved config; see `cli::commands::swarm`.
             // If it is missing here, the orchestrator was misconfigured — fail the
             // task with a structured event rather than crashing the whole swarm.
-            let task_workflow = match self.config.workflow_template.clone() {
+            let task_workflow = match self.core_deps.config.workflow_template.clone() {
                 Some(wf) => wf,
                 None => {
                     let error_msg =
@@ -288,11 +290,11 @@ where
                         error_msg,
                     );
 
-                    if let Ok(Some(mut t)) = self.task_repo.get(task.id).await {
+                    if let Ok(Some(mut t)) = self.core_deps.task_repo.get(task.id).await {
                         if !t.status.is_terminal() {
                             let _ = t.transition_to(TaskStatus::Failed);
                         }
-                        let _ = self.task_repo.update(&t).await;
+                        let _ = self.core_deps.task_repo.update(&t).await;
                     }
 
                     self.subsystem_services.audit_log.log(
@@ -347,7 +349,7 @@ where
             // Load goal/memory/intent-gap context and assemble the final task
             // description via TaskContextService.
             let context_svc =
-                TaskContextService::new(self.goal_repo.clone(), self.advanced_services.memory_repo.clone());
+                TaskContextService::new(self.core_deps.goal_repo.clone(), self.advanced_services.memory_repo.clone());
             let task_context = context_svc.load_task_context(task).await?;
             if let Some(ref goal_ctx) = task_context.goal_context {
                 // Preserve audit-log behaviour for goal-context loading.
@@ -371,7 +373,7 @@ where
             // upgrade rule: stored Direct → Convergent when convergence is
             // enabled AND the agent is write-capable AND non-read-only.
             let mode_resolver =
-                ExecutionModeResolverService::new(self.config.convergence_enabled);
+                ExecutionModeResolverService::new(self.core_deps.config.convergence_enabled);
             let (effective_mode, is_convergent) =
                 mode_resolver.resolve_mode(task.execution_mode.clone(), &agent_meta);
             if effective_mode != task.execution_mode {
@@ -389,7 +391,7 @@ where
                 %agent_type,
                 stored_mode = ?task.execution_mode,
                 effective_mode = ?effective_mode,
-                convergence_enabled = self.config.convergence_enabled,
+                convergence_enabled = self.core_deps.config.convergence_enabled,
                 is_read_only = is_read_only_role,
                 agent_can_write = agent_can_write,
                 will_converge = is_convergent,
@@ -421,7 +423,7 @@ where
                 {
                     75 // Implementation: typical ~25 turns, ceiling 75
                 } else {
-                    self.config.default_max_turns // Fallback to config default
+                    self.core_deps.config.default_max_turns // Fallback to config default
                 }
             };
 
@@ -448,22 +450,22 @@ where
             // main and force PR-only mode so a human must approve before
             // merging.
             let use_merge_queue =
-                self.config.use_merge_queue && self.config.dangerously_skip_permissions;
+                self.core_deps.config.use_merge_queue && self.core_deps.config.dangerously_skip_permissions;
             let prefer_pull_requests =
-                self.config.prefer_pull_requests || !self.config.dangerously_skip_permissions;
+                self.core_deps.config.prefer_pull_requests || !self.core_deps.config.dangerously_skip_permissions;
 
             let exec_cfg = ExecutionConfig {
-                repo_path: self.config.repo_path.clone(),
-                default_base_ref: self.config.default_base_ref.clone(),
+                repo_path: self.core_deps.config.repo_path.clone(),
+                default_base_ref: self.core_deps.config.default_base_ref.clone(),
                 agent_semaphore: self.runtime_state.agent_semaphore.clone(),
                 guardrails: self.subsystem_services.guardrails.clone(),
                 require_commits: agent_can_write && !is_read_only_role,
-                verify_on_completion: self.config.verify_on_completion,
+                verify_on_completion: self.core_deps.config.verify_on_completion,
                 use_merge_queue,
                 prefer_pull_requests,
-                track_evolution: self.config.track_evolution,
+                track_evolution: self.core_deps.config.track_evolution,
                 evolution_loop: self.subsystem_services.evolution_loop.clone(),
-                fetch_on_sync: self.config.fetch_on_sync,
+                fetch_on_sync: self.core_deps.config.fetch_on_sync,
                 output_delivery: task_output_delivery.clone(),
                 merge_request_repo: self.advanced_services.merge_request_repo.clone(),
                 post_completion_chain: self.middleware.post_completion_chain.clone(),
@@ -479,11 +481,11 @@ where
                     Arc::clone(m) as Arc<dyn crate::domain::ports::MemoryRepository>
                 });
             let goal_repo_dyn: Arc<dyn crate::domain::ports::GoalRepository> =
-                self.goal_repo.clone();
+                self.core_deps.goal_repo.clone();
             let task_repo_dyn: Arc<dyn crate::domain::ports::TaskRepository> =
-                self.task_repo.clone();
+                self.core_deps.task_repo.clone();
             let worktree_repo_dyn: Arc<dyn crate::domain::ports::WorktreeRepository> =
-                self.worktree_repo.clone();
+                self.core_deps.worktree_repo.clone();
 
             let params = TaskExecutionParams {
                 task: task.clone(),
@@ -496,12 +498,12 @@ where
                 max_turns,
                 agent_meta,
                 worktree_path,
-                all_workflows: self.config.all_workflows.clone(),
+                all_workflows: self.core_deps.config.all_workflows.clone(),
                 circuit_scope: scope,
                 agent_unique_id: agent_unique_id.clone(),
                 template_version,
                 agent_type_for_evolution: agent_type.clone(),
-                substrate: self.substrate.clone(),
+                substrate: self.core_deps.substrate.clone(),
                 task_repo: task_repo_dyn,
                 worktree_repo: worktree_repo_dyn,
                 goal_repo: goal_repo_dyn,

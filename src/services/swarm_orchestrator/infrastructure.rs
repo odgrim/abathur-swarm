@@ -51,7 +51,7 @@ where
 
         // Check database file exists — use absolute path consistent with agent MCP configs
         let db_path = std::env::current_dir()
-            .unwrap_or_else(|_| self.config.repo_path.clone())
+            .unwrap_or_else(|_| self.core_deps.config.repo_path.clone())
             .join(".abathur")
             .join("abathur.db");
         if !db_path.exists() {
@@ -63,7 +63,7 @@ where
         }
 
         // Health-check any HTTP servers that are still configured (e.g., A2A gateway)
-        if let Some(ref a2a_url) = self.config.mcp_servers.a2a_gateway {
+        if let Some(ref a2a_url) = self.core_deps.config.mcp_servers.a2a_gateway {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
@@ -141,14 +141,14 @@ where
     /// Returns the verification result if verification is enabled and passes.
     /// Uses lightweight config (no code checks) - code quality is verified at merge time.
     pub async fn verify_task(&self, task_id: Uuid) -> DomainResult<Option<VerificationResult>> {
-        if !self.config.verify_on_completion {
+        if !self.core_deps.config.verify_on_completion {
             return Ok(None);
         }
 
         let verifier = IntegrationVerifierService::new(
-            self.task_repo.clone(),
-            self.goal_repo.clone(),
-            self.worktree_repo.clone(),
+            self.core_deps.task_repo.clone(),
+            self.core_deps.goal_repo.clone(),
+            self.core_deps.worktree_repo.clone(),
             VerifierConfig {
                 run_tests: false,
                 run_lint: false,
@@ -236,14 +236,14 @@ where
             .await;
 
         let cold_start_config = ColdStartConfig {
-            project_root: self.config.repo_path.clone(),
+            project_root: self.core_deps.config.repo_path.clone(),
             use_llm_analysis: self.advanced_services.overmind.is_some(),
             ..Default::default()
         };
         let cold_start_service = ColdStartService::new(memory_service, cold_start_config)
             .with_event_bus(self.subsystem_services.event_bus.clone());
         let cold_start_service = if self.advanced_services.overmind.is_some() {
-            cold_start_service.with_substrate(self.substrate.clone())
+            cold_start_service.with_substrate(self.core_deps.substrate.clone())
         } else {
             cold_start_service
         };
@@ -271,12 +271,12 @@ where
     /// operations will individually short-circuit when they detect no remote,
     /// but this startup check makes the situation immediately visible.
     pub fn check_remote_at_startup(&self) {
-        if !crate::services::worktree_service::check_remote_available(&self.config.repo_path) {
+        if !crate::services::worktree_service::check_remote_available(&self.core_deps.config.repo_path) {
             tracing::warn!(
-                path = %self.config.repo_path.display(),
+                path = %self.core_deps.config.repo_path.display(),
                 "No 'origin' remote configured for repository at {} — \
                  operating in local-only mode. Remote sync and push operations will be skipped.",
-                self.config.repo_path.display()
+                self.core_deps.config.repo_path.display()
             );
         }
     }
@@ -335,7 +335,7 @@ where
         let _ = task.transition_to(TaskStatus::Ready);
         let _ = task.transition_to(TaskStatus::Running);
 
-        self.task_repo.create(&task).await?;
+        self.core_deps.task_repo.create(&task).await?;
 
         // Build MCP stdio config so the triage agent can access memory and task tools.
         // Same pattern as goal_processing.rs — uses absolute paths so the MCP server
@@ -344,7 +344,7 @@ where
         let abathur_exe =
             std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("abathur"));
         let db_path = std::env::current_dir()
-            .unwrap_or_else(|_| self.config.repo_path.clone())
+            .unwrap_or_else(|_| self.core_deps.config.repo_path.clone())
             .join(".abathur")
             .join("abathur.db");
         let mcp_config = serde_json::json!({
@@ -373,13 +373,13 @@ where
         )
         .with_config(crate::domain::models::SubstrateConfig {
             max_turns: 12,
-            working_dir: Some(self.config.repo_path.to_string_lossy().to_string()),
+            working_dir: Some(self.core_deps.config.repo_path.to_string_lossy().to_string()),
             model: triage_template.preferred_model.clone(),
             mcp_servers: vec![mcp_config.to_string()],
             ..Default::default()
         });
 
-        match self.substrate.execute(request).await {
+        match self.core_deps.substrate.execute(request).await {
             Ok(session) if session.status == SessionStatus::Completed => {
                 tracing::info!(
                     session_id = %session.id,
@@ -388,7 +388,7 @@ where
                     "Startup codebase triage completed"
                 );
                 let _ = task.transition_to(TaskStatus::Complete);
-                let _ = self.task_repo.update(&task).await;
+                let _ = self.core_deps.task_repo.update(&task).await;
                 Ok(true)
             }
             Ok(session) => {
@@ -401,7 +401,7 @@ where
                     "Startup codebase triage agent did not complete: {}", error
                 );
                 let _ = task.transition_to(TaskStatus::Failed);
-                let _ = self.task_repo.update(&task).await;
+                let _ = self.core_deps.task_repo.update(&task).await;
                 Err(crate::domain::errors::DomainError::SubstrateError(format!(
                     "Triage agent did not complete: {}",
                     error
@@ -410,7 +410,7 @@ where
             Err(e) => {
                 tracing::warn!("Startup codebase triage failed: {}", e);
                 let _ = task.transition_to(TaskStatus::Failed);
-                let _ = self.task_repo.update(&task).await;
+                let _ = self.core_deps.task_repo.update(&task).await;
                 Err(e)
             }
         }
@@ -747,7 +747,7 @@ where
     pub(super) async fn create_worktree_for_task(&self, task_id: Uuid) -> DomainResult<String> {
         // Fast path: if a worktree already exists for this task (retry scenario),
         // reuse it instead of trying to create a duplicate.
-        if let Ok(Some(existing)) = self.worktree_repo.get_by_task(task_id).await {
+        if let Ok(Some(existing)) = self.core_deps.worktree_repo.get_by_task(task_id).await {
             tracing::info!(
                 "Reusing existing worktree for task {} at {}",
                 task_id,
@@ -757,10 +757,10 @@ where
         }
 
         // If this is a subtask, branch from the root ancestor's feature branch
-        let parent_base_ref = if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+        let parent_base_ref = if let Ok(Some(task)) = self.core_deps.task_repo.get(task_id).await {
             if let Some(parent_id) = task.parent_id {
                 let root_id = self.find_root_ancestor(parent_id).await;
-                match self.worktree_repo.get_by_task(root_id).await {
+                match self.core_deps.worktree_repo.get_by_task(root_id).await {
                     Ok(Some(root_wt)) if !root_wt.status.is_terminal() => {
                         Some(root_wt.branch.clone())
                     }
@@ -774,14 +774,14 @@ where
         };
 
         let worktree_config = WorktreeConfig {
-            base_path: self.config.worktree_base_path.clone(),
-            repo_path: self.config.repo_path.clone(),
-            default_base_ref: self.config.default_base_ref.clone(),
+            base_path: self.core_deps.config.worktree_base_path.clone(),
+            repo_path: self.core_deps.config.repo_path.clone(),
+            default_base_ref: self.core_deps.config.default_base_ref.clone(),
             auto_cleanup: true,
-            fetch_on_sync: self.config.fetch_on_sync,
+            fetch_on_sync: self.core_deps.config.fetch_on_sync,
         };
 
-        let worktree_service = WorktreeService::new(self.worktree_repo.clone(), worktree_config);
+        let worktree_service = WorktreeService::new(self.core_deps.worktree_repo.clone(), worktree_config);
 
         // Pass parent branch as base_ref when available
         let worktree = worktree_service
@@ -823,7 +823,7 @@ where
         // When worktrees are disabled globally, downgrade Worktree requests
         // so agents work directly in the swarm's working directory.
         let effective_kind =
-            if !self.config.use_worktrees && workspace_kind == WorkspaceKind::Worktree {
+            if !self.core_deps.config.use_worktrees && workspace_kind == WorkspaceKind::Worktree {
                 tracing::info!(
                     "Worktrees disabled — task {} will use swarm working directory",
                     task_id
@@ -874,7 +874,7 @@ where
 
     /// Find the root ancestor of a task using a single recursive CTE query.
     pub(super) async fn find_root_ancestor(&self, task_id: Uuid) -> Uuid {
-        self.task_repo
+        self.core_deps.task_repo
             .find_root_task_id(task_id)
             .await
             .unwrap_or(task_id)
@@ -885,11 +885,12 @@ where
         &self,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let task_counts = self.task_repo.count_by_status().await?;
-        let active_worktrees = self.worktree_repo.list_active().await?.len();
+        let task_counts = self.core_deps.task_repo.count_by_status().await?;
+        let active_worktrees = self.core_deps.worktree_repo.list_active().await?.len();
 
         let stats = SwarmStats {
             active_goals: self
+                .core_deps
                 .goal_repo
                 .list(crate::domain::ports::GoalFilter {
                     status: Some(GoalStatus::Active),
@@ -902,7 +903,7 @@ where
             running_tasks: *task_counts.get(&TaskStatus::Running).unwrap_or(&0) as usize,
             completed_tasks: *task_counts.get(&TaskStatus::Complete).unwrap_or(&0) as usize,
             failed_tasks: *task_counts.get(&TaskStatus::Failed).unwrap_or(&0) as usize,
-            active_agents: self.config.max_agents
+            active_agents: self.core_deps.config.max_agents
                 - self.runtime_state.agent_semaphore.available_permits(),
             active_worktrees,
             total_tokens_used: self.runtime_state.total_tokens.load(Ordering::Relaxed),
@@ -960,6 +961,7 @@ where
         // 1. Fail stale Running tasks (started_at older than threshold).
         //    On restart, any task that was Running has lost its agent.
         let running_tasks = self
+            .core_deps
             .task_repo
             .list(crate::domain::ports::TaskFilter {
                 status: Some(TaskStatus::Running),
@@ -995,7 +997,7 @@ where
                         );
                         let mut task = task.clone();
                         task.status = TaskStatus::Failed;
-                        if let Err(e) = self.task_repo.update(&task).await {
+                        if let Err(e) = self.core_deps.task_repo.update(&task).await {
                             tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                         } else {
                             corrections += 1;
@@ -1005,7 +1007,7 @@ where
             } else {
                 let mut task = task.clone();
                 task.status = TaskStatus::Failed;
-                if let Err(e) = self.task_repo.update(&task).await {
+                if let Err(e) = self.core_deps.task_repo.update(&task).await {
                     tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                 } else {
                     corrections += 1;
@@ -1015,6 +1017,7 @@ where
 
         // 2. Check Ready tasks with incomplete dependencies -> move back to Pending
         let ready_tasks = self
+            .core_deps
             .task_repo
             .list(crate::domain::ports::TaskFilter {
                 status: Some(TaskStatus::Ready),
@@ -1026,7 +1029,7 @@ where
             if !task.depends_on.is_empty() {
                 let mut all_deps_complete = true;
                 for dep_id in &task.depends_on {
-                    if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await
+                    if let Ok(Some(dep)) = self.core_deps.task_repo.get(*dep_id).await
                         && dep.status != TaskStatus::Complete
                     {
                         all_deps_complete = false;
@@ -1059,7 +1062,7 @@ where
                                 );
                                 let mut task = task.clone();
                                 task.status = TaskStatus::Pending;
-                                if let Err(e) = self.task_repo.update(&task).await {
+                                if let Err(e) = self.core_deps.task_repo.update(&task).await {
                                     tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                                 } else {
                                     corrections += 1;
@@ -1069,7 +1072,7 @@ where
                     } else {
                         let mut task = task.clone();
                         task.status = TaskStatus::Pending;
-                        if let Err(e) = self.task_repo.update(&task).await {
+                        if let Err(e) = self.core_deps.task_repo.update(&task).await {
                             tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                         } else {
                             corrections += 1;
@@ -1081,6 +1084,7 @@ where
 
         // 3. Check Pending tasks with all dependencies complete -> transition to Ready
         let pending_tasks = self
+            .core_deps
             .task_repo
             .list(crate::domain::ports::TaskFilter {
                 status: Some(TaskStatus::Pending),
@@ -1094,7 +1098,7 @@ where
             } else {
                 let mut all_complete = true;
                 for dep_id in &task.depends_on {
-                    if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await
+                    if let Ok(Some(dep)) = self.core_deps.task_repo.get(*dep_id).await
                         && dep.status != TaskStatus::Complete
                     {
                         all_complete = false;
@@ -1130,7 +1134,7 @@ where
                             );
                             let mut task = task.clone();
                             task.status = TaskStatus::Ready;
-                            if let Err(e) = self.task_repo.update(&task).await {
+                            if let Err(e) = self.core_deps.task_repo.update(&task).await {
                                 tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                             } else {
                                 corrections += 1;
@@ -1140,7 +1144,7 @@ where
                 } else {
                     let mut task = task.clone();
                     task.status = TaskStatus::Ready;
-                    if let Err(e) = self.task_repo.update(&task).await {
+                    if let Err(e) = self.core_deps.task_repo.update(&task).await {
                         tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                     } else {
                         corrections += 1;
@@ -1159,6 +1163,7 @@ where
         //    Inconsistent states (e.g. Validating + PhaseReady) are always fixed
         //    regardless of staleness, since they represent deadlocks.
         let validating_tasks = self
+            .core_deps
             .task_repo
             .list(crate::domain::ports::TaskFilter {
                 status: Some(TaskStatus::Validating),
@@ -1225,7 +1230,7 @@ where
                                 );
                                 let mut task = task.clone();
                                 task.status = target_status;
-                                if let Err(e) = self.task_repo.update(&task).await {
+                                if let Err(e) = self.core_deps.task_repo.update(&task).await {
                                     tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                                 } else {
                                     corrections += 1;
@@ -1235,7 +1240,7 @@ where
                     } else {
                         let mut task = task.clone();
                         task.status = target_status;
-                        if let Err(e) = self.task_repo.update(&task).await {
+                        if let Err(e) = self.core_deps.task_repo.update(&task).await {
                             tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                         } else {
                             corrections += 1;
@@ -1272,7 +1277,7 @@ where
                                 );
                                 let mut task = task.clone();
                                 task.status = TaskStatus::Running;
-                                if let Err(e) = self.task_repo.update(&task).await {
+                                if let Err(e) = self.core_deps.task_repo.update(&task).await {
                                     tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                                 } else {
                                     corrections += 1;
@@ -1282,7 +1287,7 @@ where
                     } else {
                         let mut task = task.clone();
                         task.status = TaskStatus::Running;
-                        if let Err(e) = self.task_repo.update(&task).await {
+                        if let Err(e) = self.core_deps.task_repo.update(&task).await {
                             tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                         } else {
                             corrections += 1;
@@ -1318,7 +1323,7 @@ where
                                 );
                                 let mut task = task.clone();
                                 task.status = TaskStatus::Failed;
-                                if let Err(e) = self.task_repo.update(&task).await {
+                                if let Err(e) = self.core_deps.task_repo.update(&task).await {
                                     tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                                 } else {
                                     corrections += 1;
@@ -1328,7 +1333,7 @@ where
                     } else {
                         let mut task = task.clone();
                         task.status = TaskStatus::Failed;
-                        if let Err(e) = self.task_repo.update(&task).await {
+                        if let Err(e) = self.core_deps.task_repo.update(&task).await {
                             tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                         } else {
                             corrections += 1;
@@ -1371,7 +1376,7 @@ where
                                 );
                                 let mut task = task.clone();
                                 task.status = TaskStatus::Running;
-                                if let Err(e) = self.task_repo.update(&task).await {
+                                if let Err(e) = self.core_deps.task_repo.update(&task).await {
                                     tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                                 } else {
                                     corrections += 1;
@@ -1381,7 +1386,7 @@ where
                     } else {
                         let mut task = task.clone();
                         task.status = TaskStatus::Running;
-                        if let Err(e) = self.task_repo.update(&task).await {
+                        if let Err(e) = self.core_deps.task_repo.update(&task).await {
                             tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                         } else {
                             corrections += 1;
