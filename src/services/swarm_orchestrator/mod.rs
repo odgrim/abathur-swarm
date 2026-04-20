@@ -11,15 +11,20 @@
 //! - **helpers**: Utility functions for spawned tasks (auto-commit, post-completion)
 
 mod agent_lifecycle;
+pub(crate) mod agent_prep;
 pub(crate) mod convergent_execution;
 mod event_handling;
+pub(crate) mod exec_mode;
 mod goal_processing;
 mod handler_registration;
 pub(crate) mod helpers;
 mod infrastructure;
 pub mod middleware;
 mod specialist_triggers;
+pub(crate) mod task_context;
+pub(crate) mod task_exec;
 pub mod types;
+pub(crate) mod workspace;
 
 // Re-export public types
 pub use types::{
