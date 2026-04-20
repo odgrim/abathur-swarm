@@ -10,9 +10,12 @@
 //! - **infrastructure**: Cold start, decay daemon, MCP servers, stats, verification
 //! - **helpers**: Utility functions for spawned tasks (auto-commit, post-completion)
 
+mod advanced_services;
 mod agent_lifecycle;
 pub(crate) mod agent_prep;
 pub(crate) mod convergent_execution;
+mod core_deps;
+mod daemon_handles;
 mod event_handling;
 pub(crate) mod exec_mode;
 mod goal_processing;
@@ -20,11 +23,17 @@ mod handler_registration;
 pub(crate) mod helpers;
 mod infrastructure;
 pub mod middleware;
+mod middleware_bundle;
+mod runtime_state;
 mod specialist_triggers;
+mod subsystem_services;
 pub(crate) mod task_context;
 pub(crate) mod task_exec;
 pub mod types;
 pub(crate) mod workspace;
+
+// Step-1 of T11: sub-struct types are introduced as private modules above.
+// Use-imports are added in step 2 as the constructor begins populating them.
 
 // Re-export public types
 pub use types::{
