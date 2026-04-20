@@ -18,7 +18,8 @@ use crate::domain::models::convergence::{
 };
 use crate::domain::models::intent_verification::IntentVerificationResult;
 use crate::domain::models::task::{Complexity, ExecutionMode, Task, TaskPriority};
-use crate::domain::ports::{StrategyStats, TrajectoryRepository};
+use crate::domain::models::{Memory, MemoryQuery, MemoryTier};
+use crate::domain::ports::{MemoryRepository, StrategyStats, TrajectoryRepository};
 use crate::services::swarm_orchestrator::types::SwarmConfig;
 
 /// Convert a Task into a TaskSubmission for the convergence engine.
@@ -396,6 +397,69 @@ impl TrajectoryRepository for DynTrajectoryRepository {
         self.0
             .get_similar_trajectories(description, tags, limit)
             .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DynMemoryRepository -- Sized wrapper for trait objects
+// ---------------------------------------------------------------------------
+
+/// A sized wrapper around `Arc<dyn MemoryRepository>` that implements
+/// `MemoryRepository`. The convergence engine requires `M: MemoryRepository`
+/// to be `Sized`; this newtype bridges the gap.
+pub struct DynMemoryRepository(pub Arc<dyn MemoryRepository>);
+
+#[async_trait]
+impl MemoryRepository for DynMemoryRepository {
+    async fn store(&self, memory: &Memory) -> DomainResult<()> {
+        self.0.store(memory).await
+    }
+    async fn get(&self, id: Uuid) -> DomainResult<Option<Memory>> {
+        self.0.get(id).await
+    }
+    async fn get_by_key(&self, key: &str, namespace: &str) -> DomainResult<Option<Memory>> {
+        self.0.get_by_key(key, namespace).await
+    }
+    async fn update(&self, memory: &Memory) -> DomainResult<()> {
+        self.0.update(memory).await
+    }
+    async fn delete(&self, id: Uuid) -> DomainResult<()> {
+        self.0.delete(id).await
+    }
+    async fn query(&self, query: MemoryQuery) -> DomainResult<Vec<Memory>> {
+        self.0.query(query).await
+    }
+    async fn search(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: usize,
+    ) -> DomainResult<Vec<Memory>> {
+        self.0.search(query, namespace, limit).await
+    }
+    async fn list_by_tier(&self, tier: MemoryTier) -> DomainResult<Vec<Memory>> {
+        self.0.list_by_tier(tier).await
+    }
+    async fn list_by_namespace(&self, namespace: &str) -> DomainResult<Vec<Memory>> {
+        self.0.list_by_namespace(namespace).await
+    }
+    async fn get_expired(&self) -> DomainResult<Vec<Memory>> {
+        self.0.get_expired().await
+    }
+    async fn prune_expired(&self) -> DomainResult<u64> {
+        self.0.prune_expired().await
+    }
+    async fn get_decayed(&self, threshold: f32) -> DomainResult<Vec<Memory>> {
+        self.0.get_decayed(threshold).await
+    }
+    async fn get_for_task(&self, task_id: Uuid) -> DomainResult<Vec<Memory>> {
+        self.0.get_for_task(task_id).await
+    }
+    async fn get_for_goal(&self, goal_id: Uuid) -> DomainResult<Vec<Memory>> {
+        self.0.get_for_goal(goal_id).await
+    }
+    async fn count_by_tier(&self) -> DomainResult<HashMap<MemoryTier, u64>> {
+        self.0.count_by_tier().await
     }
 }
 

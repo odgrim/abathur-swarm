@@ -287,12 +287,12 @@ pub(super) trait TaskHintsLoader: Send + Sync {
     async fn load_hints(&self, task_id: Uuid) -> Vec<String>;
 }
 
-struct TaskRepoHintsLoader<T: TaskRepository> {
+struct TaskRepoHintsLoader<T: TaskRepository + ?Sized> {
     repo: Arc<T>,
 }
 
 #[async_trait]
-impl<T: TaskRepository + 'static> TaskHintsLoader for TaskRepoHintsLoader<T> {
+impl<T: TaskRepository + ?Sized + 'static> TaskHintsLoader for TaskRepoHintsLoader<T> {
     async fn load_hints(&self, task_id: Uuid) -> Vec<String> {
         match self.repo.get(task_id).await {
             Ok(Some(t)) => t.context.hints.clone(),
@@ -767,7 +767,7 @@ pub async fn run_convergent_execution<T, Tr, M, O>(
     intent_verifier: Arc<dyn ConvergentIntentVerifier>,
 ) -> DomainResult<ConvergentOutcome>
 where
-    T: TaskRepository + 'static,
+    T: TaskRepository + ?Sized + 'static,
     Tr: TrajectoryRepository + 'static,
     M: MemoryRepository + 'static,
     O: OverseerMeasurer + 'static,
@@ -912,7 +912,7 @@ pub async fn run_parallel_convergent_execution<T, Tr, M, O>(
     intent_verifier: Arc<dyn ConvergentIntentVerifier>,
 ) -> DomainResult<ConvergentOutcome>
 where
-    T: TaskRepository + 'static,
+    T: TaskRepository + ?Sized + 'static,
     Tr: TrajectoryRepository + 'static,
     M: MemoryRepository + 'static,
     O: OverseerMeasurer + 'static,
@@ -1261,7 +1261,7 @@ async fn run_convergent_execution_inner<T2, Tr, M, O>(
     intent_verifier: Arc<dyn ConvergentIntentVerifier>,
 ) -> DomainResult<ConvergentOutcome>
 where
-    T2: TaskRepository + 'static,
+    T2: TaskRepository + ?Sized + 'static,
     Tr: TrajectoryRepository + 'static,
     M: MemoryRepository + 'static,
     O: OverseerMeasurer + 'static,
